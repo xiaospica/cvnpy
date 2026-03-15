@@ -1,7 +1,7 @@
 # Tasks
-- [ ] Task 1: 建立 Git 基线与迁移分支
-  - [ ] 确认当前工作树状态并提交“基线备份”commit（仅包含有效代码与文档）
-  - [ ] 创建并切换到迁移分支（例如 `feature/pyqtads-dock`）
+- [x] Task 1: 建立 Git 基线与迁移分支
+  - [x] 确认当前工作树状态并提交“基线备份”commit（仅包含有效代码与文档）
+  - [x] 创建并切换到迁移分支（例如 `feature/pyqtads-dock`）
 
 - [ ] Task 2: 引入 PyQtAds 依赖并完成最小可运行集成
   - [ ] 选择与 `PySide6==6.8.2.1` 兼容的 PyQtAds 包/绑定方式并加入依赖
