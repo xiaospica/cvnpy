@@ -13,9 +13,9 @@ from vnpy.trader.object import (
 from vnpy.trader.utility import load_json, save_json
 
 if TYPE_CHECKING:
-    from .engine import SignalEngine
+    from .engine import SignalEnginePlus
 
-class SignalTemplate(ABC):
+class SignalTemplatePlus(ABC):
     """"""
 
     author: str = ""
@@ -28,7 +28,7 @@ class SignalTemplate(ABC):
         signal_engine: Any,
     ):
         """"""
-        self.signal_engine: "SignalEngine" = signal_engine
+        self.signal_engine: "SignalEnginePlus" = signal_engine
         
         if not self.strategy_name:
             self.strategy_name = self.__class__.__name__
@@ -80,6 +80,15 @@ class SignalTemplate(ABC):
         }
         return strategy_data
 
+    @classmethod
+    def get_class_parameters(cls) -> dict:
+        """
+        Get default parameters dict of strategy class.
+        """
+        class_parameters: dict = {}
+        for name in cls.parameters:
+            class_parameters[name] = getattr(cls, name)
+        return class_parameters
 
     @abstractmethod
     def on_init(self) -> None:
@@ -108,6 +117,18 @@ class SignalTemplate(ABC):
         Callback when timer fired.
         """
         pass
+
+    def on_tick(self, tick: TickData) -> None:
+        """
+        Callback of new tick data update.
+        """
+        return
+
+    def on_bar(self, bar: BarData) -> None:
+        """
+        Callback of new bar data update.
+        """
+        return
 
     def on_order(self, order: OrderData) -> None:
         """

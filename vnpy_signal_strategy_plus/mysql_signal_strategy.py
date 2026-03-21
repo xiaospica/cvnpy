@@ -16,12 +16,12 @@ from vnpy.trader.object import (
 )
 
 from vnpy.trader.constant import Direction, Offset, OrderType, Exchange
-from vnpy_signal_strategy.template import SignalTemplate
-from vnpy_signal_strategy.auto_resubmit import AutoResubmitMixin
+from .template import SignalTemplatePlus
+from .auto_resubmit import AutoResubmitMixinPlus
 
 Base = declarative_base()
 
-class Stock(Base):
+class StockPlus(Base):
     __tablename__ = 'stock_trade'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -33,7 +33,7 @@ class Stock(Base):
     remark = Column(DateTime, nullable=False)  # 下单时间
     processed = Column(Boolean, default=False)
 
-class MySQLSignalStrategy(AutoResubmitMixin, SignalTemplate):
+class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
     """
     MySQL信号轮询策略
     """
@@ -44,16 +44,16 @@ class MySQLSignalStrategy(AutoResubmitMixin, SignalTemplate):
         "db_password", "db_name", "poll_interval"
     ]
     variables = ["last_signal_id"]
+    account_id = ""
+    db_host = ""
+    db_port = 3306
+    db_user = "root"
+    db_password = ""
+    db_name = "mysql"
+    poll_interval = 5
 
     def __init__(self, signal_engine):
         super().__init__(signal_engine)
-        self.account_id = ""
-        self.db_host = ""
-        self.db_port = 3306
-        self.db_user = "root"
-        self.db_password = ""
-        self.db_name = "mysql"
-        self.poll_interval = 5
         
         self.last_signal_id = 0
         self.engine = None
@@ -110,6 +110,12 @@ class MySQLSignalStrategy(AutoResubmitMixin, SignalTemplate):
         #     self.poll_thread.join()
         #     self.poll_thread = None
 
+    def on_tick(self, tick: TickData) -> None:
+        pass
+
+    def on_bar(self, bar: BarData) -> None:
+        self.write_log(f'收到K线: {bar.datetime} {bar.close}')
+
     def on_order(self, order: OrderData) -> None:
         """接收订单回报并交由重挂混入层处理。"""
         self.on_order_for_resubmit(order)
@@ -128,15 +134,17 @@ class MySQLSignalStrategy(AutoResubmitMixin, SignalTemplate):
             try:
                 session = self.Session()
                 # Query new signals for this strategy
-                query = session.query(Stock).filter(
-                    Stock.stg == self.strategy_name,
-                    Stock.id > self.last_signal_id,
-                    # Stock.processed == False
-                ).order_by(Stock.id.asc())
+                query = session.query(StockPlus).filter(
+                    StockPlus.stg == self.strategy_name,
+                    StockPlus.id > self.last_signal_id,
+                    # StockPlus.processed == False
+                ).order_by(StockPlus.id.asc())
                 
                 signals = query.all()
                 
                 for signal in signals:
+                    if not self.active:
+                        break
                     self.process_signal(signal)
                     self.last_signal_id = max(self.last_signal_id, signal.id)
                     # Add a small delay to allow position update if in simulation or rapid trading
@@ -146,11 +154,12 @@ class MySQLSignalStrategy(AutoResubmitMixin, SignalTemplate):
                 self.put_event()
                 
             except Exception as e:
-                self.write_log(f"轮询出错: {e}")
+                import traceback
+                self.write_log(f"轮询出错: {e}\n{traceback.format_exc()}")
             
             time.sleep(self.poll_interval)
 
-    def process_signal(self, signal: Stock):
+    def process_signal(self, signal: StockPlus):
         """处理信号"""
         self.write_log(f"收到信号: {signal.id} {signal.code} {signal.pct} {signal.type} {signal.remark}")
         
@@ -282,7 +291,7 @@ class MySQLSignalStrategy(AutoResubmitMixin, SignalTemplate):
         if price <= 0:
             order_type = OrderType.MARKET
             price = 0
-            
+
         vt_orderids = self.send_order(
             vt_symbol=vt_symbol,
             direction=direction,

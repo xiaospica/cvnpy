@@ -1,0 +1,1 @@
+python C:\veighna_studio\Tools\i18n\msgfmt.py -o vnpy_signal_strategy_plus_backtester\locale\en\LC_MESSAGES\vnpy_signal_backtester.mo vnpy_signal_strategy_plus_backtester\locale\en\LC_MESSAGES\vnpy_ctabacktester

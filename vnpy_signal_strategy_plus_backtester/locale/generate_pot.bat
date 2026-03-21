@@ -1,0 +1,1 @@
+python C:\veighna_studio\Tools\i18n\pygettext.py -o vnpy_signal_strategy_plus_backtester\locale\vnpy_signal_backtester.pot  vnpy_signal_strategy_plus_backtester\*.py vnpy_signal_strategy_plus_backtester\ui\*.py

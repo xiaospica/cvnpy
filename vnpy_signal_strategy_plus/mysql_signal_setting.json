@@ -1,0 +1,11 @@
+{
+    "multistrategy-v5.2.1": {
+        "account_id": "test_id",
+        "db_host": "106.54.63.204",
+        "db_port": 3306,
+        "db_user": "root",
+        "db_password": "xw$10062127",
+        "db_name": "mysql",
+        "poll_interval": 5
+    }
+}

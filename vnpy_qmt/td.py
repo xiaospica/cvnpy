@@ -37,6 +37,7 @@ class TD(XtQuantTraderCallback):
         self.inited = False
         self.orders: Dict[str, OrderData] = {}
         self.traders: Dict[str, TradeData] = {}
+        self.order_submit_time: Dict[str, datetime.datetime] = {}
 
     def connect(self, settings: dict):
         account = settings['交易账号']
@@ -66,6 +67,7 @@ class TD(XtQuantTraderCallback):
 
     def send_order(self, req: OrderRequest):
         vn_oid = self.get_order_remark()
+        now = datetime.datetime.now()
         seq = self.trader.order_stock_async(
             account=self.account,
             stock_code=to_qmt_code(symbol=req.symbol, exchange=req.exchange),
@@ -84,14 +86,19 @@ class TD(XtQuantTraderCallback):
                           offset=req.offset,
                           volume=req.volume,
                           price=req.price,
-                          status=Status.SUBMITTING)
+                          status=Status.SUBMITTING,
+                          datetime=now)
         self.orders[order.orderid] = order
+        self.order_submit_time[order.orderid] = now
         return order.vt_orderid
 
     def cancel_order(self, order_id):
         order = self.orders.get(order_id)
         if order is None:
             return 
+        if not order.reference:
+            self.write_log(f"撤单失败：订单未回填柜台号 {order.orderid}")
+            return
         return self.trader.cancel_order_stock_async(account=self.account, order_id=order.reference)
 
     def query_account(self):
@@ -152,6 +159,10 @@ class TD(XtQuantTraderCallback):
         if vn_order.status == Status.REJECTED:
             self.write_log(f'【拒单】 {order.status_msg}')
         self.orders[vn_order.orderid] = vn_order
+        if vn_order.orderid not in self.order_submit_time and vn_order.datetime:
+            self.order_submit_time[vn_order.orderid] = vn_order.datetime
+        if vn_order.status in [Status.ALLTRADED, Status.CANCELLED, Status.REJECTED]:
+            self.order_submit_time.pop(vn_order.orderid, None)
         self.gateway.on_order(vn_order)
 
     def on_stock_position(self, position: XtPosition):
@@ -210,6 +221,7 @@ class TD(XtQuantTraderCallback):
         if old_order:
             old_order.status = Status.REJECTED
             self.gateway.on_order(old_order)
+            self.order_submit_time.pop(vn_oid, None)
 
     def on_order_stock_async_response(self, response: XtOrderResponse):
         self.write_log(f'下单成功 {response.order_id} {response.order_remark} {response.strategy_name}')
@@ -219,6 +231,10 @@ class TD(XtQuantTraderCallback):
                 old_order.status = Status.REJECTED
                 self.write_log(f'下单失败 {response.order_remark} 原因： {response.error_msg}')
                 self.gateway.on_order(old_order)
+                self.order_submit_time.pop(response.order_remark, None)
+            else:
+                if response.order_id:
+                    old_order.reference = response.order_id
 
     def on_cancel_order_stock_async_response(self, response: XtCancelOrderResponse):
         self.write_log(f'撤单结果： {response.cancel_result}')

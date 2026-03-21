@@ -23,6 +23,12 @@ dist
 # VeighNa
 .vntrader
 
+# Config files (ignore actual config, keep examples)
+config/myapp.ini
+config/*.ini
+!config/*.ini.example
+!config/myapp.ini.example
+
 # Visual Studio intermediate files
 *.exp
 *.iobj

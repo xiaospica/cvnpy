@@ -10,7 +10,7 @@ from .utility import load_json
 
 SETTINGS: dict = {
     "font.family": "微软雅黑",
-    "font.size": 12,
+    "font.size": 9,
 
     "log.active": True,
     "log.level": INFO,

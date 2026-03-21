@@ -1,0 +1,23 @@
+# VeighNa Trader Configuration File
+# This is an example configuration file for window settings and other preferences
+# Copy this file to myapp.ini and modify as needed
+
+# Window layout settings
+[default]
+# Default window geometry and state will be saved here
+geometry=@ByteArray(...)
+state_qt=@ByteArray(...)
+# Dock visibility settings in JSON format (automatically managed)
+dock_visibility={"交易": true, "行情": true, "资金": true, "活动": true, "持仓": true, "日志": true, "委托": true, "成交": true}
+
+# Custom window layout
+[custom]
+# Custom window geometry and state will be saved here
+geometry=@ByteArray(...)
+state_qt=@ByteArray(...)
+# Dock visibility settings in JSON format (automatically managed)
+dock_visibility={"交易": true, "行情": true, "资金": true, "活动": true, "持仓": true, "日志": true, "委托": true, "成交": true}
+
+# Additional settings can be added here
+# [other_settings]
+# key=value
