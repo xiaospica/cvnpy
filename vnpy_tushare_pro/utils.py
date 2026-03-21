@@ -8,6 +8,39 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Optional, Any
 from loguru import logger
+import threading
+from concurrent.futures.thread import _worker
+import weakref
+
+class DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    def _adjust_thread_count(self):
+        def weakref_cb(_, q=self._work_queue):
+            try:
+                q.put(None)
+            except Exception:
+                pass
+        
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            thread_name = f"{self._thread_name_prefix or self}_{num_threads}"
+            
+            # 动态构建参数（兼容所有版本）
+            args = [weakref.ref(self, weakref_cb), self._work_queue]
+            
+            # Python 3.11+ 需要额外参数
+            if hasattr(self, '_initializer'):
+                args.extend([self._initializer, self._initargs])
+            
+            t = threading.Thread(
+                target=self._work_queue._worker if hasattr(self._work_queue, '_worker') 
+                      else __import__('concurrent.futures.thread', fromlist=['_worker'])._worker,
+                args=tuple(args),
+                name=thread_name,
+                daemon=True
+            )
+            t.start()
+            self._threads.add(t)
+            weakref.ref(t, self._threads.remove)
 
 class TushareDataDownloaderEnhanced:
     """
@@ -152,7 +185,7 @@ class TushareDataDownloaderEnhanced:
         logger.info(f"总任务数: {len(tasks)}")
 
         # 使用线程池并发下载
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        with DaemonThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # 提交所有任务
             future_to_task = {
                 executor.submit(self._download_single_data_type, trade_date, data_type): (trade_date, data_type)
@@ -807,7 +840,8 @@ class DataPipelineEnhanced:
                     start_date = "20050101"
                 else:
                     start_date = (pd.Timestamp(max_dt) + pd.Timedelta(days=1)).strftime("%Y%m%d")
-
+            
+            logger.info(f'data update from start_date: {start_date}')
             start_date = start_date or "20050101"
             trade_dates = self.downloader.get_trade_calendars(start_date, end_date)
             if not trade_dates:

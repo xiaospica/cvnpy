@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 from typing import cast
+import time
 
 from vnpy.trader.ui import QtCore, QtWidgets, QtGui
 from vnpy.trader.engine import MainEngine
@@ -15,6 +16,7 @@ from ..engine import (
     TaskFinished,
     TaskProgress,
     TushareProEngine,
+    DATA_DIR
 )
 
 
@@ -157,10 +159,11 @@ class TushareProManager(QtWidgets.QWidget):
         self.event_engine.register(EVENT_TUSHAREPRO_TASK_FINISHED, self.signal_task_finished.emit)
 
     def append_log(self, msg: str) -> None:
-        is_error = "Traceback" in msg or "❌" in msg or "异常" in msg or "失败" in msg
-        color = QtGui.QColor("#D64541") if is_error else QtGui.QColor("#1F1F1F")
-        self.log_monitor.setTextColor(color)
-        self.log_monitor.append(msg)
+        is_error = "Traceback" in msg or "❌" in msg or "异常" in msg or "失败" in msg or "error" in msg
+        if is_error:
+            color = QtGui.QColor("#D64541")
+            self.log_monitor.setTextColor(color)
+        self.log_monitor.append(f'[{time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}]: '+msg)
         self.log_monitor.moveCursor(QtGui.QTextCursor.End)
 
     def set_running(self, running: bool) -> None:
@@ -214,7 +217,7 @@ class TushareProManager(QtWidgets.QWidget):
         self.engine.run_post_close_update_now()
 
     def refresh_overview(self) -> None:
-        data_path = Path(__file__).parent.parent.parent.joinpath("stock_data", "df_all_stock.parquet")
+        data_path = DATA_DIR / "df_all_stock.parquet"
         if not data_path.exists():
             self.overview_text.setPlainText(_("未找到本地数据文件：{}").format(str(data_path)))
             return

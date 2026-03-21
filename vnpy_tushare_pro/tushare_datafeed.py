@@ -2,6 +2,7 @@ from datetime import timedelta, datetime
 from collections.abc import Callable
 from copy import deepcopy
 import re
+from pathlib import Path
 
 import pandas as pd
 from pandas import DataFrame
@@ -64,8 +65,7 @@ INTERVAL_ADJUSTMENT_MAP: dict[Interval, timedelta] = {
 # 中国上海时区
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
-DATA_DIR = './stock_data'
-
+DATA_DIR = Path.cwd() / 'stock_data'
 
 def to_ts_symbol(symbol: str, exchange: Exchange) -> str | None:
     """将交易所代码转换为tushare代码"""
@@ -322,6 +322,7 @@ class TushareDatafeedPro(BaseDatafeed):
         if not end_date:
             end_date = datetime.now().strftime("%Y%m%d")
 
+        output(f'增量更新所有股票历史数据，开始日期：{start_date}，结束日期：{end_date}')
         parquet_path = f"{DATA_DIR}/df_all_stock.parquet"
         self.df_all_stock = self.pipeline.run_incremental_pipeline(
             parquet_path=parquet_path,

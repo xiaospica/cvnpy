@@ -9,7 +9,7 @@ from vnpy.trader.engine import BaseEngine, MainEngine
 from vnpy.trader.datafeed import BaseDatafeed, get_datafeed
 
 from .locale_ import _
-from .tushare_datafeed import TushareDatafeedPro
+from .tushare_datafeed import TushareDatafeedPro, DATA_DIR
 
 APP_NAME = "TusharePro"
 
