@@ -70,7 +70,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         self.engine_type: EngineType = EngineType.LIVE
         self.signal_sim_thread = None
         
-        self.active = False
+        self.active = True
         self.poll_thread = None
         self.id_processed = []
 
@@ -153,6 +153,8 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         """模拟信号处理"""
         if self.engine_type == EngineType.BACKTESTING.value:
             while self.current_dt < self.end_date:
+                if not self.active:
+                    break
                 time.sleep(self.poll_interval+0.5)
                 self.current_dt += timedelta(days=1)
                 self.write_log(f'模拟时间: {self.current_dt}')
