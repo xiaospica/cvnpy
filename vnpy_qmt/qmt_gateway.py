@@ -54,6 +54,7 @@ class QmtGateway(BaseGateway):
         self.timeout_check_interval_seconds: int = 1
         self._last_timeout_check: datetime = datetime.now()
         self._cancel_sent: set[str] = set()
+        self.connected = False
 
     def connect(self, setting: dict) -> None:
         self.md.connect(setting)
@@ -61,6 +62,8 @@ class QmtGateway(BaseGateway):
         self.timeout_cancel_enabled = bool(setting.get("是否启用超时撤单", False))
         self.order_timeout_seconds = int(setting.get("订单超时秒数", 30))
         self.timeout_check_interval_seconds = int(setting.get("超时撤单检查周期秒", 1))
+        self.write_log("QMT网关连接成功")
+        self.connected = True
 
     def close(self) -> None:
         self.md.close()

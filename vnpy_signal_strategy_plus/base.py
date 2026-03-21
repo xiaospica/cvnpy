@@ -7,9 +7,12 @@ from enum import Enum
 from datetime import datetime, timedelta
 
 from vnpy.trader.constant import Direction, Offset, Interval
+from vnpy.trader.utility import round_to, ZoneInfo
 from .locale import _
 
 APP_NAME = "SignalStrategyPlus"
+
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 class EngineType(Enum):
     LIVE = _("实盘")

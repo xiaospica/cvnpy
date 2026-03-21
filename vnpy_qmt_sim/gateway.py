@@ -40,6 +40,7 @@ class QmtSimGateway(BaseGateway):
         self.td = QmtSimTd(self)
         self._timer_count = 0
         self._order_timeout_interval = 1
+        self.connected = False
 
     def connect(self, setting: dict):
         """连接行情与交易模块，并注册超时检查定时任务。"""
@@ -50,6 +51,7 @@ class QmtSimGateway(BaseGateway):
         self.event_engine.register(EVENT_TIMER, self.process_timer_event)
         
         self.write_log("模拟网关连接成功")
+        self.connected = True
 
     def subscribe(self, req: SubscribeRequest):
         self.md.subscribe(req)

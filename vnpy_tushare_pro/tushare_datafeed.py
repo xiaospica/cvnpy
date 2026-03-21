@@ -287,7 +287,7 @@ class TushareDatafeedPro(BaseDatafeed):
         if not self.inited:
             self.init(output)
         if not end_date:
-            end_date = datetime.now().strftime("%Y%m%d")
+            end_date = datetime.now(CHINA_TZ).strftime("%Y%m%d")
         
         self.df_all_stock = self.pipeline.run_full_pipeline(start_date, end_date)
 
@@ -320,7 +320,7 @@ class TushareDatafeedPro(BaseDatafeed):
         if not self.inited:
             self.init(output)
         if not end_date:
-            end_date = datetime.now().strftime("%Y%m%d")
+            end_date = datetime.now(CHINA_TZ).strftime("%Y%m%d")
 
         output(f'增量更新所有股票历史数据，开始日期：{start_date}，结束日期：{end_date}')
         parquet_path = f"{DATA_DIR}/df_all_stock.parquet"

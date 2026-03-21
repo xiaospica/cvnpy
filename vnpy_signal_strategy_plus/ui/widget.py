@@ -38,6 +38,16 @@ class SignalStrategyWidgetPlus(QtWidgets.QWidget):
         """"""
         self.setWindowTitle(_("信号策略Plus"))
 
+        # 获取屏幕尺寸
+        screen = QtWidgets.QApplication.primaryScreen().geometry()
+        screen_width = screen.width()
+        screen_height = screen.height()
+        
+        # 设置为屏幕的80%，最小800x600
+        width = max(int(screen_width * 0.3), 1500)
+        height = max(int(screen_height * 0.3), 1000)
+        self.resize(width, height)
+
         # Create widgets
         self.class_combo: QtWidgets.QComboBox = QtWidgets.QComboBox()
 
@@ -45,7 +55,7 @@ class SignalStrategyWidgetPlus(QtWidgets.QWidget):
         add_button.clicked.connect(self.add_strategy)
 
         init_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("全部初始化"))
-        init_button.clicked.connect(self.signal_engine.init_all_strategies)
+        init_button.clicked.connect(self.init_all_strategies)
 
         start_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("全部启动"))
         start_button.clicked.connect(self.signal_engine.start_all_strategies)
@@ -95,6 +105,15 @@ class SignalStrategyWidgetPlus(QtWidgets.QWidget):
         vbox.addLayout(grid)
 
         self.setLayout(vbox)
+
+    def init_all_strategies(self) -> None:
+        """"""
+        if not self.signal_engine.init_all_strategies():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "警告",
+                "操作失败，请连接QMT_SIM!"
+            )
 
     def update_class_combo(self) -> None:
         """"""
@@ -187,7 +206,7 @@ class SignalStrategyManagerPlus(QtWidgets.QFrame):
 
     def init_ui(self) -> None:
         """"""
-        self.setFixedHeight(300)
+        self.setFixedHeight(220)
         self.setFrameShape(self.Shape.Box)
         self.setLineWidth(1)
 
@@ -257,7 +276,13 @@ class SignalStrategyManagerPlus(QtWidgets.QFrame):
 
     def init_strategy(self) -> None:
         """"""
-        self.signal_engine.init_strategy(self.strategy_name)
+        if not self.signal_engine.init_strategy(self.strategy_name):
+            QtWidgets.QMessageBox.warning(
+                self.signal_manager,
+                "警告",
+                "操作失败，请连接QMT_SIM!"
+            )
+            return
 
     def start_strategy(self) -> None:
         """"""
@@ -295,7 +320,7 @@ class DataMonitorPlus(QtWidgets.QTableWidget):
 
         self.setRowCount(1)
         self.verticalHeader().setSectionResizeMode(
-            QtWidgets.QHeaderView.ResizeMode.Stretch
+            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
         self.verticalHeader().setVisible(False)
         self.setEditTriggers(self.EditTrigger.NoEditTriggers)
@@ -314,6 +339,9 @@ class DataMonitorPlus(QtWidgets.QTableWidget):
         for name, value in data.items():
             if name in self.cells:
                 cell: QtWidgets.QTableWidgetItem = self.cells[name]
+                if name == "db_password":
+                    value = "********"
+                    continue
                 cell.setText(str(value))
 
 
@@ -338,7 +366,7 @@ class LogMonitorPlus(BaseMonitor):
         super().init_ui()
 
         self.horizontalHeader().setSectionResizeMode(
-            1, QtWidgets.QHeaderView.ResizeMode.Stretch
+            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
 
     def insert_new_row(self, data: Any) -> None:

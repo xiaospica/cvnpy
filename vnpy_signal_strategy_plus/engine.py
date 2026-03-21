@@ -67,12 +67,16 @@ class SignalEnginePlus(BaseEngine):
         self.register_event()
         self.write_log("信号策略引擎初始化成功")
 
-    def init_all_strategies(self) -> None:
+    def init_all_strategies(self) -> bool:
         """
         Init all strategies.
         """
         for strategy_name in list(self.strategies.keys()):
-            self.init_strategy(strategy_name)
+            ret = self.init_strategy(strategy_name)
+            if not ret:
+                self.write_log(f"初始化策略{strategy_name}失败")
+                return False
+        return True
 
     def start_all_strategies(self) -> None:
         """
@@ -226,19 +230,27 @@ class SignalEnginePlus(BaseEngine):
         strategy = self.strategies[strategy_name]
         return strategy.get_parameters()
 
-    def init_strategy(self, strategy_name: str) -> None:
+    def init_strategy(self, strategy_name: str) -> bool:
         """
         Init a strategy.
         """
+
         strategy = self.strategies[strategy_name]
         if strategy.inited:
             self.write_log(f"策略已初始化{strategy_name}")
-            return
+            return True
+
+        if self.main_engine.get_gateway(strategy.gateway) is None or \
+            not self.main_engine.get_gateway(strategy.gateway).connected:
+            self.write_log("未找到QMT_SIM引擎，无法初始化策略")
+            return False
 
         self.call_strategy_func(strategy, strategy.on_init)
         strategy.inited = True
         self.put_strategy_event(strategy)
         self.write_log(f"策略初始化完成{strategy_name}")
+
+        return True
 
     def start_strategy(self, strategy_name: str) -> None:
         """

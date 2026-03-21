@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 from threading import Thread
 import json
 from pathlib import Path
+
+from vnpy_ctp import gateway
 from vnpy.trader.object import (
     OrderRequest,
     SubscribeRequest,
@@ -18,10 +20,11 @@ from vnpy.trader.object import (
 from vnpy.trader.constant import Direction, Offset, OrderType, Exchange
 from .template import SignalTemplatePlus
 from .auto_resubmit import AutoResubmitMixinPlus
+from .base import EngineType, CHINA_TZ
 
 Base = declarative_base()
 
-class StockPlus(Base):
+class Stock(Base):
     __tablename__ = 'stock_trade'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -41,7 +44,8 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
 
     parameters = [
         "account_id", "db_host", "db_port", "db_user", 
-        "db_password", "db_name", "poll_interval"
+        "db_password", "db_name", "poll_interval",        
+        "engine_type", "start_date", "end_date", "gateway"
     ]
     variables = ["last_signal_id"]
     account_id = ""
@@ -50,7 +54,11 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
     db_user = "root"
     db_password = ""
     db_name = "mysql"
-    poll_interval = 5
+    poll_interval = 0.05
+    engine_type = EngineType.LIVE
+    start_date = "20250101 00:00:00"
+    end_date = "20250201 00:00:00"
+    gateway = ""
 
     def __init__(self, signal_engine):
         super().__init__(signal_engine)
@@ -58,9 +66,13 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         self.last_signal_id = 0
         self.engine = None
         self.Session = None
+        self.current_dt = None
+        self.engine_type: EngineType = EngineType.LIVE
+        self.signal_sim_thread = None
         
         self.active = False
         self.poll_thread = None
+        self.id_processed = []
 
         self.load_external_setting()
     
@@ -98,9 +110,21 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         self.connect_db()
 
     def on_start(self):
-        self.write_log("策略启动")
+        self.end_date = datetime.strptime(self.end_date, "%Y%m%d %H:%M:%S")
+        self.start_date = datetime.strptime(self.start_date, "%Y%m%d %H:%M:%S")
+        if self.engine_type == EngineType.LIVE.value:
+            self.write_log("实盘策略启动")
+            self.current_dt = datetime.now(CHINA_TZ).strftime("%Y%m%d %H:%M:%S")
+        elif self.engine_type == EngineType.BACKTESTING.value:
+            self.write_log("模拟策略启动")
+            self.current_dt = self.start_date
+            self.current_dt = datetime.combine(self.current_dt, datetime.max.time())
+            self.signal_sim_thread = Thread(target=self.signal_simulation, daemon=True)
+            self.signal_sim_thread.start()
+        else:
+            self.write_log(f'unsupported engine type: {self.engine_type}')
         self.active = True
-        self.poll_thread = Thread(target=self.run_polling)
+        self.poll_thread = Thread(target=self.run_polling, daemon=True)
         self.poll_thread.start()
 
     def on_stop(self):
@@ -123,6 +147,26 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
     def on_timer(self):
         """定时驱动重挂队列执行。"""
         self.on_timer_for_resubmit()
+        # pass
+
+    def signal_simulation(self):
+        """模拟信号处理"""
+        if self.engine_type == EngineType.BACKTESTING.value:
+            while self.current_dt < self.end_date:
+                time.sleep(self.poll_interval+0.5)
+                self.current_dt += timedelta(days=1)
+                self.write_log(f'模拟时间: {self.current_dt}')
+
+    def query_trade_signals(self, session):
+        """查询当天未处理的指定策略交易信号"""
+        today_start = datetime.combine(self.current_dt, datetime.min.time())  # 当天开始时间
+        # today_end = today_start + timedelta(days=1) - timedelta(seconds=1)  # 当天结束时间
+        return session.query(Stock).order_by(Stock.id.asc()).filter(
+            Stock.stg == self.strategy_name,
+            Stock.remark >= today_start,
+            Stock.remark <= self.current_dt,
+            # Stock.processed == False  # 查询未处理的信号
+        ).limit(100).all()  # 每次最多处理 100 条信号
 
     def run_polling(self):
         """独立线程轮询数据库"""
@@ -130,25 +174,31 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             if not self.Session:
                 time.sleep(self.poll_interval)
                 continue
-
+            self.write_log(f'当前时间: {self.current_dt}')
             try:
                 session = self.Session()
-                # Query new signals for this strategy
-                query = session.query(StockPlus).filter(
-                    StockPlus.stg == self.strategy_name,
-                    StockPlus.id > self.last_signal_id,
-                    # StockPlus.processed == False
-                ).order_by(StockPlus.id.asc())
-                
-                signals = query.all()
+                # # Query new signals for this strategy
+                # query = session.query(Stock).filter(
+                #     Stock.stg == self.strategy_name,
+                #     Stock.id > self.last_signal_id,
+                #     # Stock.processed == False
+                # ).order_by(Stock.id.asc())                
+                # signals = query.all()
+
+                signals = self.query_trade_signals(session)
                 
                 for signal in signals:
                     if not self.active:
                         break
+                    if self.engine_type == EngineType.BACKTESTING.value and signal.id in self.id_processed:
+                        self.write_log(f'信号 {signal.id} 已处理，跳过')
+                        continue
                     self.process_signal(signal)
                     self.last_signal_id = max(self.last_signal_id, signal.id)
+
+                    self.id_processed.append(signal.id)
                     # Add a small delay to allow position update if in simulation or rapid trading
-                    time.sleep(0.1)
+                    time.sleep(0.05)
                     
                 session.close()
                 self.put_event()
@@ -159,7 +209,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             
             time.sleep(self.poll_interval)
 
-    def process_signal(self, signal: StockPlus):
+    def process_signal(self, signal: Stock):
         """处理信号"""
         self.write_log(f"收到信号: {signal.id} {signal.code} {signal.pct} {signal.type} {signal.remark}")
         
