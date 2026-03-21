@@ -15,6 +15,7 @@ from vnpy.trader.object import BarData, HistoryRequest
 from vnpy.trader.utility import round_to, ZoneInfo
 
 from .utils import TushareDataDownloaderEnhanced, StockDataProcessorEnhanced, DataPipelineEnhanced
+from .scheduler import DailyTimeTaskScheduler
 
 # 数据频率映射
 INTERVAL_VT2TS: dict[Interval, str] = {
@@ -137,6 +138,24 @@ class TushareDatafeedPro(BaseDatafeed):
         self.downloader = TushareDataDownloaderEnhanced(self.password, DATA_DIR, max_workers=10)
         self.processor = StockDataProcessorEnhanced()
         self.pipeline = DataPipelineEnhanced(self.downloader, self.processor)
+
+        self.scheduler = DailyTimeTaskScheduler()
+        self.scheduler.register_daily_job(
+            name="post_close_update",
+            time_str="19:00",
+            job_func=self._post_close_update,
+        )
+        self.scheduler.start()
+
+    def _post_close_update(self) -> None:
+        run_date = datetime.now(CHINA_TZ).strftime("%Y%m%d")
+        if self.downloader.is_trade_date(run_date):
+            logger.info(f"⏭️  跳过任务({name})：非交易日 {run_date}")
+            return
+        self.update_all_stock_history()
+
+    def set_post_close_update_time(self, time_str: str) -> None:
+        self.scheduler.update_job_time("post_close_update", time_str)
 
     def init(self, output: Callable = print) -> bool:
         """初始化"""

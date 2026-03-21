@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as Date
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Optional, Any
@@ -208,12 +208,43 @@ class TushareDataDownloaderEnhanced:
 
         for data_type, dfs in self.data_config.items():
 
-            output_path = f"{self.data_dir}/raw_20260201/{data_type}_all.parquet"
+            output_path = f"{self.data_dir}/raw/{data_type}_all.parquet"
             merged_df = pd.read_parquet(output_path)
             logger.info(f"✅ 读取 {data_type}: {len(merged_df)}条记录 -> {output_path}")
             final_results[data_type] = merged_df
 
         return final_results
+
+    def is_trade_date(self, date: str | Date | datetime | None = None) -> bool:
+        """
+        判断指定日期是否为交易日
+        date: datetime.date 或 'YYYYMMDD' 格式字符串，默认今天
+        """
+        if date is None:
+            date_str = datetime.now().strftime('%Y%m%d')
+        elif isinstance(date, datetime):
+            date_str = date.strftime('%Y%m%d')
+        elif isinstance(date, Date):
+            date_str = date.strftime('%Y%m%d')
+        else:
+            date_str = str(date)
+
+        params = {
+            'exchange': 'SSE',
+            'start_date': date_str,
+            'end_date': date_str,
+        }
+
+        trade_cal_df = self._safe_api_call(
+            'trade_cal',
+            params,
+            "获取所有交易日历"
+        )
+
+        if trade_cal_df.empty:
+            return False
+
+        return int(trade_cal_df.iloc[0]['is_open']) == 1
 
     def get_trade_calendars(self, start_date='20050101', end_date=None) -> List[str]:
         """
@@ -989,12 +1020,6 @@ if __name__ == '__main__':
     import numpy as np
     import pandas as pd
 
-    from vnpy_tushare_pro.utils import (
-        DataPipelineEnhanced,
-        StockDataProcessorEnhanced,
-        TushareDataDownloaderEnhanced,
-    )
-
     with open('api.json','r',encoding='utf-8') as f:
         token = json.load(f)['token']
 
@@ -1047,3 +1072,21 @@ if __name__ == '__main__':
     print('RESULT rows', len(reloaded), 'cols', len(reloaded.columns))
     print('RESULT min', reloaded['trade_date'].min(), 'max', reloaded['trade_date'].max())
 
+
+    # 测试判断交易日历
+    print(downloader.is_trade_date())  # 判断今天
+    print(downloader.is_trade_date('20260320'))  # 判断指定日期
+
+    from vnpy_tushare_pro.scheduler import DailyTimeTaskScheduler
+
+    scheduler = DailyTimeTaskScheduler()
+    scheduler.register_daily_job(
+        name="test_job",
+        time_str="00:00",
+        job_func=lambda: print("test_job_ok"),
+        is_trade_date_func=lambda _d: True,
+    )
+    scheduler.start()
+    scheduler.run_job_now("test_job")
+    scheduler.update_job_time("test_job", "00:01")
+    scheduler.stop()
