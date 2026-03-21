@@ -52,3 +52,5 @@ lab/
 vnpy_signal_strategy/mysql_signal_setting.json
 .env
 .env.*
+stock_data
+api.json
