@@ -22,9 +22,28 @@
 
 
 from .tushare_datafeed import TushareDatafeedPro as Datafeed
+from pathlib import Path
+from vnpy.trader.app import BaseApp
 
+from .engine import APP_NAME, TushareProEngine
 
-__all__ = ["Datafeed"]
+__all__ = [
+    "Datafeed",
+    "TushareProEngine",
+    "TushareProApp"
+    ]
 
 
 __version__ = "1.0.0.0"
+
+class TushareProApp(BaseApp):
+    """"""
+    from .locale_ import _
+
+    app_name: str = APP_NAME
+    app_module: str = __module__
+    app_path: Path = Path(__file__).parent
+    display_name: str = _("TusharePro")
+    engine_class: type[TushareProEngine] = TushareProEngine
+    widget_name: str = "TushareProManager"
+    icon_name: str = str(app_path.joinpath("ui", "TusharePro.ico"))

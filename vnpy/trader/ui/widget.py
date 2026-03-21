@@ -1225,7 +1225,10 @@ class GlobalDialog(QtWidgets.QDialog):
         """"""
         super().__init__()
 
-        self.widgets: dict[str, tuple[QtWidgets.QLineEdit, type]] = {}
+        self.widgets: dict[str, tuple[QtWidgets.QWidget, type]] = {}
+        self._row_widgets: dict[str, tuple[QtWidgets.QWidget, QtWidgets.QWidget, QtWidgets.QGroupBox]] = {}
+        self._group_boxes: dict[str, QtWidgets.QGroupBox] = {}
+        self._search: QtWidgets.QLineEdit | None = None
 
         self.init_ui()
 
@@ -1234,32 +1237,121 @@ class GlobalDialog(QtWidgets.QDialog):
         self.setWindowTitle(_("全局配置"))
         self.setMinimumWidth(800)
 
+        # 获取屏幕尺寸
+        screen = QtWidgets.QApplication.primaryScreen().geometry()
+        screen_width = screen.width()
+        screen_height = screen.height()
+        
+        # 设置为屏幕的80%，最小800x600
+        width = max(int(screen_width * 0.3), 800)
+        height = max(int(screen_height * 0.3), 1000)
+        
+        self.resize(width, height)
+        
+        # 居中显示
+        self.move(
+            (screen_width - width) // 2,
+            (screen_height - height) // 2
+        )
+
         settings: dict = copy(SETTINGS)
         settings.update(load_json(SETTING_FILENAME))
 
-        # Initialize line edits and form layout based on setting.
-        form: QtWidgets.QFormLayout = QtWidgets.QFormLayout()
+        search_label: QtWidgets.QLabel = QtWidgets.QLabel(_("搜索"))
+        search: QtWidgets.QLineEdit = QtWidgets.QLineEdit()
+        search.setPlaceholderText(_("按 key/字段名过滤，例如：log、email.port、database"))
+        search.setClearButtonEnabled(True)
+        search.textChanged.connect(self._apply_filter)
+        search_label.setBuddy(search)
+        self._search = search
 
-        for field_name, field_value in settings.items():
-            field_type: type = type(field_value)
-            widget: QtWidgets.QLineEdit = QtWidgets.QLineEdit(str(field_value))
+        search_bar: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
+        search_bar.addWidget(search_label)
+        search_bar.addWidget(search)
 
-            form.addRow(f"{field_name} <{field_type.__name__}>", widget)
-            self.widgets[field_name] = (widget, field_type)
+        content: QtWidgets.QWidget = QtWidgets.QWidget()
+        content_layout: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
+        content_layout.setContentsMargins(8, 8, 8, 8)
+        content_layout.setSpacing(12)
+        content.setLayout(content_layout)
 
-        button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("确定"))
-        button.clicked.connect(self.update_setting)
-        form.addRow(button)
+        def get_group_key(setting_key: str) -> str:
+            return setting_key.split(".", 1)[0] if "." in setting_key else "other"
 
-        scroll_widget: QtWidgets.QWidget = QtWidgets.QWidget()
-        scroll_widget.setLayout(form)
+        group_title_map: dict[str, str] = {
+            "font": _("字体"),
+            "log": _("日志"),
+            "email": _("邮件"),
+            "datafeed": _("数据源"),
+            "database": _("数据库"),
+            "other": _("其他"),
+        }
+
+        grouped_keys: dict[str, list[str]] = {}
+        for key in settings.keys():
+            group: str = get_group_key(key)
+            grouped_keys.setdefault(group, []).append(key)
+
+        for group, keys in grouped_keys.items():
+            title: str = group_title_map.get(group, group)
+            group_box: QtWidgets.QGroupBox = QtWidgets.QGroupBox(f"{title} ({group})")
+            self._group_boxes[group] = group_box
+
+            form: QtWidgets.QFormLayout = QtWidgets.QFormLayout()
+            form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            form.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+            form.setHorizontalSpacing(16)
+            form.setVerticalSpacing(10)
+            group_box.setLayout(form)
+
+            for field_name in keys:
+                field_value: Any = settings[field_name]
+                field_type: type = type(field_value)
+
+                suffix: str = field_name.split(".", 1)[1] if "." in field_name else field_name
+                label: QtWidgets.QLabel = QtWidgets.QLabel(suffix)
+                label.setToolTip(field_name)
+
+                editor: QtWidgets.QWidget = self._create_editor(field_name, field_value, field_type)
+                editor.setToolTip(f"{field_name} <{field_type.__name__}>")
+
+                field_container: QtWidgets.QWidget = QtWidgets.QWidget()
+                field_hbox: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
+                field_hbox.setContentsMargins(0, 0, 0, 0)
+                field_hbox.setSpacing(8)
+                field_container.setLayout(field_hbox)
+                field_hbox.addWidget(editor, 1)
+
+                type_hint: QtWidgets.QLabel = QtWidgets.QLabel(f"<{field_type.__name__}>")
+                type_hint.setObjectName("type_hint")
+                type_hint.setStyleSheet("QLabel#type_hint { color: #6B7280; }")
+                type_hint.setMinimumWidth(72)
+                type_hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                field_hbox.addWidget(type_hint, 0)
+
+                form.addRow(label, field_container)
+                self.widgets[field_name] = (editor, field_type)
+                self._row_widgets[field_name] = (label, field_container, group_box)
+
+            content_layout.addWidget(group_box)
+
+        content_layout.addStretch(1)
 
         scroll_area: QtWidgets.QScrollArea = QtWidgets.QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(scroll_widget)
+        scroll_area.setWidget(content)
+
+        buttons: QtWidgets.QDialogButtonBox = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.update_setting)
+        buttons.rejected.connect(self.reject)
 
         vbox: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
-        vbox.addWidget(scroll_area)
+        vbox.addLayout(search_bar)
+        vbox.addWidget(scroll_area, 1)
+        vbox.addWidget(buttons)
         self.setLayout(vbox)
 
     def update_setting(self) -> None:
@@ -1268,16 +1360,32 @@ class GlobalDialog(QtWidgets.QDialog):
         """
         settings: dict = {}
         for field_name, tp in self.widgets.items():
-            widget, field_type = tp
-            value_text: str = widget.text()
+            editor, field_type = tp
 
-            if field_type is bool:
-                if value_text == "True":
-                    field_value: bool = True
+            try:
+                if isinstance(editor, QtWidgets.QCheckBox):
+                    field_value: Any = editor.isChecked()
+                elif isinstance(editor, QtWidgets.QSpinBox):
+                    field_value = int(editor.value())
+                elif isinstance(editor, QtWidgets.QDoubleSpinBox):
+                    field_value = float(editor.value())
+                elif isinstance(editor, QtWidgets.QLineEdit):
+                    value_text: str = editor.text()
+                    if field_type is bool:
+                        field_value = (value_text == "True")
+                    else:
+                        field_value = field_type(value_text)
                 else:
-                    field_value = False
-            else:
-                field_value = field_type(value_text)
+                    value_text = getattr(editor, "text", lambda: "")()
+                    field_value = field_type(str(value_text))
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    _("输入错误"),
+                    _("字段 {} 的值无法转换为 {}：{}").format(field_name, field_type.__name__, str(e)),
+                    QtWidgets.QMessageBox.StandardButton.Ok
+                )
+                return
 
             settings[field_name] = field_value
 
@@ -1290,3 +1398,58 @@ class GlobalDialog(QtWidgets.QDialog):
 
         save_json(SETTING_FILENAME, settings)
         self.accept()
+
+    def _create_editor(self, field_name: str, field_value: Any, field_type: type) -> QtWidgets.QWidget:
+        """
+        Create proper editor widget by python value type, with basic validation.
+        """
+        if field_type is bool:
+            checkbox: QtWidgets.QCheckBox = QtWidgets.QCheckBox()
+            checkbox.setChecked(bool(field_value))
+            return checkbox
+
+        if field_type is int:
+            spin: QtWidgets.QSpinBox = QtWidgets.QSpinBox()
+            if field_name == "font.size":
+                spin.setRange(6, 48)
+            elif field_name.endswith(".port"):
+                spin.setRange(0, 65535)
+            elif field_name == "log.level":
+                spin.setRange(0, 50)
+                spin.setSingleStep(10)
+            else:
+                spin.setRange(-2147483648, 2147483647)
+            spin.setValue(int(field_value))
+            return spin
+
+        if field_type is float:
+            dspin: QtWidgets.QDoubleSpinBox = QtWidgets.QDoubleSpinBox()
+            dspin.setRange(-1e12, 1e12)
+            dspin.setDecimals(6)
+            dspin.setValue(float(field_value))
+            return dspin
+
+        line: QtWidgets.QLineEdit = QtWidgets.QLineEdit(str(field_value))
+        if "password" in field_name:
+            line.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        return line
+
+    def _apply_filter(self, text: str) -> None:
+        """
+        Filter rows by key or label text. Only toggles visibility to avoid layout churn.
+        """
+        keyword: str = text.strip().lower()
+        visible_count_by_group: dict[QtWidgets.QGroupBox, int] = {}
+
+        for key, (label, field_container, group_box) in self._row_widgets.items():
+            label_text: str = ""
+            if isinstance(label, QtWidgets.QLabel):
+                label_text = label.text()
+
+            hit: bool = (not keyword) or (keyword in key.lower()) or (keyword in label_text.lower())
+            label.setVisible(hit)
+            field_container.setVisible(hit)
+            visible_count_by_group[group_box] = visible_count_by_group.get(group_box, 0) + (1 if hit else 0)
+
+        for group_box, count in visible_count_by_group.items():
+            group_box.setVisible(count > 0)

@@ -16,6 +16,7 @@ from vnpy_signal_strategy_plus_backtester import SignalBacktesterApp
 from vnpy_ctastrategy import CtaEngine, CtaStrategyApp
 from vnpy_ctabacktester import CtaBacktesterApp
 from vnpy_signal_strategy_plus.strategies.multistrategy_signal_strategy import MultiStrategySignalStrategyPlus
+from vnpy_tushare_pro import TushareProApp
 
 def main():
     """"""
@@ -41,6 +42,7 @@ def main():
     main_engine.add_app(SignalBacktesterApp)
     main_engine.add_app(CtaStrategyApp)
     main_engine.add_app(CtaBacktesterApp)
+    main_engine.add_app(TushareProApp)
     
     # 手动添加策略（在UI中也可添加）
     # 策略会自动从外部配置文件加载其对应的配置
