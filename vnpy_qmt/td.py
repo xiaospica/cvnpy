@@ -20,7 +20,7 @@ from vnpy.trader.object import (
 )
 from vnpy_qmt.utils import (to_vn_product, to_vn_contract, to_qmt_code,
                             From_VN_Trade_Type, from_vn_price_type, TO_VN_Trade_Type,
-                            timestamp_to_datetime, TO_VN_ORDER_STATUS)
+                            timestamp_to_datetime, TO_VN_ORDER_STATUS, TO_VN_Exchange_map)
 
 
 class TD(XtQuantTraderCallback):
@@ -59,6 +59,12 @@ class TD(XtQuantTraderCallback):
             self.inited = True
         else:
             self.write_log(f'订阅账户【失败】： {sub_msg}')
+
+        # 初始化数据查询
+        self.query_account()
+        self.query_position()
+        self.query_order()
+        self.query_trade()
 
     def get_order_remark(self):
         self.count += 1
@@ -114,7 +120,24 @@ class TD(XtQuantTraderCallback):
         self.trader.query_stock_trades_async(self.account, callback=self.on_stock_trade_callback)
 
     def on_disconnected(self):
-        pass
+        """连接断开"""
+        self.write_log("交易接口连接断开，请检查与客户端的连接状态")
+        self.connected = False
+
+        # 尝试重连，重连需要更换session_id
+        session: int = int(float(datetime.now().strftime("%H%M%S.%f")) * 1000)
+        connect_result: int = self.connect(self.path, self.account_id, self.account_type, session)
+
+        if connect_result:
+            self.write_log("交易接口重连失败")
+        else:
+            self.write_log("交易接口重连成功")
+
+    def on_connected(self) -> None:
+        """
+        连接成功推送
+        """
+        self.write_log("交易接口连接成功")
 
     def on_stock_asset(self, asset: XtAsset):
         account = AccountData(
@@ -164,6 +187,70 @@ class TD(XtQuantTraderCallback):
         if vn_order.status in [Status.ALLTRADED, Status.CANCELLED, Status.REJECTED]:
             self.order_submit_time.pop(vn_order.orderid, None)
         self.gateway.on_order(vn_order)
+
+    def on_query_order_async(self, xt_orders: list[XtOrder]) -> None:
+        """委托信息异步查询回报"""
+        if not xt_orders:
+            return
+
+        for data in xt_orders:
+            self.on_stock_order(data)
+
+        self.write_log("委托信息查询成功")
+
+    def on_query_asset_async(self, xt_asset: XtAsset) -> None:
+        """资金信息异步查询回报"""
+        if not xt_asset:
+            return
+
+        account: AccountData = AccountData(
+            accountid=xt_asset.account_id,
+            balance=xt_asset.total_asset,
+            frozen=xt_asset.frozen_cash,
+            gateway_name=self.gateway_name
+        )
+        account.available = xt_asset.cash
+
+        self.gateway.on_account(account)
+
+    def on_query_positions_async(self, xt_positions: list[XtPosition]) -> None:
+        """持仓信息异步查询回报"""
+        if not xt_positions:
+            return
+
+        for xt_position in xt_positions:
+            if self.account_type == "STOCK":
+                direction: Direction = Direction.NET
+            else:
+                direction = TO_VN_Trade_Type.get(xt_position.direction, "")
+
+            if not direction:
+                continue
+
+            symbol, xt_exchange = xt_position.stock_code.split(".")
+
+            position: PositionData = PositionData(
+                symbol=symbol,
+                exchange=TO_VN_Exchange_map[xt_exchange],
+                direction=direction,
+                volume=xt_position.volume,
+                yd_volume=xt_position.can_use_volume,
+                frozen=xt_position.volume - xt_position.can_use_volume,
+                price=xt_position.open_price,
+                gateway_name=self.gateway_name
+            )
+
+            self.gateway.on_position(position)
+
+    def on_query_trades_async(self, xt_trades: list[XtTrade]) -> None:
+        """成交信息异步查询回报"""
+        if not xt_trades:
+            return
+
+        for xt_trade in xt_trades:
+            self.on_stock_trade(xt_trade)
+
+        self.write_log("成交信息查询成功")
 
     def on_stock_position(self, position: XtPosition):
         try:

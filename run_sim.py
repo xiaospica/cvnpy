@@ -26,8 +26,8 @@ def main():
     main_engine = MainEngine(event_engine)
 
     # 加载模拟网关
-    main_engine.add_gateway(XtGateway, gateway_name="Xt")
-    # main_engine.add_gateway(QmtGateway, gateway_name="QMT")
+    # main_engine.add_gateway(XtGateway, gateway_name="Xt")
+    main_engine.add_gateway(QmtGateway, gateway_name="QMT")
     main_engine.add_gateway(QmtSimGateway, gateway_name="QMT_SIM")
     
     # 加载信号策略应用

@@ -50,11 +50,13 @@ class QmtGateway(BaseGateway):
         self.td = TD(self)
         self.count = -1
         self.event_engine.register(EVENT_TIMER, self.process_timer_event)
+
         self.timeout_cancel_enabled: bool = False
         self.order_timeout_seconds: int = 30
         self.timeout_check_interval_seconds: int = 1
         self._last_timeout_check: datetime = datetime.now()
         self._cancel_sent: set[str] = set()
+        
         self.connected = False
 
     def connect(self, setting: dict) -> None:

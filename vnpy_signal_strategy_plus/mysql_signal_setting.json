@@ -6,9 +6,9 @@
         "db_password": "xw$10062127",
         "db_name": "mysql",
         "poll_interval": 0.05,
-        "engine_type": "回测",
+        "engine_type": "实盘",
         "start_date": "20260125 00:00:00",
         "end_date": "20260321 00:00:00",
-        "gateway": "QMT_SIM"
+        "gateway": "QMT"
     }
 }
