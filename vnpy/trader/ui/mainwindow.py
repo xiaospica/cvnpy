@@ -24,6 +24,7 @@ from .widget import (
     AccountMonitor,
     LogMonitor,
     ActiveOrderMonitor,
+    GatewayConnectionStatusButton,
     ConnectDialog,
     ContractManager,
     TradingWidget,
@@ -64,7 +65,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.init_dock()
         self.init_toolbar()
         self.init_menu()
+        self.init_status_bar()
         self.load_window_setting("custom")
+
+    def init_status_bar(self) -> None:
+        """"""
+        status_bar: QtWidgets.QStatusBar = QtWidgets.QStatusBar()
+        self.setStatusBar(status_bar)
+
+        gateway_status: GatewayConnectionStatusButton = GatewayConnectionStatusButton(self.main_engine, self)
+        status_bar.addPermanentWidget(gateway_status)
 
     def init_dock(self) -> None:
         """"""

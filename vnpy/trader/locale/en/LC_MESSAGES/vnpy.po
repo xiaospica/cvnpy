@@ -291,6 +291,10 @@ msgstr "Account"
 msgid "持仓"
 msgstr "Position"
 
+#: vnpy\trader\ui\mainwindow.py:146
+msgid "窗口"
+msgstr "Window"
+
 #: vnpy\trader\ui\mainwindow.py:102
 msgid "系统"
 msgstr "System"
@@ -338,6 +342,14 @@ msgstr "About"
 #: vnpy\trader\ui\mainwindow.py:183
 msgid "工具栏"
 msgstr "Toolbar"
+
+#: vnpy\trader\ui\widget.py
+msgid "网关状态"
+msgstr "Gateway Status"
+
+#: vnpy\trader\ui\widget.py
+msgid "未加载任何接口"
+msgstr "No gateway loaded"
 
 #: vnpy\trader\ui\mainwindow.py:251
 msgid "确认退出？"
@@ -654,4 +666,3 @@ msgstr "Changes to the global configuration will take effect after a restart!"
 #: vnpy\trader\utility.py:209
 msgid "合成日K线必须传入每日收盘时间"
 msgstr "The daily_end parameter is required for generating daily bar"
-

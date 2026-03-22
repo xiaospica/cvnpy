@@ -54,3 +54,8 @@ vnpy_signal_strategy/mysql_signal_setting.json
 .env.*
 stock_data
 api.json
+vnpy_tushare
+.trae
+vnpy_ctabacktester
+vnpy_ctastrategy
+vnpy_signal_strategy

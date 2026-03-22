@@ -1453,3 +1453,217 @@ class GlobalDialog(QtWidgets.QDialog):
 
         for group_box, count in visible_count_by_group.items():
             group_box.setVisible(count > 0)
+
+
+class GatewayConnectionStatusPopup(QtWidgets.QFrame):
+    """"""
+
+    def __init__(self, main_engine: MainEngine, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.main_engine: MainEngine = main_engine
+        self._rows: dict[str, tuple[QtWidgets.QLabel, QtWidgets.QFrame]] = {}
+
+        self._timer: QtCore.QTimer = QtCore.QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self.refresh)
+
+        self.setWindowFlags(
+            QtCore.Qt.WindowType.Popup
+            | QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.setLineWidth(1)
+
+        self._container: QtWidgets.QWidget = QtWidgets.QWidget()
+        self._layout: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
+        self._layout.setContentsMargins(10, 10, 10, 10)
+        self._layout.setSpacing(6)
+        self._container.setLayout(self._layout)
+
+        wrapper_layout: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.addWidget(self._container)
+        self.setLayout(wrapper_layout)
+
+        self.refresh()
+
+    def show_above(self, anchor: QtWidgets.QWidget) -> None:
+        self.refresh()
+
+        anchor_top_left: QtCore.QPoint = anchor.mapToGlobal(QtCore.QPoint(0, 0))
+        x: int = anchor_top_left.x() + anchor.width() - self.sizeHint().width()
+        y: int = anchor_top_left.y() - self.sizeHint().height() - 8
+
+        self.move(max(0, x), max(0, y))
+        self.show()
+        self.raise_()
+        self._timer.start()
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def refresh(self) -> None:
+        names: list[str] = list(self.main_engine.gateways.keys())
+
+        if not names:
+            self._ensure_empty_placeholder()
+            return
+
+        self._remove_empty_placeholder()
+
+        existing: set[str] = set(self._rows.keys())
+        desired: set[str] = set(names)
+
+        for name in list(existing - desired):
+            self._remove_row(name)
+
+        for name in names:
+            if name not in self._rows:
+                self._add_row(name)
+            self._update_row(name)
+
+        self.adjustSize()
+
+    def _ensure_empty_placeholder(self) -> None:
+        if "__empty__" in self._rows:
+            return
+
+        label: QtWidgets.QLabel = QtWidgets.QLabel(_("未加载任何接口"))
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        dot: QtWidgets.QFrame = QtWidgets.QFrame()
+        dot.setFixedSize(10, 10)
+        dot.setStyleSheet("background-color: #EF4444; border-radius: 5px;")
+
+        row: QtWidgets.QWidget = QtWidgets.QWidget()
+        hbox: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.addWidget(label, 1)
+        hbox.addWidget(dot, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+        row.setLayout(hbox)
+
+        self._layout.addWidget(row)
+        self._rows["__empty__"] = (label, dot)
+        row.setProperty("gateway_name", "__empty__")
+
+        self.adjustSize()
+
+    def _remove_empty_placeholder(self) -> None:
+        if "__empty__" not in self._rows:
+            return
+        self._remove_row("__empty__")
+
+    def _add_row(self, gateway_name: str) -> None:
+        name_label: QtWidgets.QLabel = QtWidgets.QLabel(gateway_name)
+        name_label.setMinimumWidth(120)
+
+        dot: QtWidgets.QFrame = QtWidgets.QFrame()
+        dot.setFixedSize(10, 10)
+        dot.setStyleSheet("background-color: #EF4444; border-radius: 5px;")
+
+        row: QtWidgets.QWidget = QtWidgets.QWidget()
+        row.setProperty("gateway_name", gateway_name)
+
+        hbox: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.setSpacing(12)
+        hbox.addWidget(name_label, 1)
+        hbox.addWidget(dot, 0, QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        row.setLayout(hbox)
+
+        self._layout.addWidget(row)
+        self._rows[gateway_name] = (name_label, dot)
+
+    def _update_row(self, gateway_name: str) -> None:
+        gateway = self.main_engine.gateways.get(gateway_name)
+        connected: bool = bool(getattr(gateway, "connected", False))
+
+        label, dot = self._rows[gateway_name]
+        label.setText(gateway_name)
+        dot.setStyleSheet(
+            "background-color: #22C55E; border-radius: 5px;" if connected
+            else "background-color: #EF4444; border-radius: 5px;"
+        )
+
+    def _remove_row(self, gateway_name: str) -> None:
+        row = self._rows.pop(gateway_name, None)
+        if not row:
+            return
+        label, dot = row
+
+        for i in range(self._layout.count()):
+            item = self._layout.itemAt(i)
+            widget = item.widget() if item else None
+            if not widget:
+                continue
+            if widget.property("gateway_name") == gateway_name:
+                self._layout.takeAt(i)
+                widget.setParent(None)
+                widget.deleteLater()
+                break
+
+
+class GatewayConnectionStatusButton(QtWidgets.QToolButton):
+    """"""
+
+    def __init__(self, main_engine: MainEngine, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.main_engine: MainEngine = main_engine
+        self._popup: GatewayConnectionStatusPopup = GatewayConnectionStatusPopup(main_engine, self)
+
+        self.setText(_("网关状态"))
+        self.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.setAutoRaise(True)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.clicked.connect(self._toggle_popup)
+
+        self._update_icon()
+
+        self._aggregate_timer: QtCore.QTimer = QtCore.QTimer(self)
+        self._aggregate_timer.setInterval(1500)
+        self._aggregate_timer.timeout.connect(self._update_icon)
+        self._aggregate_timer.start()
+
+    def _toggle_popup(self) -> None:
+        if self._popup.isVisible():
+            self._popup.hide()
+            return
+        self._popup.show_above(self)
+
+    def _update_icon(self) -> None:
+        gateways = list(self.main_engine.gateways.values())
+        if not gateways:
+            self.setIcon(self._make_dot_icon(QtGui.QColor("#EF4444")))
+            return
+
+        connected_count: int = 0
+        for gateway in gateways:
+            if bool(getattr(gateway, "connected", False)):
+                connected_count += 1
+
+        if connected_count == 0:
+            color = QtGui.QColor("#EF4444")
+        elif connected_count == len(gateways):
+            color = QtGui.QColor("#22C55E")
+        else:
+            color = QtGui.QColor("#F59E0B")
+
+        self.setIcon(self._make_dot_icon(color))
+
+    def _make_dot_icon(self, color: QtGui.QColor) -> QtGui.QIcon:
+        size: int = 10
+        pm: QtGui.QPixmap = QtGui.QPixmap(size, size)
+        pm.fill(QtCore.Qt.GlobalColor.transparent)
+
+        painter: QtGui.QPainter = QtGui.QPainter(pm)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QBrush(color))
+        painter.drawEllipse(0, 0, size - 1, size - 1)
+        painter.end()
+
+        return QtGui.QIcon(pm)

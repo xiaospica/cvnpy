@@ -46,4 +46,4 @@ class TushareProApp(BaseApp):
     display_name: str = _("TusharePro")
     engine_class: type[TushareProEngine] = TushareProEngine
     widget_name: str = "TushareProManager"
-    icon_name: str = str(app_path.joinpath("ui", "TusharePro.ico"))
+    icon_name: str = str(app_path.joinpath("ui", "logo.png"))
