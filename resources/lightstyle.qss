@@ -296,3 +296,31 @@ QSlider::sub-page:horizontal{
 QSlider::sub-page:horizontal:disabled{
   background:rgb(80,80,80);
 }
+QFrame#gateway_status_group{
+  background-color:rgba(200,200,200,35%);
+  border:1px solid rgba(220,220,220,127);
+  border-radius:4px;
+}
+QFrame#gateway_status_group[connected="true"]{
+  border:1px solid rgba(34,197,94,140);
+}
+QFrame#gateway_status_group[connected="false"]{
+  border:1px solid rgba(239,68,68,140);
+}
+QLabel#gateway_name{
+  color:palette(text);
+}
+QLabel#gateway_exchanges{
+  color:palette(text);
+  font-size:8pt;
+}
+QFrame#gateway_status_dot{
+  border-radius:5px;
+  background-color:rgba(239,68,68,255);
+}
+QFrame#gateway_status_dot[connected="true"]{
+  background-color:rgba(34,197,94,255);
+}
+QFrame#gateway_status_dot[connected="false"]{
+  background-color:rgba(239,68,68,255);
+}

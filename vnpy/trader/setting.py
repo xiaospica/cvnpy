@@ -12,6 +12,8 @@ SETTINGS: dict = {
     "font.family": "微软雅黑",
     "font.size": 9,
 
+    "ui.accent_color": "",
+
     "log.active": True,
     "log.level": INFO,
     "log.console": True,

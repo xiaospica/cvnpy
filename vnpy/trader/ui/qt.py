@@ -5,6 +5,7 @@ import traceback
 import webbrowser
 import types
 import threading
+from pathlib import Path
 
 import qdarkstyle  # type: ignore
 from PySide6 import QtGui, QtWidgets, QtCore
@@ -18,6 +19,130 @@ from ..locale import _
 Qt = QtCore.Qt
 
 
+def _get_resources_dir() -> Path:
+    return Path(__file__).resolve().parents[3].joinpath("resources")
+
+
+def apply_system_theme_stylesheet(qapp: QtWidgets.QApplication) -> None:
+    resources_dir: Path = _get_resources_dir()
+
+    dark_qss: Path = resources_dir.joinpath("darkstyle.qss")
+    light_qss: Path = resources_dir.joinpath("lightstyle.qss")
+
+    if not dark_qss.exists() or not light_qss.exists():
+        return
+
+    is_dark: bool = qapp.styleHints().colorScheme() == Qt.ColorScheme.Dark
+    qss_path: Path = dark_qss if is_dark else light_qss
+
+    qapp.setStyleSheet(qss_path.read_text(encoding="utf-8"))
+
+
+def apply_system_theme_palette(qapp: QtWidgets.QApplication) -> None:
+    is_dark: bool = qapp.styleHints().colorScheme() == Qt.ColorScheme.Dark
+    palette: QtGui.QPalette = qapp.palette()
+
+    if is_dark:
+        palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(53, 53, 53))
+        palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(187, 187, 187))
+        palette.setColor(
+            QtGui.QPalette.ColorGroup.Disabled,
+            QtGui.QPalette.ColorRole.WindowText,
+            QtGui.QColor(127, 127, 127),
+        )
+        palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(42, 42, 42))
+        palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(66, 66, 66))
+        palette.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor(187, 187, 187))
+        palette.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor(187, 187, 187))
+        palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(187, 187, 187))
+        palette.setColor(
+            QtGui.QPalette.ColorGroup.Disabled,
+            QtGui.QPalette.ColorRole.Text,
+            QtGui.QColor(127, 127, 127),
+        )
+        palette.setColor(QtGui.QPalette.ColorRole.Dark, QtGui.QColor(35, 35, 35))
+        palette.setColor(QtGui.QPalette.ColorRole.Shadow, QtGui.QColor(20, 20, 20))
+        palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(53, 53, 53))
+        palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(187, 187, 187))
+        palette.setColor(
+            QtGui.QPalette.ColorGroup.Disabled,
+            QtGui.QPalette.ColorRole.ButtonText,
+            QtGui.QColor(127, 127, 127),
+        )
+        palette.setColor(QtGui.QPalette.ColorRole.BrightText, QtGui.QColor(255, 0, 0))
+        palette.setColor(QtGui.QPalette.ColorRole.Link, QtGui.QColor(42, 130, 218))
+        palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(42, 130, 218))
+        palette.setColor(
+            QtGui.QPalette.ColorGroup.Disabled,
+            QtGui.QPalette.ColorRole.Highlight,
+            QtGui.QColor(80, 80, 80),
+        )
+        palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(187, 187, 187))
+        palette.setColor(
+            QtGui.QPalette.ColorGroup.Disabled,
+            QtGui.QPalette.ColorRole.HighlightedText,
+            QtGui.QColor(127, 127, 127),
+        )
+    else:
+        palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(240, 240, 240))
+        palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(0, 0, 0))
+        palette.setColor(
+            QtGui.QPalette.ColorGroup.Disabled,
+            QtGui.QPalette.ColorRole.WindowText,
+            QtGui.QColor(120, 120, 120),
+        )
+        palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(255, 255, 255))
+        palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(233, 231, 227))
+        palette.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor(255, 255, 220))
+        palette.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor(0, 0, 0))
+        palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(0, 0, 0))
+        palette.setColor(
+            QtGui.QPalette.ColorGroup.Disabled,
+            QtGui.QPalette.ColorRole.Text,
+            QtGui.QColor(120, 120, 120),
+        )
+        palette.setColor(QtGui.QPalette.ColorRole.Dark, QtGui.QColor(160, 160, 160))
+        palette.setColor(QtGui.QPalette.ColorRole.Shadow, QtGui.QColor(105, 105, 105))
+        palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(240, 240, 240))
+        palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(0, 0, 0))
+        palette.setColor(
+            QtGui.QPalette.ColorGroup.Disabled,
+            QtGui.QPalette.ColorRole.ButtonText,
+            QtGui.QColor(120, 120, 120),
+        )
+        palette.setColor(QtGui.QPalette.ColorRole.BrightText, QtGui.QColor(0, 0, 255))
+        palette.setColor(QtGui.QPalette.ColorRole.Link, QtGui.QColor(51, 153, 255))
+        palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(0, 0, 255))
+        palette.setColor(
+            QtGui.QPalette.ColorGroup.Disabled,
+            QtGui.QPalette.ColorRole.Highlight,
+            QtGui.QColor(51, 153, 255),
+        )
+        palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(255, 255, 255))
+        palette.setColor(
+            QtGui.QPalette.ColorGroup.Disabled,
+            QtGui.QPalette.ColorRole.HighlightedText,
+            QtGui.QColor(255, 255, 255),
+        )
+
+    qapp.setPalette(palette)
+
+
+def apply_accent_palette(qapp: QtWidgets.QApplication) -> None:
+    accent_color: str = str(SETTINGS.get("ui.accent_color", "")).strip()
+    if not accent_color:
+        return
+
+    color: QtGui.QColor = QtGui.QColor(accent_color)
+    if not color.isValid():
+        return
+
+    palette: QtGui.QPalette = qapp.palette()
+    palette.setColor(QtGui.QPalette.ColorRole.Highlight, color)
+    palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("#FFFFFF"))
+    qapp.setPalette(palette)
+
+
 def create_qapp(app_name: str = "VeighNa Trader") -> QtWidgets.QApplication:
     """
     Create Qt Application.
@@ -29,6 +154,14 @@ def create_qapp(app_name: str = "VeighNa Trader") -> QtWidgets.QApplication:
     # Set up font
     font: QtGui.QFont = QtGui.QFont(SETTINGS["font.family"], SETTINGS["font.size"])
     qapp.setFont(font)
+
+    def _sync_theme() -> None:
+        apply_system_theme_palette(qapp)
+        apply_accent_palette(qapp)
+        apply_system_theme_stylesheet(qapp)
+
+    _sync_theme()
+    qapp.styleHints().colorSchemeChanged.connect(lambda _: _sync_theme())
 
     # Set up icon
     icon: QtGui.QIcon = QtGui.QIcon(get_icon_path(__file__, "vnpy.ico"))

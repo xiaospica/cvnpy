@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-from pathlib import Path
 import os
-os.environ['VNPY_DOCK_BACKEND'] = 'ads'
-from PySide6.QtCore import Qt
+
+os.environ["VNPY_DOCK_BACKEND"] = "ads"
 
 from vnpy.event import EventEngine
 from vnpy.trader.engine import MainEngine
@@ -21,13 +20,6 @@ from vnpy_tushare_pro import TushareProApp
 def main():
     """"""
     qapp = create_qapp()
-    
-    is_dark = qapp.styleHints().colorScheme() == Qt.ColorScheme.Dark
-    if is_dark:
-        qss_path = Path.cwd().joinpath("resources/darkstyle.qss")
-    else:
-        qss_path = Path.cwd().joinpath("resources/lightstyle.qss")
-    qapp.setStyleSheet(f"{qapp.styleSheet()}\n{qss_path.read_text(encoding="utf-8")}")
 
     event_engine = EventEngine()
     main_engine = MainEngine(event_engine)
@@ -37,7 +29,7 @@ def main():
     main_engine.add_gateway(QmtSimGateway, gateway_name="QMT_SIM")
     
     # 加载信号策略应用
-    main_engine.add_app(SignalStrategyApp)
+    # main_engine.add_app(SignalStrategyApp)
     main_engine.add_app(SignalStrategyPlusApp)
     main_engine.add_app(SignalBacktesterApp)
     # main_engine.add_app(CtaStrategyApp)

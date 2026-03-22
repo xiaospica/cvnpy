@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from pathlib import Path
 from vnpy.trader.app import BaseApp
 
 from .engine import APP_NAME, SignalEnginePlus
@@ -19,11 +20,12 @@ __version__ = "0.0.1"
 
 class SignalStrategyPlusApp(BaseApp):
     """"""
+    from .locale import _
 
-    app_name = APP_NAME
-    app_module = __module__
-    app_path = __file__
-    display_name = "信号策略Plus"
-    engine_class = SignalEnginePlus
-    widget_name = "SignalStrategyWidgetPlus"
-    icon_name = "signal.ico"
+    app_name: str = APP_NAME
+    app_module: str = __module__
+    app_path: Path = Path(__file__).parent
+    display_name: str = _("Signal策略plus")
+    engine_class: type[SignalEnginePlus] = SignalEnginePlus
+    widget_name: str = "SignalStrategyWidgetPlus"
+    icon_name: str = str(app_path.joinpath("ui", "signal_strategy.ico"))

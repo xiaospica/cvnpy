@@ -71,6 +71,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def init_status_bar(self) -> None:
         """"""
         status_bar: QtWidgets.QStatusBar = QtWidgets.QStatusBar()
+        status_bar.setSizeGripEnabled(False)
         self.setStatusBar(status_bar)
 
         gateway_status: GatewayConnectionStatusButton = GatewayConnectionStatusButton(self.main_engine, self)

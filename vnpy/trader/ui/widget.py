@@ -10,6 +10,7 @@ from copy import copy
 from tzlocal import get_localzone_name
 from datetime import datetime
 from importlib import metadata
+from collections.abc import Iterable
 
 from .qt import QtCore, QtGui, QtWidgets, Qt
 from ..constant import Direction, Exchange, Offset, OrderType
@@ -1271,8 +1272,8 @@ class GlobalDialog(QtWidgets.QDialog):
 
         content: QtWidgets.QWidget = QtWidgets.QWidget()
         content_layout: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
-        content_layout.setContentsMargins(8, 8, 8, 8)
-        content_layout.setSpacing(12)
+        content_layout.setContentsMargins(2, 2, 2, 2)
+        content_layout.setSpacing(4)
         content.setLayout(content_layout)
 
         def get_group_key(setting_key: str) -> str:
@@ -1462,7 +1463,7 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
         super().__init__(parent)
 
         self.main_engine: MainEngine = main_engine
-        self._rows: dict[str, tuple[QtWidgets.QLabel, QtWidgets.QFrame]] = {}
+        self._rows: dict[str, tuple[QtWidgets.QFrame, QtWidgets.QLabel, QtWidgets.QLabel, QtWidgets.QFrame]] = {}
 
         self._timer: QtCore.QTimer = QtCore.QTimer(self)
         self._timer.setInterval(1000)
@@ -1478,7 +1479,7 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
 
         self._container: QtWidgets.QWidget = QtWidgets.QWidget()
         self._layout: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
-        self._layout.setContentsMargins(10, 10, 10, 10)
+        self._layout.setContentsMargins(8, 8, 8, 8)
         self._layout.setSpacing(6)
         self._container.setLayout(self._layout)
 
@@ -1491,12 +1492,39 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
 
     def show_above(self, anchor: QtWidgets.QWidget) -> None:
         self.refresh()
+        self.adjustSize()
+        self.resize(self.sizeHint())
 
         anchor_top_left: QtCore.QPoint = anchor.mapToGlobal(QtCore.QPoint(0, 0))
-        x: int = anchor_top_left.x() + anchor.width() - self.sizeHint().width()
-        y: int = anchor_top_left.y() - self.sizeHint().height() - 8
+        popup_w: int = self.width()
+        popup_h: int = self.height()
 
-        self.move(max(0, x), max(0, y))
+        window_geo: QtCore.QRect = anchor.window().frameGeometry()
+        left: int = window_geo.left()
+        right: int = window_geo.right()
+        top: int = window_geo.top()
+        bottom: int = window_geo.bottom()
+
+        preferred_x: int = anchor_top_left.x() + anchor.width() - popup_w
+        preferred_above: int = anchor_top_left.y() - popup_h - 8
+        preferred_below: int = anchor_top_left.y() + anchor.height() + 8
+
+        if preferred_above >= top:
+            preferred_y: int = preferred_above
+        elif preferred_below + popup_h <= bottom:
+            preferred_y = preferred_below
+        else:
+            preferred_y = preferred_above
+
+        x_min: int = left
+        x_max: int = max(left, right - popup_w)
+        y_min: int = top
+        y_max: int = max(top, bottom - popup_h)
+
+        x: int = min(max(preferred_x, x_min), x_max)
+        y: int = min(max(preferred_y, y_min), y_max)
+
+        self.move(x, y)
         self.show()
         self.raise_()
         self._timer.start()
@@ -1531,23 +1559,15 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
         if "__empty__" in self._rows:
             return
 
-        label: QtWidgets.QLabel = QtWidgets.QLabel(_("未加载任何接口"))
-        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        group, name_label, exchanges_label, dot = self._create_group("__empty__")
+        name_label.setText(_("未加载任何接口"))
+        name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        exchanges_label.setVisible(False)
+        group.setProperty("connected", False)
+        dot.setProperty("connected", False)
 
-        dot: QtWidgets.QFrame = QtWidgets.QFrame()
-        dot.setFixedSize(10, 10)
-        dot.setStyleSheet("background-color: #EF4444; border-radius: 5px;")
-
-        row: QtWidgets.QWidget = QtWidgets.QWidget()
-        hbox: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
-        hbox.setContentsMargins(0, 0, 0, 0)
-        hbox.addWidget(label, 1)
-        hbox.addWidget(dot, 0, QtCore.Qt.AlignmentFlag.AlignRight)
-        row.setLayout(hbox)
-
-        self._layout.addWidget(row)
-        self._rows["__empty__"] = (label, dot)
-        row.setProperty("gateway_name", "__empty__")
+        self._layout.addWidget(group)
+        self._rows["__empty__"] = (group, name_label, exchanges_label, dot)
 
         self.adjustSize()
 
@@ -1557,53 +1577,98 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
         self._remove_row("__empty__")
 
     def _add_row(self, gateway_name: str) -> None:
-        name_label: QtWidgets.QLabel = QtWidgets.QLabel(gateway_name)
-        name_label.setMinimumWidth(120)
+        group, name_label, exchanges_label, dot = self._create_group(gateway_name)
+        name_label.setText(gateway_name)
+        exchanges_label.setText("")
+        group.setProperty("connected", False)
+        dot.setProperty("connected", False)
 
-        dot: QtWidgets.QFrame = QtWidgets.QFrame()
-        dot.setFixedSize(10, 10)
-        dot.setStyleSheet("background-color: #EF4444; border-radius: 5px;")
-
-        row: QtWidgets.QWidget = QtWidgets.QWidget()
-        row.setProperty("gateway_name", gateway_name)
-
-        hbox: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
-        hbox.setContentsMargins(0, 0, 0, 0)
-        hbox.setSpacing(12)
-        hbox.addWidget(name_label, 1)
-        hbox.addWidget(dot, 0, QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-        row.setLayout(hbox)
-
-        self._layout.addWidget(row)
-        self._rows[gateway_name] = (name_label, dot)
+        self._layout.addWidget(group)
+        self._rows[gateway_name] = (group, name_label, exchanges_label, dot)
 
     def _update_row(self, gateway_name: str) -> None:
         gateway = self.main_engine.gateways.get(gateway_name)
         connected: bool = bool(getattr(gateway, "connected", False))
 
-        label, dot = self._rows[gateway_name]
-        label.setText(gateway_name)
-        dot.setStyleSheet(
-            "background-color: #22C55E; border-radius: 5px;" if connected
-            else "background-color: #EF4444; border-radius: 5px;"
-        )
+        group, name_label, exchanges_label, dot = self._rows[gateway_name]
+
+        name_label.setText(gateway_name)
+
+        exchanges_label.setText(self._format_exchanges(getattr(gateway, "exchanges", None)))
+
+        group.setProperty("connected", connected)
+        dot.setProperty("connected", connected)
+        self._repolish(group)
+        self._repolish(dot)
 
     def _remove_row(self, gateway_name: str) -> None:
         row = self._rows.pop(gateway_name, None)
         if not row:
             return
-        label, dot = row
+        group, name_label, exchanges_label, dot = row
+        self._layout.removeWidget(group)
+        group.setParent(None)
+        group.deleteLater()
 
-        for i in range(self._layout.count()):
-            item = self._layout.itemAt(i)
-            widget = item.widget() if item else None
-            if not widget:
-                continue
-            if widget.property("gateway_name") == gateway_name:
-                self._layout.takeAt(i)
-                widget.setParent(None)
-                widget.deleteLater()
-                break
+    def _create_group(
+        self,
+        gateway_name: str,
+    ) -> tuple[QtWidgets.QFrame, QtWidgets.QLabel, QtWidgets.QLabel, QtWidgets.QFrame]:
+        group: QtWidgets.QFrame = QtWidgets.QFrame()
+        group.setObjectName("gateway_status_group")
+        group.setProperty("gateway_name", gateway_name)
+
+        name_label: QtWidgets.QLabel = QtWidgets.QLabel()
+        name_label.setObjectName("gateway_name")
+
+        exchanges_label: QtWidgets.QLabel = QtWidgets.QLabel()
+        exchanges_label.setObjectName("gateway_exchanges")
+
+        left: QtWidgets.QWidget = QtWidgets.QWidget()
+        vbox: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(1)
+        vbox.addWidget(name_label)
+        vbox.addWidget(exchanges_label)
+        left.setLayout(vbox)
+
+        dot: QtWidgets.QFrame = QtWidgets.QFrame()
+        dot.setObjectName("gateway_status_dot")
+        dot.setFixedSize(10, 10)
+
+        hbox: QtWidgets.QHBoxLayout = QtWidgets.QHBoxLayout()
+        hbox.setContentsMargins(8, 6, 8, 6)
+        hbox.setSpacing(10)
+        hbox.addWidget(left, 1)
+        hbox.addWidget(dot, 0, QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        group.setLayout(hbox)
+
+        return group, name_label, exchanges_label, dot
+
+    def _format_exchanges(self, exchanges: object) -> str:
+        if exchanges is None:
+            return "-"
+
+        if isinstance(exchanges, (str, bytes)):
+            text: str = str(exchanges).strip()
+            return text if text else "-"
+
+        if not isinstance(exchanges, Iterable):
+            return "-"
+
+        parts: list[str] = []
+        for ex in exchanges:
+            value = getattr(ex, "value", None)
+            parts.append(str(value) if value is not None else str(ex))
+
+        result: str = ", ".join([p for p in parts if p])
+        return result if result else "-"
+
+    def _repolish(self, widget: QtWidgets.QWidget) -> None:
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
+        widget.update()
 
 
 class GatewayConnectionStatusButton(QtWidgets.QToolButton):
