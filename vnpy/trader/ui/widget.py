@@ -1464,6 +1464,8 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
 
         self.main_engine: MainEngine = main_engine
         self._rows: dict[str, tuple[QtWidgets.QFrame, QtWidgets.QLabel, QtWidgets.QLabel, QtWidgets.QFrame]] = {}
+        self._anchor_window: QtWidgets.QWidget | None = None
+        self._anchor_widget: QtWidgets.QWidget | None = None
 
         self._timer: QtCore.QTimer = QtCore.QTimer(self)
         self._timer.setInterval(1000)
@@ -1491,6 +1493,9 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
         self.refresh()
 
     def show_above(self, anchor: QtWidgets.QWidget) -> None:
+        self._anchor_window = anchor.window()
+        self._anchor_widget = anchor
+
         self.refresh()
         self.adjustSize()
         self.resize(self.sizeHint())
@@ -1499,7 +1504,7 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
         popup_w: int = self.width()
         popup_h: int = self.height()
 
-        window_geo: QtCore.QRect = anchor.window().frameGeometry()
+        window_geo: QtCore.QRect = self._anchor_window.frameGeometry() if self._anchor_window else anchor.window().frameGeometry()
         left: int = window_geo.left()
         right: int = window_geo.right()
         top: int = window_geo.top()
@@ -1531,6 +1536,8 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
 
     def hideEvent(self, event: QtGui.QHideEvent) -> None:
         self._timer.stop()
+        self._anchor_window = None
+        self._anchor_widget = None
         super().hideEvent(event)
 
     def refresh(self) -> None:
@@ -1554,6 +1561,9 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
             self._update_row(name)
 
         self.adjustSize()
+        if self.isVisible() and self._anchor_window:
+            self.resize(self.sizeHint())
+            self._clamp_into_window(self._anchor_window)
 
     def _ensure_empty_placeholder(self) -> None:
         if "__empty__" in self._rows:
@@ -1663,6 +1673,28 @@ class GatewayConnectionStatusPopup(QtWidgets.QFrame):
 
         result: str = ", ".join([p for p in parts if p])
         return result if result else "-"
+
+    def _clamp_into_window(self, window: QtWidgets.QWidget) -> None:
+        window_geo: QtCore.QRect = window.frameGeometry()
+        left: int = window_geo.left()
+        right: int = window_geo.right()
+        top: int = window_geo.top()
+        bottom: int = window_geo.bottom()
+
+        popup_w: int = self.width()
+        popup_h: int = self.height()
+
+        x_min: int = left
+        x_max: int = max(left, right - popup_w)
+        y_min: int = top
+        y_max: int = max(top, bottom - popup_h)
+
+        pos: QtCore.QPoint = self.pos()
+        x: int = min(max(pos.x(), x_min), x_max)
+        y: int = min(max(pos.y(), y_min), y_max)
+
+        if x != pos.x() or y != pos.y():
+            self.move(x, y)
 
     def _repolish(self, widget: QtWidgets.QWidget) -> None:
         style = widget.style()
