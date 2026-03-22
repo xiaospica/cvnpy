@@ -241,9 +241,7 @@ class SimulationCounter:
                 exchange=trade.exchange,
                 direction=Direction.LONG,
                 volume=0,
-                # gateway_name=self.gateway.gateway_name
-                # TODO 临时修改！！！
-                gateway_name=self.accountid
+                gateway_name=self.gateway.gateway_name
             )
             self.positions[pos_long_id] = pos
             print(f'创建新持仓{pos.vt_positionid}')

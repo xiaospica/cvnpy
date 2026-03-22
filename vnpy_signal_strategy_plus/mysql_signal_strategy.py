@@ -21,6 +21,7 @@ from vnpy.trader.constant import Direction, Offset, OrderType, Exchange
 from .template import SignalTemplatePlus
 from .auto_resubmit import AutoResubmitMixinPlus
 from .base import EngineType, CHINA_TZ
+from .utils import choose_order_price, convert_code_to_vnpy_type
 
 Base = declarative_base()
 
@@ -43,12 +44,11 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
     author = "VeighNa"
 
     parameters = [
-        "account_id", "db_host", "db_port", "db_user", 
+        "db_host", "db_port", "db_user", 
         "db_password", "db_name", "poll_interval",        
         "engine_type", "start_date", "end_date", "gateway"
     ]
     variables = ["last_signal_id"]
-    account_id = ""
     db_host = ""
     db_port = 3306
     db_user = "root"
@@ -143,6 +143,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
     def on_order(self, order: OrderData) -> None:
         """接收订单回报并交由重挂混入层处理。"""
         self.on_order_for_resubmit(order)
+        # pass
 
     def on_timer(self):
         """定时驱动重挂队列执行。"""
@@ -215,13 +216,8 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         """处理信号"""
         self.write_log(f"收到信号: {signal.id} {signal.code} {signal.pct} {signal.type} {signal.remark}")
         
-        # Parse symbol
-        symbol = signal.code
-        exchange_str = "SSE" if symbol.startswith("6") else "SZSE"
-        if "." in symbol:
-            symbol, suffix = symbol.split(".")
-        
-        vt_symbol = f"{symbol}.{exchange_str}"
+        # Parse symbol  
+        vt_symbol = convert_code_to_vnpy_type(signal.code)
         
         # Determine direction
         direction = Direction.LONG
@@ -242,103 +238,63 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             if "close" in signal_type:
                 offset = Offset.CLOSE # Buy to close (cover short)?
 
-        # Volume calculation
-        volume = signal.pct
-        
-        # If volume is small (percentage), try to calculate
-        if volume <= 1.0:
+        # pct calculation
+        pct = float(signal.pct)
+        fallback_price = float(signal.price or 0)
 
-            # Get last price from engine
-            tick = self.signal_engine.main_engine.get_tick(vt_symbol)
-            if tick:
-                calc_price = tick.last_price
-            else:
-                self.write_log(f"无法获取{vt_symbol}行情，使用signal.price={signal.price}")
-                # return
-            # Determine price for calculation
-            calc_price = signal.price
+        gateway_name = self.get_gateway_name(vt_symbol)
+        if not gateway_name:
+            self.write_log(f"无法获取网关名称，无法处理信号: {vt_symbol}")
+            return
 
+        if pct <= 1.0:
+            calc_price = self.get_best_price(vt_symbol, direction, fallback_price)
             if calc_price <= 0:
-                self.write_log(f"signal.price异常，无法计算百分比仓位")
+                self.write_log(f"无法获取{vt_symbol}有效价格，无法计算百分比仓位")
                 return
 
-            # Buy: use percentage of capital
-            # Get total capital
-            total_capital = self.get_account_asset(self.account_id)
-            
+            total_capital = self.get_account_asset(gateway_name)
             if total_capital <= 0:
                 self.write_log("账户资金为0，无法计算百分比仓位")
                 return
-            
-            # Calculate target volume
-            target_value = total_capital * volume
-            volume = target_value / calc_price
-        
-            # Ensure volume is integer (stock usually 100 multiples, but let's just int)
-            # If it was percentage 0.5 -> 0, so it returns below.
-            vol_int = int(volume)
-            # Round down to nearest 100 for stock?
-            # Usually yes for A-share buying. For selling, it can be odd lots if clearing out?
-            # But usually we trade in 100s.
-            # Let's apply 100 rounding if it's a stock (exchange SSE/SZSE)
-            if exchange_str in ["SSE", "SZSE", "SS", "SZ"]:
-                vol_int = (vol_int // 100) * 100
+
+            target_value = total_capital * pct
+            vol_int = int(target_value / calc_price)
+            vol_int = (vol_int // 100) * 100
 
             if vol_int <= 0:
-                self.write_log(f"下单数量为0 (计算后: {vol_int})，忽略信号: {volume}")
+                self.write_log(f"下单数量为0 (计算后: {vol_int})，忽略信号: {pct}")
                 return
 
             if direction == Direction.LONG:
-                
-                self.write_log(f"百分比仓位计算: 资金{total_capital} * 比例{signal.pct} / 价格{calc_price} = 数量{vol_int}")
-                
+
+                self.write_log(
+                    f"百分比仓位计算(买入): 资金{total_capital} * 比例{signal.pct} / 价格{calc_price} = 数量{vol_int}"
+                )
             else:
-                # Sell: percentage of holding
-                # Find position
-                # Try long position for stock
-                # Need to find gateway name first to construct correct vt_positionid
-                contract = self.signal_engine.main_engine.get_contract(vt_symbol)
-                gateway_name = ""
-                if contract:
-                    gateway_name = contract.gateway_name
-                else:
-                    # Fallback: try to guess or use the first gateway
-                    # For QMT Sim, it's QMT_SIM
-                    for gw in self.signal_engine.main_engine.gateways.values():
-                        if Exchange(exchange_str) in gw.exchanges:
-                            gateway_name = gw.gateway_name
-                            break
-                
+
+                vt_positionid = f"{gateway_name}.{vt_symbol}.{Direction.LONG.value}"
                 pos = None
-                if gateway_name:
-                    # vt_positionid format: gateway_name.symbol.exchange.Direction.Long
-                    # Direction.LONG.value is 'Long'
-                    vt_positionid = f"{self.account_id}.{vt_symbol}.{Direction.LONG.value}"                    
-                    for position in self.signal_engine.main_engine.get_all_positions():
-                        if position.vt_positionid == vt_positionid:
-                            pos = position
-                    
-                    if not pos:
-                         self.write_log(f"未找到持仓: {vt_positionid}")
-                else:
-                     self.write_log(f"无法确定网关，无法查询持仓: {vt_symbol}")
+                for position in self.signal_engine.main_engine.get_all_positions():
+                    if position.vt_positionid == vt_positionid:
+                        pos = position
+                        break
 
                 if not pos:
-                    # Try legacy/fallback query if needed, or fail
-                    pass
-                
-                if pos:
-                    if pos.volume >= vol_int:
-                        self.write_log(f"百分比仓位计算(卖出): 持仓{pos.volume} * 比例{signal.pct} = 数量{vol_int}")
-                    else:
-                        self.write_log(f"[测试]卖出超过当前持仓: 持仓{pos.volume} * 比例{signal.pct} = 数量{vol_int}，清仓")
-                        vol_int = pos.volume
-                        # return
-                else:
-                    self.write_log(f"未找到持仓{vt_symbol}，无法计算卖出比例")
+                    self.write_log(f"未找到持仓: {vt_positionid}")
                     return
 
-        price = calc_price
+                if vol_int > int(pos.volume):
+                    vol_int = int(pos.volume)
+
+                self.write_log(
+                    f"百分比仓位计算(卖出): 持仓{pos.volume} * 比例{signal.pct} = 数量{vol_int}"
+                )
+        else:
+            self.write_log(f'百分比异常！{pct}')
+            return
+
+        price = self.get_best_price(vt_symbol, direction, fallback_price)
         order_type = OrderType.LIMIT
         if price <= 0:
             order_type = OrderType.MARKET
@@ -358,6 +314,48 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         else:
             self.write_log("下单失败")
 
+    def get_gateway_name(self, vt_symbol: str) -> str | None:
+        contract = self.signal_engine.main_engine.get_contract(vt_symbol)
+        exchange_str = vt_symbol.split(".")[-1]
+        gateway_name = ""
+        if contract:
+            gateway_name = contract.gateway_name
+        elif self.gateway:
+            gateway_name = self.gateway
+        else:
+            for gw in self.signal_engine.main_engine.gateways.values():
+                if Exchange(exchange_str) in gw.exchanges:
+                    gateway_name = gw.gateway_name
+                    break
+
+        if not gateway_name:
+            self.write_log(f"无法确定网关，无法查询持仓: {vt_symbol}")
+            return None
+        return gateway_name
+
+    def get_active_tick(self, vt_symbol: str) -> TickData | None:
+        gateway = None
+        if self.gateway:
+            gateway = self.signal_engine.main_engine.get_gateway(self.gateway)
+
+        if gateway and hasattr(gateway, "get_full_tick"):
+            try:
+                tick = gateway.get_full_tick(vt_symbol)
+                if tick:
+                    return tick
+            except Exception as e:
+                import traceback
+
+                self.write_log(f"主动获取五档行情异常: {vt_symbol} {e}\n{traceback.format_exc()}")
+
+        return self.signal_engine.main_engine.get_tick(vt_symbol)
+
+    def get_best_price(self, vt_symbol: str, direction: Direction, fallback_price: float) -> float:
+        tick = self.get_active_tick(vt_symbol)
+        contract = self.signal_engine.main_engine.get_contract(vt_symbol)
+        pricetick = contract.pricetick if contract else None
+        return choose_order_price(tick, direction, fallback_price, pricetick)
+
     def connect_db(self):
         """连接数据库"""
         try:
@@ -368,13 +366,14 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         except Exception as e:
             self.write_log(f"数据库连接失败: {e}")
 
-    def get_account_asset(self, account_id: str):
+    def get_account_asset(self, gateway_name: str):
         total_capital = 0.0
         position_capital = 0.0
         account_capital = 0.0
+
         for position in self.signal_engine.main_engine.get_all_positions():
-            # print(f'{position.gateway_name} {position.volume} {position.price}')
-            if position.gateway_name == account_id:
+            print(f'{position.gateway_name} {position.volume} {position.price}')
+            if position.gateway_name == gateway_name:
                 tick = self.signal_engine.main_engine.get_tick(position.vt_symbol)
                 if tick:
                     calc_price = tick.last_price
@@ -383,7 +382,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
                     # self.write_log(f'未获取到{position.vt_symbol}的最新价格，使用持仓价格计算仓位资产')
                     position_capital += position.volume * position.price
         for account in self.signal_engine.main_engine.get_all_accounts():
-            if account.accountid == account_id:
+            if account.gateway_name == gateway_name:
                 account_capital += account.balance
 
         total_capital = position_capital + account_capital

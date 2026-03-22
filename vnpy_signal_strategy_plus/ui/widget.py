@@ -143,6 +143,7 @@ class SignalStrategyWidgetPlus(QtWidgets.QWidget):
         """
         data = event.data
         strategy_name: str = data["strategy_name"]
+        data['parameters']["db_password"] = "**************"
 
         if strategy_name in self.managers:
             manager: SignalStrategyManagerPlus = self.managers[strategy_name]
@@ -206,7 +207,7 @@ class SignalStrategyManagerPlus(QtWidgets.QFrame):
 
     def init_ui(self) -> None:
         """"""
-        self.setFixedHeight(220)
+        self.setFixedHeight(230)
         self.setFrameShape(self.Shape.Box)
         self.setLineWidth(1)
 
@@ -226,10 +227,10 @@ class SignalStrategyManagerPlus(QtWidgets.QFrame):
 
         strategy_name: str = self._data["strategy_name"]
         class_name: str = self._data["class_name"]
-        author: str = self._data["author"]
+        gateway: str = self.signal_engine.strategies[strategy_name].gateway
 
         label_text: str = (
-            f"{strategy_name}  ({class_name} by {author})"
+            f"{strategy_name}  ({class_name} - [{gateway}])"
         )
         label: QtWidgets.QLabel = QtWidgets.QLabel(label_text)
         label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)

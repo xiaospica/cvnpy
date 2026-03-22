@@ -333,20 +333,25 @@ class SignalEnginePlus(BaseEngine):
             self.write_log(f"合约代码格式错误{vt_symbol}", strategy)
             return []
 
-        # Find gateway
-        contract = self.main_engine.get_contract(vt_symbol)
-        if contract:
-            gateway_name = contract.gateway_name
+        # # Find gateway
+        # contract = self.main_engine.get_contract(vt_symbol)
+        # if contract:
+        #     gateway_name = contract.gateway_name
+        # else:
+        #     # Fallback for simulation or if contract not found
+        #     # Try to find a gateway that supports this exchange
+        #     for gateway in self.main_engine.gateways.values():
+        #          if req.exchange in gateway.exchanges:
+        #              gateway_name = gateway.gateway_name
+        #              break
+        #     else:
+        #         self.write_log(f"未找到合约信息{vt_symbol}，且无支持该交易所的网关，无法下单", strategy)
+        #         return []
+        if strategy.gateway:
+            gateway_name = strategy.gateway
         else:
-            # Fallback for simulation or if contract not found
-            # Try to find a gateway that supports this exchange
-            for gateway in self.main_engine.gateways.values():
-                 if req.exchange in gateway.exchanges:
-                     gateway_name = gateway.gateway_name
-                     break
-            else:
-                self.write_log(f"未找到合约信息{vt_symbol}，且无支持该交易所的网关，无法下单", strategy)
-                return []
+            self.write_log(f"未指定网关{vt_symbol, strategy.gateway}, 请检查json配置", strategy)
+            return []
 
         vt_orderid = self.main_engine.send_order(req, gateway_name)
         if not vt_orderid:

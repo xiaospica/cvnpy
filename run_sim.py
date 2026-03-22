@@ -9,6 +9,7 @@ from vnpy.trader.ui import MainWindow, create_qapp
 
 from vnpy_qmt import QmtGateway
 from vnpy_qmt_sim import QmtSimGateway
+from vnpy_xt import XtGateway
 from vnpy_signal_strategy import SignalStrategyApp
 from vnpy_signal_strategy_plus import SignalStrategyPlusApp
 from vnpy_signal_strategy_plus_backtester import SignalBacktesterApp
@@ -25,7 +26,8 @@ def main():
     main_engine = MainEngine(event_engine)
 
     # 加载模拟网关
-    main_engine.add_gateway(QmtGateway, gateway_name="QMT")
+    main_engine.add_gateway(XtGateway, gateway_name="Xt")
+    # main_engine.add_gateway(QmtGateway, gateway_name="QMT")
     main_engine.add_gateway(QmtSimGateway, gateway_name="QMT_SIM")
     
     # 加载信号策略应用
@@ -38,7 +40,7 @@ def main():
     
     # 手动添加策略（在UI中也可添加）
     # 策略会自动从外部配置文件加载其对应的配置
-    signal_engine = main_engine.get_engine("SignalStrategy")
+    # signal_engine = main_engine.get_engine("SignalStrategy")
     signal_engine_plus = main_engine.get_engine("SignalStrategyPlus")
 
     main_window = MainWindow(main_engine, event_engine)

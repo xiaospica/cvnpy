@@ -1,5 +1,6 @@
 from vnpy.trader.object import OrderData
 from vnpy.trader.constant import Status
+from .utils import choose_order_price
 
 
 class AutoResubmitMixinPlus:
@@ -26,8 +27,34 @@ class AutoResubmitMixinPlus:
         return True
 
     def adjust_resubmit_price(self, order: OrderData) -> float:
-        """计算重挂价格，默认沿用原委托价。"""
-        return order.price
+        """计算重挂价格，优先按最新五档买一/卖一重新定价。"""
+        main_engine = getattr(self, "signal_engine", None)
+        if not main_engine:
+            return float(order.price)
+
+        engine = getattr(main_engine, "main_engine", None)
+        if not engine:
+            return float(order.price)
+
+        gateway = None
+        if getattr(order, "gateway_name", ""):
+            gateway = engine.get_gateway(order.gateway_name)
+        if not gateway and getattr(self, "gateway", ""):
+            gateway = engine.get_gateway(self.gateway)
+
+        tick = None
+        if gateway and hasattr(gateway, "get_full_tick"):
+            try:
+                tick = gateway.get_full_tick(order.vt_symbol)
+            except Exception:
+                tick = None
+
+        if not tick:
+            tick = engine.get_tick(order.vt_symbol)
+
+        contract = engine.get_contract(order.vt_symbol)
+        pricetick = contract.pricetick if contract else None
+        return choose_order_price(tick, order.direction, float(order.price), pricetick)
 
     def on_order_for_resubmit(self, order: OrderData) -> None:
         """在订单回报中登记待重挂任务，不在回调内直接重提。"""

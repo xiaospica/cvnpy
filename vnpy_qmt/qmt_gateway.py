@@ -21,6 +21,7 @@ from vnpy.trader.object import (
     CancelRequest,
     SubscribeRequest,
     ContractData,
+    TickData,
 )
 
 from vnpy_qmt.md import MD
@@ -70,6 +71,9 @@ class QmtGateway(BaseGateway):
 
     def subscribe(self, req: SubscribeRequest) -> None:
         return self.md.subscribe(req)
+
+    def get_full_tick(self, vt_symbol: str) -> TickData | None:
+        return self.md.get_full_tick(vt_symbol)
 
     def send_order(self, req: OrderRequest) -> str:
         return self.td.send_order(req)

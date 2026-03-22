@@ -1,6 +1,5 @@
 {
     "multistrategy-v5.2.1": {
-        "account_id": "test_id",
         "db_host": "106.54.63.204",
         "db_port": 3306,
         "db_user": "root",
@@ -8,7 +7,7 @@
         "db_name": "mysql",
         "poll_interval": 0.05,
         "engine_type": "回测",
-        "start_date": "20260101 00:00:00",
+        "start_date": "20260125 00:00:00",
         "end_date": "20260321 00:00:00",
         "gateway": "QMT_SIM"
     }
