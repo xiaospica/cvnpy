@@ -1,7 +1,0 @@
-- [x] `vnpy_signal_strategy_plus` 的 `APP_NAME` 与 `vnpy_ctastrategy` 不冲突，App 可被正常加载
-- [x] 策略扫描从 `vnpy_signal_strategy_plus/strategies` 加载，且能发现 `MultiStrategySignalStrategyPlus`
-- [x] CTA 引擎注册 `EVENT_TIMER` 并能驱动策略 `on_timer`（存在时）
-- [x] 引擎支持按指定 `vt_symbol` 下单，并能正确建立 orderid→strategy 映射与回报路由
-- [x] `MySQLSignalStrategyPlus` 保留：外部 JSON 配置、DB 轮询、信号处理、比例仓位计算、自动重挂
-- [x] `vnpy_signal_strategy_plus` 内不再依赖 `vnpy_signal_strategy.*`（避免交叉导入与命名冲突）
-- [x] 回测：能在不连 MySQL 的情况下跑通“加载策略→初始化→启动回放”的最小流程（允许忽略外部信号）

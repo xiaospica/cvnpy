@@ -1,6 +1,0 @@
-- [x] `architecture.md` contains deep analysis of `EventEngine` thread model and timer.
-- [x] `architecture.md` contains deep analysis of `OmsEngine` offset conversion and data synchronization.
-- [x] `architecture.md` contains deep analysis of `CtaEngine` local stop order and target pos template.
-- [x] `architecture.md` contains deep analysis of `BacktestingEngine` matching algorithms and data playback.
-- [x] `architecture.md` contains deep analysis of `QmtGateway` A-share specifics (remark ID, async handling).
-- [x] All diagrams use correct Mermaid syntax and render properly.

@@ -1,7 +1,0 @@
-- [x] `vnpy_qmt_sim` has `md.py` and `td.py`
-- [x] `vnpy_qmt_sim.QmtSimGateway` has `self.md` and `self.td`
-- [x] `vnpy_qmt_sim` supports `query_order`, `query_trade`, `query_position`, `query_account`
-- [x] `vnpy_signal_strategy` Engine loads classes from `strategies/`
-- [x] `vnpy_signal_strategy` UI allows adding strategy by selecting class
-- [x] `vnpy_signal_strategy` UI displays strategy parameters and variables
-- [x] `MySQLSignalStrategy` correctly finds positions in simulation
