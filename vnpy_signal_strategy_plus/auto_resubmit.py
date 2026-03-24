@@ -1,5 +1,7 @@
+from datetime import datetime, timedelta
+
 from vnpy.trader.object import OrderData
-from vnpy.trader.constant import Status
+from vnpy.trader.constant import Status, Direction
 from .utils import choose_order_price
 
 
@@ -8,6 +10,9 @@ class AutoResubmitMixinPlus:
 
     resubmit_limit: int = 10
     resubmit_interval: int = 5
+    reject_resubmit_limit: int = 3
+    reject_resubmit_delay_seconds: int = 5
+    reject_resubmit_backoff_max_seconds: int = 60
 
     def __init__(self, *args, **kwargs):
         """初始化重挂状态容器。"""
@@ -16,13 +21,49 @@ class AutoResubmitMixinPlus:
         self._pending_resubmit: dict[str, dict] = {}
         self._resubmit_clock: int = 0
 
+    def get_reject_status_msg(self, order: OrderData) -> str:
+        msg = ""
+        try:
+            extra = getattr(order, "extra", None)
+            if isinstance(extra, dict):
+                msg = str(extra.get("status_msg") or "")
+        except Exception:
+            msg = ""
+
+        if not msg:
+            msg = str(getattr(order, "status_msg", "") or "")
+        return msg
+
+    def is_insufficient_cash_reject(self, order: OrderData) -> bool:
+        msg = self.get_reject_status_msg(order)
+        if not msg:
+            return False
+        if "260200" in msg:
+            return True
+        if "可用资金不足" in msg:
+            return True
+        if "资金不足" in msg:
+            return True
+        return False
+
     def should_auto_resubmit(self, order: OrderData) -> bool:
         """判断订单是否满足自动重挂条件。"""
-        if order.status not in (Status.CANCELLED, Status.REJECTED):
+        if order.status == Status.CANCELLED:
+            pass
+        elif order.status == Status.REJECTED:
+            if order.direction != Direction.LONG:
+                return False
+            if not self.is_insufficient_cash_reject(order):
+                return False
+        else:
             return False
         if order.traded >= order.volume:
             return False
-        if self._resubmit_count.get(order.vt_orderid, 0) >= self.resubmit_limit:
+        attempts = self._resubmit_count.get(order.vt_orderid, 0)
+        if order.status == Status.REJECTED:
+            if attempts >= self.reject_resubmit_limit:
+                return False
+        elif attempts >= self.resubmit_limit:
             return False
         return True
 
@@ -62,11 +103,24 @@ class AutoResubmitMixinPlus:
             return
         if order.vt_orderid in self._pending_resubmit:
             return
-        self.write_log(f"触发撤单重挂：{order}")
         remain: float = order.volume - order.traded
         if remain <= 0:
             return
         attempts: int = self._resubmit_count.get(order.vt_orderid, 0)
+        reason = "cancel"
+        ready_at = datetime.now()
+        reject_msg = ""
+
+        if order.status == Status.REJECTED:
+            reason = "reject_insufficient_cash"
+            reject_msg = self.get_reject_status_msg(order)
+            delay = max(int(self.reject_resubmit_delay_seconds), 1)
+            delay = min(delay * (2**attempts), int(self.reject_resubmit_backoff_max_seconds))
+            ready_at = datetime.now() + timedelta(seconds=delay)
+            self.write_log(f"触发拒单延时重挂：{order.vt_orderid} delay={delay}s msg={reject_msg}")
+        else:
+            self.write_log(f"触发撤单重挂：{order.vt_orderid}")
+
         self._pending_resubmit[order.vt_orderid] = {
             "vt_symbol": order.vt_symbol,
             "direction": order.direction,
@@ -75,8 +129,11 @@ class AutoResubmitMixinPlus:
             "price": self.adjust_resubmit_price(order),
             "volume": remain,
             "attempts": attempts,
+            "reason": reason,
+            "ready_at": ready_at,
+            "reject_msg": reject_msg,
         }
-        self.write_log(f"加入重挂队列: {order.vt_orderid} 剩余={remain}")
+        self.write_log(f"加入重挂队列: {order.vt_orderid} reason={reason} ready_at={ready_at} 剩余={remain}")
 
     def on_timer_for_resubmit(self) -> None:
         """按定时节流处理重挂队列并提交新委托。"""
@@ -89,8 +146,16 @@ class AutoResubmitMixinPlus:
             return
 
         for vt_orderid, task in list(self._pending_resubmit.items()):
+            ready_at = task.get("ready_at")
+            if isinstance(ready_at, datetime):
+                if datetime.now() < ready_at:
+                    continue
+
             attempts: int = int(task["attempts"])
-            if attempts >= self.resubmit_limit:
+            limit = self.resubmit_limit
+            if task.get("reason") == "reject_insufficient_cash":
+                limit = self.reject_resubmit_limit
+            if attempts >= limit:
                 self._pending_resubmit.pop(vt_orderid, None)
                 self.write_log(f"重挂达到上限，放弃: {vt_orderid}")
                 continue
@@ -106,6 +171,10 @@ class AutoResubmitMixinPlus:
 
             if not vt_orderids:
                 task["attempts"] = attempts + 1
+                if task.get("reason") == "reject_insufficient_cash":
+                    delay = max(int(self.reject_resubmit_delay_seconds), 1)
+                    delay = min(delay * (2 ** int(task["attempts"])), int(self.reject_resubmit_backoff_max_seconds))
+                    task["ready_at"] = datetime.now() + timedelta(seconds=delay)
                 continue
 
             next_attempt: int = attempts + 1

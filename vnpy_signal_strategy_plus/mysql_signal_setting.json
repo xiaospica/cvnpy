@@ -10,5 +10,30 @@
         "start_date": "20260125 00:00:00",
         "end_date": "20260321 00:00:00",
         "gateway": "QMT"
+    },
+    "harvester_micro_cap_1":{
+        "db_host": "106.54.63.204",
+        "db_port": 3306,
+        "db_user": "root",
+        "db_password": "xw$10062127",
+        "db_name": "mysql",
+        "poll_interval": 0.05,
+        "engine_type": "实盘",
+        "start_date": "20260125 00:00:00",
+        "end_date": "20260321 00:00:00",
+        "gateway": "QMT"
+    },
+    "live_order_test":{
+        "db_host": "106.54.63.204",
+        "db_port": 3306,
+        "db_user": "root",
+        "db_password": "xw$10062127",
+        "db_name": "mysql",
+        "poll_interval": 0.05,
+        "engine_type": "实盘",
+        "start_date": "20260125 00:00:00",
+        "end_date": "20260321 00:00:00",
+        "gateway": "QMT"
     }
+}
 }

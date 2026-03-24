@@ -225,10 +225,18 @@ class SignalStrategyManagerPlus(QtWidgets.QFrame):
         self.remove_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("移除"))
         self.remove_button.clicked.connect(self.remove_strategy)
 
+        self.auto_test_button: QtWidgets.QPushButton | None = None
+        strategy = self.signal_engine.strategies.get(self.strategy_name)
+        if strategy and getattr(strategy, "is_live_test_strategy", False) and hasattr(strategy, "run_live_test_suite"):
+            self.auto_test_button = QtWidgets.QPushButton(_("自动化测试"))
+            self.auto_test_button.clicked.connect(self.run_auto_test)
+
         strategy_name: str = self._data["strategy_name"]
         class_name: str = self._data["class_name"]
-        gateway: str = self.signal_engine.strategies[strategy_name].gateway
-
+        gateway = ""
+        if strategy_name in self.signal_engine.strategies:
+            gateway: str = self.signal_engine.strategies[strategy_name].gateway
+        
         label_text: str = (
             f"{strategy_name}  ({class_name} - [{gateway}])"
         )
@@ -243,6 +251,8 @@ class SignalStrategyManagerPlus(QtWidgets.QFrame):
         hbox.addWidget(self.start_button)
         hbox.addWidget(self.stop_button)
         hbox.addWidget(self.remove_button)
+        if self.auto_test_button:
+            hbox.addWidget(self.auto_test_button)
 
         vbox: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
         vbox.addWidget(label)
@@ -250,6 +260,39 @@ class SignalStrategyManagerPlus(QtWidgets.QFrame):
         vbox.addWidget(self.parameters_monitor)
         vbox.addWidget(self.variables_monitor)
         self.setLayout(vbox)
+
+    def run_auto_test(self) -> None:
+        strategy = self.signal_engine.strategies.get(self.strategy_name)
+        if not strategy:
+            return
+        if not getattr(strategy, "is_live_test_strategy", False):
+            return
+
+        text = (
+            "<div style='font-size:14px;'>"
+            "<div style='color:#b00000;font-size:16px;font-weight:700;font-style:italic;'>"
+            "风险提示：即将向数据库写入测试信号，并触发真实下单流程。请务必使用模拟账户/小资金，勿在实盘账户上执行。"
+            "</div>"
+            "<div style='margin-top:10px;'>确认继续执行自动化测试？</div>"
+            "</div>"
+        )
+
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("自动化测试确认")
+        box.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        box.setText(text)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+        box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.No)
+        if box.exec() != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        items = ["全部", "冒烟", "基础", "全量"]
+        suite, ok = QtWidgets.QInputDialog.getItem(self, "选择测试套件", "套件：", items, 0, False)
+        if not ok:
+            return
+
+        self.signal_engine.call_strategy_func(strategy, strategy.run_live_test_suite, suite)
 
     def update_data(self, data: dict) -> None:
         """"""

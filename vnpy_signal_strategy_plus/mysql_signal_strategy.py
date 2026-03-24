@@ -165,24 +165,31 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         today_start = datetime.combine(self.current_dt, datetime.min.time())  # 当天开始时间
         # today_end = today_start + timedelta(days=1) - timedelta(seconds=1)  # 当天结束时间
 
-        signals = []
-        if self.engine_type == EngineType.BACKTESTING.value:
-            signals = session.query(Stock).order_by(Stock.id.asc()).filter(
-                Stock.stg == self.strategy_name,
-                Stock.remark >= today_start,
-                Stock.remark <= self.current_dt,
-                # Stock.processed == False  # 查询未处理的信号
-            ).limit(100).all()  # 每次最多处理 100 条信号
-        elif self.engine_type == EngineType.LIVE.value:
-            signals = session.query(Stock).order_by(Stock.id.asc()).filter(
-                Stock.stg == self.strategy_name,
-                Stock.remark >= today_start,
-                Stock.remark <= self.current_dt,
-                Stock.processed == False  # 查询未处理的信号
-            ).limit(100).all()  # 每次最多处理 100 条信号
-        else:
-            self.write_log(f'unsupported engine type: {self.engine_type}')
-            return []
+        # signals = []
+        # if self.engine_type == EngineType.BACKTESTING.value:
+        #     signals = session.query(Stock).order_by(Stock.id.asc()).filter(
+        #         Stock.stg == self.strategy_name,
+        #         Stock.remark >= today_start,
+        #         Stock.remark <= self.current_dt,
+        #         # Stock.processed == False  # 查询未处理的信号
+        #     ).limit(100).all()  # 每次最多处理 100 条信号
+        # elif self.engine_type == EngineType.LIVE.value:
+        #     signals = session.query(Stock).order_by(Stock.id.asc()).filter(
+        #         Stock.stg == self.strategy_name,
+        #         Stock.remark >= today_start,
+        #         Stock.remark <= self.current_dt,
+        #         Stock.processed == False  # 查询未处理的信号
+        #     ).limit(100).all()  # 每次最多处理 100 条信号
+        # else:
+        #     self.write_log(f'unsupported engine type: {self.engine_type}')
+        #     return []
+
+        signals = session.query(Stock).order_by(Stock.id.asc()).filter(
+        Stock.stg == self.strategy_name,
+        Stock.remark >= today_start,
+        Stock.remark <= self.current_dt,
+        # Stock.processed == False  # 查询未处理的信号
+        ).limit(100).all()  # 每次最多处理 100 条信号
 
         return signals
 
@@ -192,6 +199,9 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             if not self.Session:
                 time.sleep(self.poll_interval)
                 continue
+
+            if self.engine_type == EngineType.LIVE.value:
+                self.current_dt = datetime.now(CHINA_TZ)
 
             if self.engine_type == EngineType.BACKTESTING.value:
                 self.write_log(f'当前时间: {self.current_dt}')
@@ -207,14 +217,23 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
                     if self.engine_type == EngineType.BACKTESTING.value and signal.id in self.id_processed:
                         self.write_log(f'信号 {signal.id} 已处理，跳过')
                         continue
-                    self.process_signal(signal)
+                    processed = self.process_signal(signal)
+                    if processed:
+                        self.id_processed.append(signal.id)
+                    
                     self.last_signal_id = max(self.last_signal_id, signal.id)
-
-                    self.id_processed.append(signal.id)
                     # Add a small delay to allow position update if in simulation or rapid trading
                     time.sleep(0.05)
                     
-                    # TODO 设置processed状态
+                    try:
+                        if processed:
+                            signal.processed = True
+                            session.commit()
+                        else:
+                            session.rollback()
+                    except Exception as e:
+                        session.rollback()
+                        self.write_log(f"更新信号processed状态失败: id={signal.id} {e}")
 
                 session.close()
                 self.put_event()
@@ -225,7 +244,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             
             time.sleep(self.poll_interval)
 
-    def process_signal(self, signal: Stock):
+    def process_signal(self, signal: Stock) -> bool:
         """处理信号"""
         self.write_log(f"收到信号: {signal.id} {signal.code} {signal.pct} {signal.type} {signal.remark}")
         
@@ -258,18 +277,18 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         gateway_name = self.get_gateway_name(vt_symbol)
         if not gateway_name:
             self.write_log(f"无法获取网关名称，无法处理信号: {vt_symbol}")
-            return
+            return True
 
         if pct <= 1.0:
             calc_price = self.get_best_price(vt_symbol, direction, fallback_price)
             if calc_price <= 0:
                 self.write_log(f"无法获取{vt_symbol}有效价格，无法计算百分比仓位")
-                return
+                return True
 
             total_capital = self.get_account_asset(gateway_name)
             if total_capital <= 0:
                 self.write_log("账户资金为0，无法计算百分比仓位")
-                return
+                return True
 
             target_value = total_capital * pct
             vol_int = int(target_value / calc_price)
@@ -277,7 +296,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
 
             if vol_int <= 0:
                 self.write_log(f"下单数量为0 (计算后: {vol_int})，忽略信号: {pct}")
-                return
+                return True
 
             if direction == Direction.LONG:
 
@@ -295,7 +314,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
 
                 if not pos:
                     self.write_log(f"未找到持仓: {vt_positionid}")
-                    return
+                    return True
 
                 if vol_int > int(pos.volume):
                     vol_int = int(pos.volume)
@@ -305,9 +324,9 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
                 )
         else:
             self.write_log(f'百分比异常！{pct}')
-            return
+            return True
 
-        price = self.get_best_price(vt_symbol, direction, fallback_price)
+        price = self.get_order_price(vt_symbol, direction, fallback_price)
         order_type = OrderType.LIMIT
         if price <= 0:
             order_type = OrderType.MARKET
@@ -326,6 +345,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             self.write_log(f"下单成功: {vt_orderids}")
         else:
             self.write_log("下单失败")
+        return True
 
     def get_gateway_name(self, vt_symbol: str) -> str | None:
         contract = self.signal_engine.main_engine.get_contract(vt_symbol)
@@ -369,6 +389,9 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         pricetick = contract.pricetick if contract else None
         return choose_order_price(tick, direction, fallback_price, pricetick)
 
+    def get_order_price(self, vt_symbol: str, direction: Direction, fallback_price: float) -> float:
+        return self.get_best_price(vt_symbol, direction, fallback_price)
+
     def connect_db(self):
         """连接数据库"""
         try:
@@ -380,24 +403,10 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             self.write_log(f"数据库连接失败: {e}")
 
     def get_account_asset(self, gateway_name: str):
-        total_capital = 0.0
-        position_capital = 0.0
-        account_capital = 0.0
-
-        for position in self.signal_engine.main_engine.get_all_positions():
-            print(f'{position.gateway_name} {position.volume} {position.price}')
-            if position.gateway_name == gateway_name:
-                tick = self.signal_engine.main_engine.get_tick(position.vt_symbol)
-                if tick:
-                    calc_price = tick.last_price
-                    position_capital += position.volume * calc_price
-                else:
-                    # self.write_log(f'未获取到{position.vt_symbol}的最新价格，使用持仓价格计算仓位资产')
-                    position_capital += position.volume * position.price
         for account in self.signal_engine.main_engine.get_all_accounts():
             if account.gateway_name == gateway_name:
-                account_capital += account.balance
-
-        total_capital = position_capital + account_capital
-        self.write_log(f"账户总资产: {total_capital, position_capital, account_capital}")
-        return total_capital
+                total_capital = float(account.balance)
+                self.write_log(f"账户总资产(权益口径): {total_capital}")
+                return total_capital
+        self.write_log(f"未找到账户信息: {gateway_name}")
+        return 0.0

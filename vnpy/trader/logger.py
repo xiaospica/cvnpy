@@ -6,7 +6,7 @@ from logging import DEBUG, INFO, WARNING, ERROR, CRITICAL
 from loguru import logger
 
 from vnpy.trader.setting import SETTINGS
-from vnpy.trader.utility import get_folder_path
+from vnpy.trader.utility import get_folder_path, TRADER_DIR, TEMP_DIR
 
 
 __all__ = [
@@ -53,3 +53,8 @@ if SETTINGS["log.file"]:
     file_path: Path = log_path.joinpath(filename)
 
     logger.add(sink=file_path, level=level, format=format)
+    logger.bind(gateway_name="Logger").info(f"日志文件写入路径: {file_path}")
+else:
+    logger.bind(gateway_name="Logger").warning(f"log.file=False，日志不会写入文件；配置文件: {TEMP_DIR.joinpath('vt_setting.json')}")
+
+logger.bind(gateway_name="Logger").info(f"TRADER_DIR: {TRADER_DIR} TEMP_DIR: {TEMP_DIR}")

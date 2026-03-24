@@ -146,6 +146,7 @@ class TD(XtQuantTraderCallback):
             balance=asset.total_asset,
             gateway_name=self.gateway.gateway_name
         )
+        account.available = asset.cash
         self.gateway.on_account(account)
 
     def on_stock_order_callback(self, order_list):
@@ -181,6 +182,7 @@ class TD(XtQuantTraderCallback):
             return
         if vn_order.status == Status.REJECTED:
             self.write_log(f'【拒单】 {order.status_msg}')
+            vn_order.extra = {"status_msg": order.status_msg}
         self.orders[vn_order.orderid] = vn_order
         if vn_order.orderid not in self.order_submit_time and vn_order.datetime:
             self.order_submit_time[vn_order.orderid] = vn_order.datetime

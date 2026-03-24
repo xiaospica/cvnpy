@@ -103,7 +103,18 @@ class QmtGateway(BaseGateway):
         return self.contracts.get(vt_symbol)
 
     def process_timer_event(self, event) -> None:
-        """定时驱动订单查询与超时撤单检查。"""
+        """定时驱动订单查询与超时撤单检查。
+
+        通常 EVENT_TIMER 由 EventEngine 以 1 秒左右的周期触发一次，本函数内部用 self.count 做节流：
+        - 启动阶段：count==-1 时先 query_trade() 补一轮成交查询
+        - 每 5 次触发（约 5 秒一次）：query_order()
+        - 每 7 次触发（约 7 秒一次）：query_account() + query_position()
+        - check_order_timeout()：在前 21 次触发周期内每次都会调用（但仍受 timeout_check_interval_seconds 限制），之后 count 归零继续循环
+
+        对“撤单→策略重挂”的影响：
+        - check_order_timeout 的调用频率决定订单“未及时成交”时最早何时被撤单；
+        - query_order 的频率决定在回报延迟/丢失时，系统通过查询感知订单终态的速度。
+        """
         if not self.td.inited:
             return
         if self.count == -1:
@@ -123,7 +134,22 @@ class QmtGateway(BaseGateway):
         self.check_order_timeout()
 
     def check_order_timeout(self) -> None:
-        """扫描超时活动订单并发起撤单请求（实盘行为，默认关闭）。"""
+        """扫描超时活动订单并发起撤单请求（实盘行为，默认关闭）。
+
+        只有同时满足以下条件的订单，才会触发“超时自动撤单”：
+        - 网关配置启用：timeout_cancel_enabled == True
+        - 超时阈值有效：order_timeout_seconds > 0
+        - 订单仍是活动单：status in {SUBMITTING, NOTTRADED, PARTTRADED}
+        - 未全部成交：order.traded < order.volume
+        - 记录了提交时间：td.order_submit_time[orderid] 存在
+        - 超过提交时长：now - submit_time >= order_timeout_seconds
+        - 已回填柜台委托号：order.reference 非空（否则无法向柜台发撤单）
+        - 未对该订单发起过撤单：orderid 不在 _cancel_sent
+
+        设计目的：
+        - 对“未及时成交/部分成交剩余未成交”的订单进行撤单，让策略侧有机会按最新盘口重挂，
+          避免盘口快速变化导致订单长时间挂在队列中。
+        """
         if not self.timeout_cancel_enabled:
             return
 
