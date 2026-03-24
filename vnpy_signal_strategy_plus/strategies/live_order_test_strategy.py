@@ -5,7 +5,7 @@ from typing import Any
 
 from vnpy.trader.constant import Direction
 
-from vnpy_signal_strategy_plus.base import CHINA_TZ
+from vnpy_signal_strategy_plus.base import CHINA_TZ, EngineType
 from vnpy_signal_strategy_plus.mysql_signal_strategy import MySQLSignalStrategyPlus, Stock
 
 
@@ -25,64 +25,86 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
         self._test_suite: str | None = None
         self._current_test_signal_type: str = ""
 
+    def get_test_remark_base(self) -> datetime:
+        base_dt = datetime.now(CHINA_TZ)
+
+        if self.engine_type != EngineType.LIVE.value and self.current_dt:
+            base_dt = self.current_dt
+
+        if isinstance(base_dt, datetime) and base_dt.tzinfo:
+            base_dt = base_dt.replace(tzinfo=None)
+
+        base_date = base_dt.date()
+        return datetime.combine(base_date, datetime.min.time()) + timedelta(seconds=1)
+
     def run_live_test_suite(self, suite: str) -> None:
-        if not self.Session:
-            self.write_log("数据库未连接，无法执行自动化测试")
-            return
-
-        suite = (suite or "all").lower()
-        if suite in {"全部", "all"}:
-            suite = "all"
-        elif suite in {"冒烟", "smoke"}:
-            suite = "smoke"
-        elif suite in {"基础", "basic"}:
-            suite = "basic"
-        elif suite in {"全量", "full"}:
-            suite = "full"
-        else:
-            suite = "all"
-
-        run_id = datetime.now(CHINA_TZ).strftime("%Y%m%d_%H%M%S")
-        self._test_run_id = run_id
-        self._test_suite = suite
-
-        signals = self._build_signals_for_suite(suite, run_id)
-        if not signals:
-            self.write_log(f"未生成测试信号: suite={suite}")
-            return
-
-        session = self.Session()
         try:
-            objs: list[Stock] = []
-            now = datetime.now(CHINA_TZ)
-            for i, s in enumerate(signals):
-                remark = now + timedelta(milliseconds=i * 20)
-                obj = Stock(
-                    code=s["code"],
-                    pct=float(s["pct"]),
-                    type=s["type"],
-                    price=float(s.get("price", 0) or 0),
-                    stg=self.strategy_name,
-                    remark=remark,
-                    processed=False,
-                )
-                session.add(obj)
-                objs.append(obj)
+            if not self.Session:
+                self.write_log("数据库未连接，无法执行自动化测试")
+                return
 
-            session.commit()
+            suite = (suite or "all").lower()
+            if suite in {"全部", "all"}:
+                suite = "all"
+            elif suite in {"冒烟", "smoke"}:
+                suite = "smoke"
+            elif suite in {"基础", "basic"}:
+                suite = "basic"
+            elif suite in {"全量", "full"}:
+                suite = "full"
+            else:
+                suite = "all"
 
-            self.write_log(f"[LIVE_TEST] 写入测试信号成功 run_id={run_id} suite={suite} count={len(objs)}")
-            for obj in objs:
-                self.write_log(
-                    f"[LIVE_TEST] signal_id={obj.id} code={obj.code} pct={obj.pct} type={obj.type} price={obj.price}"
-                )
+            run_id = datetime.now(CHINA_TZ).strftime("%Y%m%d_%H%M%S")
+            self._test_run_id = run_id
+            self._test_suite = suite
+
+            signals = self._build_signals_for_suite(suite, run_id)
+            if not signals:
+                self.write_log(f"未生成测试信号: suite={suite}")
+                return
+
+            session = self.Session()
+            try:
+                objs: list[Stock] = []
+                labels: list[str] = []
+                remark_base = self.get_test_remark_base()
+                for i, s in enumerate(signals):
+                    remark = remark_base + timedelta(milliseconds=i * 20)
+                    db_type = str(s["type"])
+                    if len(db_type) > 32:
+                        db_type = db_type[:32]
+                    obj = Stock(
+                        code=s["code"],
+                        pct=float(s["pct"]),
+                        type=db_type,
+                        price=float(s.get("price", 0) or 0),
+                        stg=self.strategy_name,
+                        remark=remark,
+                        processed=False,
+                    )
+                    session.add(obj)
+                    objs.append(obj)
+                    labels.append(str(s.get("label") or ""))
+
+                session.commit()
+
+                self.write_log(f"[LIVE_TEST] 写入测试信号成功 run_id={run_id} suite={suite} count={len(objs)}")
+                for obj, label in zip(objs, labels):
+                    self.write_log(
+                        f"[LIVE_TEST] signal_id={obj.id} code={obj.code} pct={obj.pct} type={obj.type} price={obj.price} label={label}"
+                    )
+            except Exception as e:
+                session.rollback()
+                import traceback
+
+                self.write_log(f"[LIVE_TEST] 写入测试信号失败: {e}\n{traceback.format_exc()}")
+            finally:
+                session.close()
         except Exception as e:
-            session.rollback()
             import traceback
 
-            self.write_log(f"[LIVE_TEST] 写入测试信号失败: {e}\n{traceback.format_exc()}")
-        finally:
-            session.close()
+            self.write_log(f"[LIVE_TEST] 运行测试套件失败: {e}\n{traceback.format_exc()}")
 
     def get_order_price(self, vt_symbol: str, direction: Direction, fallback_price: float) -> float:
         tick = self.get_active_tick(vt_symbol)
@@ -138,22 +160,42 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
         pct = float(self.test_pct)
 
         smoke = [
-            {"code": sym, "pct": pct, "type": f"buy_smoke_aggressive_{run_id}", "price": 0},
-            {"code": sym, "pct": pct, "type": f"sell_smoke_tplus1_{run_id}", "price": 0},
-            {"code": sym, "pct": pct, "type": f"buy_smoke_passive_deep_timeout_{run_id} passive deep", "price": 0},
+            {"code": sym, "pct": pct, "type": "buy smoke", "price": 4.497, "label": f"buy_smoke_aggressive_{run_id}"},
+            {"code": sym, "pct": pct, "type": "sell smoke", "price": 4.497, "label": f"sell_smoke_tplus1_{run_id}"},
+            {
+                "code": sym,
+                "pct": pct,
+                "type": "buy smoke passive deep",
+                "price": 4.497,
+                "label": f"buy_smoke_passive_deep_timeout_{run_id} passive deep",
+            },
         ]
 
         basic = [
-            {"code": sym, "pct": pct, "type": f"buy_basic_passive_{run_id} passive", "price": 0},
-            {"code": sym, "pct": pct, "type": f"sell_basic_passive_{run_id} passive", "price": 0},
-            {"code": sym, "pct": pct, "type": f"buy_basic_reject_up_{run_id} reject_up", "price": 0},
+            {"code": sym, "pct": pct, "type": "buy basic passive", "price": 4.497, "label": f"buy_basic_passive_{run_id} passive"},
+            {"code": sym, "pct": pct, "type": "sell basic passive", "price": 4.497, "label": f"sell_basic_passive_{run_id} passive"},
+            {"code": sym, "pct": pct, "type": "buy basic reject_up", "price": 4.497, "label": f"buy_basic_reject_up_{run_id} reject_up"},
+            {
+                "code": sym,
+                "pct": 1.0,
+                "type": "buy cash_lock deep",
+                "price": 4.497,
+                "label": f"buy_resubmit_after_cash_insufficient_{run_id} step1 lock cash deep",
+            },
+            {
+                "code": sym,
+                "pct": 0.2,
+                "type": "buy cash_insufficient",
+                "price": 4.497,
+                "label": f"buy_resubmit_after_cash_insufficient_{run_id} step2 expect reject 260200",
+            },
         ]
 
         full = [
-            {"code": sym, "pct": pct, "type": f"buy_full_passive_{run_id} passive", "price": 0},
-            {"code": sym, "pct": pct, "type": f"buy_full_deep_{run_id} deep", "price": 0},
-            {"code": sym, "pct": pct, "type": f"sell_full_deep_{run_id} deep", "price": 0},
-            {"code": sym, "pct": pct, "type": f"sell_full_reject_down_{run_id} reject_down", "price": 0},
+            {"code": sym, "pct": pct, "type": "buy full passive", "price": 4.497, "label": f"buy_full_passive_{run_id} passive"},
+            {"code": sym, "pct": pct, "type": "buy full deep", "price": 4.497, "label": f"buy_full_deep_{run_id} deep"},
+            {"code": sym, "pct": pct, "type": "sell full deep", "price": 4.497, "label": f"sell_full_deep_{run_id} deep"},
+            {"code": sym, "pct": pct, "type": "sell full reject_down", "price": 4.497, "label": f"sell_full_reject_down_{run_id} reject_down"},
         ]
 
         if suite == "smoke":
@@ -163,4 +205,3 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
         if suite == "full":
             return full
         return smoke + basic + full
-

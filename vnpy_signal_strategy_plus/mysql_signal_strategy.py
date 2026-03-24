@@ -185,10 +185,10 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         #     return []
 
         signals = session.query(Stock).order_by(Stock.id.asc()).filter(
-        Stock.stg == self.strategy_name,
-        Stock.remark >= today_start,
-        Stock.remark <= self.current_dt,
-        # Stock.processed == False  # 查询未处理的信号
+            Stock.stg == self.strategy_name,
+            Stock.remark >= today_start,
+            Stock.remark <= self.current_dt,
+            Stock.processed == False,
         ).limit(100).all()  # 每次最多处理 100 条信号
 
         return signals
@@ -384,12 +384,14 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         return self.signal_engine.main_engine.get_tick(vt_symbol)
 
     def get_best_price(self, vt_symbol: str, direction: Direction, fallback_price: float) -> float:
+        """获取仓位计算参考价（默认买一/卖一，缺失回退last_price/fallback_price）。"""
         tick = self.get_active_tick(vt_symbol)
         contract = self.signal_engine.main_engine.get_contract(vt_symbol)
         pricetick = contract.pricetick if contract else None
         return choose_order_price(tick, direction, fallback_price, pricetick)
 
     def get_order_price(self, vt_symbol: str, direction: Direction, fallback_price: float) -> float:
+        """获取最终下单价（默认等同get_best_price，测试策略可覆盖用于制造场景）。"""
         return self.get_best_price(vt_symbol, direction, fallback_price)
 
     def connect_db(self):

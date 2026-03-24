@@ -87,6 +87,7 @@ class SimulationCounter:
             available_cash = self.capital - self.frozen
             if need_frozen > available_cash:
                 order.status = Status.REJECTED
+                order.status_msg = "260200:可用资金不足"
                 self.order_reject_reason[orderid] = "insufficient_funds"
                 self.order_submit_time.pop(orderid, None)
                 self.gateway.on_order(order)
@@ -133,6 +134,7 @@ class SimulationCounter:
             if random.random() < self.reject_rate:
                 self.release_order_frozen_cash(order.orderid)
                 order.status = Status.REJECTED
+                order.status_msg = "模拟随机拒单"
                 self.order_reject_reason[order.orderid] = "random_reject"
                 self.order_submit_time.pop(order.orderid, None)
                 self.gateway.on_order(order)
