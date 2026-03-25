@@ -17,7 +17,7 @@ from vnpy.trader.object import (
     BarData
 )
 
-from vnpy.trader.constant import Direction, Offset, OrderType, Exchange
+from vnpy.trader.constant import Direction, Offset, OrderType, Exchange, Status
 from .template import SignalTemplatePlus
 from .auto_resubmit import AutoResubmitMixinPlus
 from .base import EngineType, CHINA_TZ
@@ -105,6 +105,28 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         except Exception as e:
             self.write_log(f"加载外部配置失败: {e}")
         
+    def send_order(
+        self,
+        vt_symbol: str,
+        direction: Direction,
+        offset: Offset,
+        price: float,
+        volume: float,
+        order_type: OrderType = OrderType.LIMIT,
+    ) -> list[str]:
+        """重写发单方法，确保买入数量必须为100的整数倍"""
+        if direction == Direction.LONG:
+            old_volume = volume
+            volume = (volume // 100) * 100
+            if volume != old_volume:
+                self.write_log(f"【数量修正】买入委托数量由 {old_volume} 调整为 {volume} (向下取整到100的整数倍)")
+            
+            if volume <= 0:
+                self.write_log(f"【数量拦截】买入数量修正后不足100股，取消发单: {vt_symbol}")
+                return []
+                
+        return super().send_order(vt_symbol, direction, offset, price, volume, order_type)
+
     def on_init(self):
         self.write_log("策略初始化")
         self.connect_db()
@@ -144,6 +166,10 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         """接收订单回报并交由重挂混入层处理。"""
         self.on_order_for_resubmit(order)
         # pass
+
+    def on_trade(self, trade: TradeData) -> None:
+        """接收成交回报"""
+        pass
 
     def on_timer(self):
         """定时驱动重挂队列执行。"""
@@ -245,7 +271,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             time.sleep(self.poll_interval)
 
     def process_signal(self, signal: Stock) -> bool:
-        """处理信号"""
+        """处理信号。"""
         self.write_log(f"收到信号: {signal.id} {signal.code} {signal.pct} {signal.type} {signal.remark}")
         
         # Parse symbol  

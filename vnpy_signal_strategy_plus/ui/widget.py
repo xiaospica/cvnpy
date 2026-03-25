@@ -226,10 +226,15 @@ class SignalStrategyManagerPlus(QtWidgets.QFrame):
         self.remove_button.clicked.connect(self.remove_strategy)
 
         self.auto_test_button: QtWidgets.QPushButton | None = None
+        self.clear_position_button: QtWidgets.QPushButton | None = None
         strategy = self.signal_engine.strategies.get(self.strategy_name)
         if strategy and getattr(strategy, "is_live_test_strategy", False) and hasattr(strategy, "run_live_test_suite"):
             self.auto_test_button = QtWidgets.QPushButton(_("自动化测试"))
             self.auto_test_button.clicked.connect(self.run_auto_test)
+            
+        if strategy and getattr(strategy, "support_clear_position", False) and hasattr(strategy, "clear_all_positions"):
+            self.clear_position_button = QtWidgets.QPushButton(_("一键清仓"))
+            self.clear_position_button.clicked.connect(self.run_clear_position)
 
         strategy_name: str = self._data["strategy_name"]
         class_name: str = self._data["class_name"]
@@ -253,6 +258,8 @@ class SignalStrategyManagerPlus(QtWidgets.QFrame):
         hbox.addWidget(self.remove_button)
         if self.auto_test_button:
             hbox.addWidget(self.auto_test_button)
+        if self.clear_position_button:
+            hbox.addWidget(self.clear_position_button)
 
         vbox: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
         vbox.addWidget(label)
@@ -293,6 +300,34 @@ class SignalStrategyManagerPlus(QtWidgets.QFrame):
             return
 
         self.signal_engine.call_strategy_func(strategy, strategy.run_live_test_suite, suite)
+
+    def run_clear_position(self) -> None:
+        strategy = self.signal_engine.strategies.get(self.strategy_name)
+        if not strategy:
+            return
+        if not getattr(strategy, "support_clear_position", False) or not hasattr(strategy, "clear_all_positions"):
+            return
+
+        text = (
+            "<div style='font-size:14px;'>"
+            "<div style='color:#b00000;font-size:16px;font-weight:700;font-style:italic;'>"
+            "风险提示：即将以市价或跌停价清仓当前所有可用持仓，请确认是否继续！"
+            "</div>"
+            "<div style='margin-top:10px;'>确认执行一键清仓？</div>"
+            "</div>"
+        )
+
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(_("清仓确认"))
+        box.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        box.setText(text)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+        box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.No)
+        if box.exec() != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        self.signal_engine.call_strategy_func(strategy, strategy.clear_all_positions)
 
     def update_data(self, data: dict) -> None:
         """"""

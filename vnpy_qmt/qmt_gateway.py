@@ -17,6 +17,7 @@ from vnpy.trader.constant import (
 )
 from vnpy.trader.gateway import BaseGateway
 from vnpy.trader.object import (
+    OrderData,
     OrderRequest,
     CancelRequest,
     SubscribeRequest,
@@ -164,7 +165,7 @@ class QmtGateway(BaseGateway):
             return
         self._last_timeout_check = now
 
-        for orderid, order in list(self.td.orders.items()):
+        for orderid, order in list[tuple[str, OrderData]](self.td.orders.items()):
             if order.status in [Status.ALLTRADED, Status.CANCELLED, Status.REJECTED]:
                 self._cancel_sent.discard(orderid)
                 continue
@@ -182,7 +183,16 @@ class QmtGateway(BaseGateway):
             if not submit_time:
                 continue
 
-            if (now - submit_time).total_seconds() < self.order_timeout_seconds:
+            # 获取超时时间：优先取订单级别的配置，否则回退到网关全局配置
+            timeout_seconds = self.order_timeout_seconds
+            extra = getattr(order, "extra", None)
+            if isinstance(extra, dict):
+                try:
+                    timeout_seconds = int(extra.get("timeout_seconds") or timeout_seconds)
+                except Exception:
+                    timeout_seconds = self.order_timeout_seconds
+
+            if (now - submit_time).total_seconds() < timeout_seconds:
                 continue
 
             if not getattr(order, "reference", ""):

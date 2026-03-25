@@ -94,6 +94,8 @@ class TD(XtQuantTraderCallback):
                           price=req.price,
                           status=Status.SUBMITTING,
                           datetime=now)
+        if ref:
+            order.extra = {"req_reference": ref}
         self.orders[order.orderid] = order
         self.order_submit_time[order.orderid] = now
         return order.vt_orderid
@@ -105,6 +107,7 @@ class TD(XtQuantTraderCallback):
         if not order.reference:
             self.write_log(f"撤单失败：订单未回填柜台号 {order.orderid}")
             return
+        self.write_log(f"发出撤单: orderid={order.orderid} counter={order.reference}")
         return self.trader.cancel_order_stock_async(account=self.account, order_id=order.reference)
 
     def query_account(self):
@@ -298,13 +301,18 @@ class TD(XtQuantTraderCallback):
             direction=trd_typ
         )
 
+        self.write_log(
+            f"成交 {trade_.vt_tradeid} order={trade_.vt_orderid} {trade_.vt_symbol} {trade_.direction.value} price={trade_.price} volume={trade_.volume}"
+        )
         self.gateway.on_trade(trade_)
 
     def on_cancel_error(self, cancel_error: XtCancelError):
-        self.write_log(cancel_error.error_msg)
+        msg = str(cancel_error.error_msg or "").replace("\n", " ").replace("\r", " ").strip()
+        self.write_log(f"撤单错误：{msg}")
 
     def on_order_error(self, order_error: XtOrderError):
-        self.write_log(f'订单错误：{order_error.error_msg}')
+        msg = str(order_error.error_msg or "").replace("\n", " ").replace("\r", " ").strip()
+        self.write_log(f'订单错误：{msg}')
         vn_oid = order_error.order_remark
         old_order = self.orders.get(vn_oid)
         if old_order:
@@ -318,7 +326,8 @@ class TD(XtQuantTraderCallback):
         if old_order:
             if response.error_msg:
                 old_order.status = Status.REJECTED
-                self.write_log(f'下单失败 {response.order_remark} 原因： {response.error_msg}')
+                msg = str(response.error_msg or "").replace("\n", " ").replace("\r", " ").strip()
+                self.write_log(f'下单失败 {response.order_remark} 原因： {msg}')
                 self.gateway.on_order(old_order)
                 self.order_submit_time.pop(response.order_remark, None)
             else:
@@ -326,7 +335,7 @@ class TD(XtQuantTraderCallback):
                     old_order.reference = response.order_id
 
     def on_cancel_order_stock_async_response(self, response: XtCancelOrderResponse):
-        self.write_log(f'撤单结果： {response.cancel_result}')
+        self.write_log(f'撤单结果： {response.cancel_result} {response.order_id} {response.order_remark}')
 
     def write_log(self, msg):
         self.gateway.write_log(f'[ td ] {msg}')

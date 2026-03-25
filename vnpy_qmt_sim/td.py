@@ -1,5 +1,5 @@
 from typing import Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from vnpy.trader.gateway import BaseGateway
 from vnpy.trader.object import (
     OrderRequest,
@@ -55,9 +55,161 @@ class SimulationCounter:
         self.order_timeout = 30  # 订单超时秒数
         self.order_submit_time: Dict[str, datetime] = {}
 
+        self.fill_delay_ms: int = 0
+        self.reporting_delay_ms: int = 0
+        self.reject_short_if_no_position: bool = True
+        self.order_tasks: Dict[str, Dict[str, Any]] = {}
+
+    def process_simulation(self, now: datetime) -> None:
+        for orderid, task in list(self.order_tasks.items()):
+            order = self.orders.get(orderid)
+            if not order:
+                self.order_tasks.pop(orderid, None)
+                continue
+
+            if order.status in {Status.ALLTRADED, Status.CANCELLED, Status.REJECTED}:
+                self.order_tasks.pop(orderid, None)
+                continue
+
+            phase = str(task.get("phase") or "")
+            if phase == "unreported":
+                report_at = task.get("report_at")
+                if isinstance(report_at, datetime) and now < report_at:
+                    continue
+                order.status = Status.NOTTRADED
+                self._set_order_status_msg(order, str(task.get("status_msg") or ""))
+                self._set_order_extra(order, {"qmt_status": "ORDER_REPORTED", "case_tag": task.get("case_tag")})
+                self.gateway.on_order(order)
+                task["phase"] = "reported"
+                continue
+
+            if phase != "reported":
+                continue
+
+            case_tag = str(task.get("case_tag") or "")
+            if case_tag.startswith("force_reject"):
+                self._reject_order(order, str(task.get("status_msg") or "模拟强制拒单"))
+                self.order_tasks.pop(orderid, None)
+                continue
+
+            if case_tag.startswith("no_fill"):
+                continue
+
+            if case_tag.startswith("partial_then_stall"):
+                if not task.get("did_partial"):
+                    partial_at = task.get("partial_at")
+                    if isinstance(partial_at, datetime) and now < partial_at:
+                        continue
+                    ratio = float(task.get("partial_ratio") or 0.5)
+                    remain = int(order.volume - order.traded)
+                    if remain <= 0:
+                        self.order_tasks.pop(orderid, None)
+                        continue
+                    trade_volume = max(int(remain * ratio), 1)
+                    trade_volume = min(trade_volume, remain)
+                    self._execute_trade(order, float(trade_volume))
+                    task["did_partial"] = True
+                continue
+
+            fill_at = task.get("fill_at")
+            if isinstance(fill_at, datetime) and now < fill_at:
+                continue
+
+            self.match_order(order)
+            if order.status in {Status.ALLTRADED, Status.CANCELLED, Status.REJECTED}:
+                self.order_tasks.pop(orderid, None)
+
+    def _parse_case_tag(self, reference: str) -> str:
+        if not reference:
+            return ""
+        marker = "|case="
+        idx = reference.find(marker)
+        if idx < 0:
+            return ""
+        tail = reference[idx + len(marker):]
+        tag = tail.split("|", 1)[0].strip()
+        return tag
+
+    def _set_order_extra(self, order: OrderData, extra: Dict[str, Any]) -> None:
+        try:
+            old_extra = getattr(order, "extra", None)
+            if isinstance(old_extra, dict):
+                merged = {**old_extra, **extra}
+                setattr(order, "extra", merged)
+            else:
+                setattr(order, "extra", dict(extra))
+        except Exception:
+            return
+
+    def _set_order_status_msg(self, order: OrderData, msg: str) -> None:
+        try:
+            if msg:
+                order.status_msg = msg
+        except Exception:
+            return
+
+    def _reject_order(self, order: OrderData, status_msg: str) -> None:
+        if order.direction == Direction.LONG:
+            self.release_order_frozen_cash(order.orderid, push_event=False)
+        order.status = Status.REJECTED
+        self._set_order_status_msg(order, status_msg)
+        self._set_order_extra(order, {"status_msg": status_msg, "qmt_status": "ORDER_JUNK"})
+        self.order_submit_time.pop(order.orderid, None)
+        self.order_reject_reason[order.orderid] = "case_reject"
+        self.gateway.on_order(order)
+        self.push_account()
+        try:
+            self.gateway.write_log(f"模拟拒单：{order.vt_orderid} {status_msg}")
+        except Exception:
+            return
+
+    def _execute_trade(self, order: OrderData, volume: float) -> None:
+        remain = float(order.volume - order.traded)
+        if volume <= 0 or remain <= 0:
+            return
+        if volume > remain:
+            volume = remain
+
+        self.trade_count += 1
+        trade = TradeData(
+            symbol=order.symbol,
+            exchange=order.exchange,
+            orderid=order.orderid,
+            tradeid=str(self.trade_count),
+            direction=order.direction,
+            offset=order.offset,
+            price=order.price if order.price > 0 else 10.0,
+            volume=volume,
+            datetime=datetime.now(),
+            gateway_name=self.gateway.gateway_name,
+        )
+        self.trades[trade.tradeid] = trade
+
+        order.traded += volume
+        if order.traded >= order.volume:
+            order.status = Status.ALLTRADED
+            self.order_submit_time.pop(order.orderid, None)
+        else:
+            order.status = Status.PARTTRADED
+
+        self.gateway.on_order(order)
+        self.gateway.on_trade(trade)
+        self.update_position(trade)
+        self.update_account(trade)
+        try:
+            extra = getattr(order, "extra", None)
+            case_tag = ""
+            if isinstance(extra, dict):
+                case_tag = str(extra.get("case_tag") or "")
+            if case_tag:
+                self.gateway.write_log(f"模拟成交触发: {order.vt_orderid} case={case_tag} traded={order.traded}/{order.volume} status={order.status}")
+        except Exception:
+            return
+
     def send_order(self, req: OrderRequest) -> str:
         self.order_count += 1
         orderid = str(self.order_count)
+        case_tag = self._parse_case_tag(str(getattr(req, "reference", "") or ""))
         
         order = OrderData(
             symbol=req.symbol,
@@ -75,6 +227,79 @@ class SimulationCounter:
         )
         self.orders[orderid] = order
         self.order_submit_time[orderid] = order.datetime
+        self._set_order_extra(order, {"qmt_status": "ORDER_UNREPORTED", "case_tag": case_tag})
+
+        vol_int = 0
+        try:
+            vol_int = int(float(order.volume))
+        except Exception:
+            vol_int = 0
+        if vol_int <= 0 or vol_int % 100 != 0:
+            order.status = Status.REJECTED
+            msg = f"委托数量不合法: volume={order.volume}"
+            self._set_order_status_msg(order, msg)
+            self._set_order_extra(order, {"status_msg": msg, "qmt_status": "ORDER_JUNK"})
+            self.order_reject_reason[orderid] = "invalid_volume"
+            self.order_submit_time.pop(orderid, None)
+            self.gateway.on_order(order)
+            self.gateway.write_log(f"拒单：{msg}")
+            return order.vt_orderid
+
+        if order.direction == Direction.SHORT and case_tag == "force_sell_no_position":
+            order.status = Status.REJECTED
+            self._set_order_status_msg(order, "持仓不足(用例强制)")
+            self._set_order_extra(order, {"status_msg": "持仓不足(用例强制)", "qmt_status": "ORDER_JUNK"})
+            self.order_reject_reason[orderid] = "force_sell_no_position"
+            self.order_submit_time.pop(orderid, None)
+            self.gateway.on_order(order)
+            self.gateway.write_log("拒单：持仓不足(用例强制)")
+            return order.vt_orderid
+
+        if float(order.price) > 0:
+            try:
+                md = getattr(self.gateway, "md", None)
+                get_tick = getattr(md, "get_full_tick", None)
+                if callable(get_tick):
+                    tick = get_tick(order.vt_symbol)
+                    if tick:
+                        limit_up = float(getattr(tick, "limit_up", 0) or 0)
+                        limit_down = float(getattr(tick, "limit_down", 0) or 0)
+                        if limit_up > 0 and float(order.price) > limit_up:
+                            order.status = Status.REJECTED
+                            msg = f"价格超出涨停: price={order.price} limit_up={limit_up}"
+                            self._set_order_status_msg(order, msg)
+                            self._set_order_extra(order, {"status_msg": msg, "qmt_status": "ORDER_JUNK", "limit_up": limit_up, "limit_down": limit_down})
+                            self.order_reject_reason[orderid] = "price_limit_up"
+                            self.order_submit_time.pop(orderid, None)
+                            self.gateway.on_order(order)
+                            self.gateway.write_log(msg)
+                            return order.vt_orderid
+                        if limit_down > 0 and float(order.price) < limit_down:
+                            order.status = Status.REJECTED
+                            msg = f"价格超出跌停: price={order.price} limit_down={limit_down}"
+                            self._set_order_status_msg(order, msg)
+                            self._set_order_extra(order, {"status_msg": msg, "qmt_status": "ORDER_JUNK", "limit_up": limit_up, "limit_down": limit_down})
+                            self.order_reject_reason[orderid] = "price_limit_down"
+                            self.order_submit_time.pop(orderid, None)
+                            self.gateway.on_order(order)
+                            self.gateway.write_log(msg)
+                            return order.vt_orderid
+            except Exception:
+                pass
+
+        if order.direction == Direction.SHORT and self.reject_short_if_no_position:
+            pos_key = f"{order.symbol}.{order.exchange.value}.{Direction.LONG.value}"
+            pos = self.positions.get(pos_key)
+            pos_volume = float(pos.volume) if pos else 0.0
+            if float(order.volume) > pos_volume:
+                order.status = Status.REJECTED
+                self._set_order_status_msg(order, "持仓不足")
+                self._set_order_extra(order, {"status_msg": "持仓不足", "qmt_status": "ORDER_JUNK"})
+                self.order_reject_reason[orderid] = "insufficient_position"
+                self.order_submit_time.pop(orderid, None)
+                self.gateway.on_order(order)
+                self.gateway.write_log(f"拒单：持仓不足 pos={pos_volume} volume={order.volume}")
+                return order.vt_orderid
 
         if order.direction == Direction.LONG:
             estimate_price = self._get_effective_price(order.price)
@@ -88,6 +313,7 @@ class SimulationCounter:
             if need_frozen > available_cash:
                 order.status = Status.REJECTED
                 order.status_msg = "260200:可用资金不足"
+                self._set_order_extra(order, {"status_msg": "260200:可用资金不足", "qmt_status": "ORDER_JUNK"})
                 self.order_reject_reason[orderid] = "insufficient_funds"
                 self.order_submit_time.pop(orderid, None)
                 self.gateway.on_order(order)
@@ -102,9 +328,55 @@ class SimulationCounter:
 
         self.gateway.on_order(order)
         
-        # 模拟撮合
         if order.status != Status.REJECTED:
-            self.match_order(order)
+            needs_scheduling = bool(case_tag) or self.fill_delay_ms > 0 or self.reporting_delay_ms > 0
+            if needs_scheduling:
+                base_dt = order.datetime
+                report_at = base_dt + timedelta(milliseconds=int(self.reporting_delay_ms))
+                timeout_override = None
+
+                fill_at = None
+                partial_at = None
+                partial_ratio = 0.5
+                status_msg = ""
+
+                if case_tag.startswith("no_fill"):
+                    if "_" in case_tag:
+                        tail = case_tag.split("_")[-1].rstrip("s")
+                        if tail.isdigit():
+                            timeout_override = int(tail)
+                    fill_at = None
+                elif case_tag.startswith("delayed_fill_"):
+                    secs_str = case_tag.replace("delayed_fill_", "").rstrip("s")
+                    secs = int(secs_str) if secs_str.isdigit() else 5
+                    fill_at = report_at + timedelta(seconds=secs)
+                elif case_tag.startswith("partial_then_stall"):
+                    secs = 1
+                    if "_" in case_tag:
+                        tail = case_tag.split("_")[-1].rstrip("s")
+                        if tail.isdigit():
+                            secs = int(tail)
+                    partial_at = report_at + timedelta(seconds=secs)
+                elif case_tag.startswith("force_reject"):
+                    status_msg = "模拟强制拒单"
+                else:
+                    if self.fill_delay_ms > 0:
+                        fill_at = report_at + timedelta(milliseconds=int(self.fill_delay_ms))
+
+                if timeout_override and timeout_override > 0:
+                    self._set_order_extra(order, {"timeout_seconds": timeout_override})
+
+                self.order_tasks[orderid] = {
+                    "case_tag": case_tag,
+                    "phase": "unreported",
+                    "report_at": report_at,
+                    "fill_at": fill_at,
+                    "partial_at": partial_at,
+                    "partial_ratio": partial_ratio,
+                    "status_msg": status_msg,
+                }
+            else:
+                self.match_order(order)
         
         return order.vt_orderid
 
@@ -178,7 +450,17 @@ class SimulationCounter:
             
         self.gateway.on_order(order)
         self.gateway.on_trade(trade)
-        
+
+        try:
+            extra = getattr(order, "extra", None)
+            case_tag = ""
+            if isinstance(extra, dict):
+                case_tag = str(extra.get("case_tag") or "")
+            if case_tag:
+                self.gateway.write_log(f"模拟成交触发: {order.vt_orderid} case={case_tag} traded={order.traded}/{order.volume} status={order.status}")
+        except Exception:
+            pass
+
         self.update_position(trade)
         self.update_account(trade)
 

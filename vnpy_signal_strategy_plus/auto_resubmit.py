@@ -190,17 +190,20 @@ class AutoResubmitMixinPlus:
             self.write_log(f"【重挂处理】重挂达到上限，放弃: {vt_orderid}, attempts={attempts}")
             return
 
-        # 执行发单
-        vt_orderids = self.send_order(
-            vt_symbol=task["vt_symbol"],
-            direction=task["direction"],
-            offset=task["offset"],
-            price=float(task["price"]),
-            volume=float(task["volume"]),
-            order_type=task["order_type"],
-        )
+        # 标记当前正在执行重挂逻辑，供策略的 get_order_reference 判断使用
+        self._is_resubmitting = True
+        try:
+            vt_orderids = self.send_order(
+                vt_symbol=task["vt_symbol"],
+                direction=task["direction"],
+                offset=task["offset"],
+                price=float(task["price"]),
+                volume=float(task["volume"]),
+                order_type=task["order_type"],
+            )
+        finally:
+            self._is_resubmitting = False
 
-        # 发单失败，更新重试次数并重新计算延时
         if not vt_orderids:
             task["attempts"] = attempts + 1
             self.write_log(f"【重挂处理】send_order发单失败，增加尝试次数: {vt_orderid} -> attempts={task['attempts']}")

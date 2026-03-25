@@ -32,41 +32,39 @@
 目标：用最短时间验证“能下单、能回报、能撤单/超时撤单”基本链路。
 
 信号序列（同一标的，默认 `510300.SH`，仓位比例 `test_pct`）：
-- `buy_smoke_aggressive_<run_id>`
-  - 期望：正常发单；大概率快速成交或进入未成交。
-  - 覆盖：行情取价（买一/卖一）、下单成功/失败日志、基础回报处理。
-- `sell_smoke_tplus1_<run_id>`
-  - 期望：若前序买入当日刚成交，卖出可能被券商以 T+1 可用不足拒单（取决于标的与券商规则）；若账户已有可用持仓则可能成交。
-  - 覆盖：拒单回报、可用不足类异常路径、重挂逻辑是否会误触发。
-- `buy_smoke_passive_deep_timeout_<run_id> passive deep`
-  - 期望：以“非最优价/深挂”的方式制造未成交，等待网关超时撤单；撤单后可能触发策略层撤单重挂（若启用）。
-  - 覆盖：未成交 → 超时撤单 →（可选）自动重挂完整链路。
+- `buy_smoke_<run_id> aggressive`
+  - 期望：正常发单；更倾向于快速成交（取价使用买一/卖一）。
+  - 覆盖：信号写库→轮询→下单→委托回报/成交回报基础闭环。
+- `sell_smoke_<run_id> aggressive`
+  - 期望：若无持仓会被策略侧拦截（日志提示“未找到持仓”）；若有可用持仓则正常卖出。
+  - 覆盖：卖出链路、持仓保护逻辑、基础回报处理。
 
 ### 2) 基础（Basic）
 
-目标：覆盖核心异常类别：撤单重挂、拒单、非最优价挂单、先卖后买资金不足延时重试。
+目标：覆盖核心异常类别：撤单重挂、拒单、非最优价挂单、无持仓强制卖出拒单、非法数量拒单。
 
 信号序列：
-- `buy_basic_passive_<run_id> passive`
-  - 期望：更偏向排队挂单，可能不立即成交。
-- `sell_basic_passive_<run_id> passive`
-  - 期望：卖出以非最优价挂单，可能不立即成交。
-- `buy_basic_reject_up_<run_id> reject_up`
-  - 期望：主动构造高于涨停价的买入价格，触发拒单（如果接口/券商按规则校验）。
-  - 覆盖：拒单回报路径、普通拒单后不触发重挂。
-- `buy_resubmit_after_cash_insufficient_<run_id>`
-  - 期望：在可用资金不足时下买单，触发带有错误码 260200 的拒单。
-  - 覆盖：验证该买单拒单会被识别为“可用资金不足”，并在 5 秒后触发延时重挂机制。
+- `buy_passive_<run_id> passive`
+- `sell_passive_<run_id> passive`
+  - 期望：更偏向排队挂单；若启用网关超时撤单，则可能触发撤单与策略重挂。
+- `buy_reject_up_<run_id> reject_up`
+  - 期望：构造高于涨停价的买入价格，触发拒单（是否必现取决于交易时段与柜台校验）。
+- `buy_no_fill_60s_<run_id> no_fill_60s passive`
+  - 期望：
+    - `QMT_SIM`：根据 `|case=no_fill_60s` 保持不成交，等待超时撤单触发 `CANCELLED`，并观察策略重挂。
+    - `QMT` 实盘：不保证必现“不成交”，但可用于观察“未成交→超时撤单→重挂”的实盘链路与日志完整性。
+- `buy_invalid_volume_<run_id> invalid_volume`
+  - 期望：构造“委托数量不合法”拒单，用于验证拒单回报与日志口径（低风险、可控）。
+- `sell_force_no_pos_<run_id> force_sell_no_position`
+  - 期望：绕过策略侧持仓校验强制卖出，在无持仓时被柜台拒单（实盘常见错误码为“证券可用数量不足”）。
 
 ### 3) 全量（Full）
 
-目标：扩大覆盖面（多种定价模式、更多异常触发点），用于发版前回归。
+目标：扩大覆盖面（更多异常触发点），用于发版前回归。
 
-信号序列：
-- `buy_full_passive_<run_id> passive`
-- `buy_full_deep_<run_id> deep`
-- `sell_full_deep_<run_id> deep`
-- `sell_full_reject_down_<run_id> reject_down`
+说明：
+- `QMT_SIM`：会额外启用“延迟成交/部分成交后停滞/强制拒单/跌停越界拒单”等撮合用例。
+- `QMT` 实盘：为避免不可控风险与不确定性，“全量”会降级为“冒烟+基础”集合（以成交链路与日志为主）。
 
 其中：
 - `passive/deep` 用于制造未成交/长时间排队，从而触发超时撤单与重挂逻辑。
@@ -79,9 +77,11 @@
 - `code`：默认 `510300.SH`（内部会转换为 vn.py 的 vt_symbol）
 - `pct`：仓位比例（必须 `<= 1.0`，否则当前策略会直接报“百分比异常”并忽略）
 - `type`：包含 buy/sell 关键字，并可追加标签：
-  - `passive`：用更保守的盘口价格挂单
-  - `deep`：用更深档位/更远价格挂单（更容易制造未成交）
+  - `aggressive`：用更积极的盘口价格挂单（更倾向于快速成交）
+  - `passive`：用更保守的盘口价格挂单（更倾向于不成交/排队）
+  - `invalid_volume`：强制下发非法数量（如 1 股）用于拒单链路验证
   - `reject_up` / `reject_down`：构造价格越界拒单
+  - 仅 `QMT_SIM`：当 `type` 中包含 `no_fill_60s/delayed_fill_5s/partial_then_stall_5s/force_reject/force_sell_no_position` 等 token 时，会通过 `OrderRequest.reference` 注入 `|case=...` 以驱动模拟撮合行为
 
 ## 你把日志发回我时的建议内容
 
@@ -89,4 +89,3 @@
 - 你点了哪种套件（全部/冒烟/基础/全量）
 - 当天的账户类型（模拟/实盘）、标的、是否开启网关超时撤单
 - 若出现异常：对应时间点前后 1~2 分钟的委托/成交/持仓/资金查询日志
-

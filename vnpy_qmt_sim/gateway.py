@@ -29,6 +29,9 @@ class QmtSimGateway(BaseGateway):
         "部分成交率": 0.0,
         "拒单率": 0.0,
         "订单超时秒数": 30,
+        "成交延迟毫秒": 0,
+        "报单上报延迟毫秒": 0,
+        "卖出持仓不足拒单": "是",
     }
 
     exchanges = [Exchange.SSE, Exchange.SZSE]
@@ -47,6 +50,9 @@ class QmtSimGateway(BaseGateway):
         self.md.connect()
         self.td.connect(setting)
         self.td.counter.order_timeout = int(setting.get("订单超时秒数", 30))
+        self.td.counter.fill_delay_ms = int(setting.get("成交延迟毫秒", 0))
+        self.td.counter.reporting_delay_ms = int(setting.get("报单上报延迟毫秒", 0))
+        self.td.counter.reject_short_if_no_position = str(setting.get("卖出持仓不足拒单", "是")) == "是"
 
         self.event_engine.register(EVENT_TIMER, self.process_timer_event)
         
@@ -55,6 +61,11 @@ class QmtSimGateway(BaseGateway):
 
     def subscribe(self, req: SubscribeRequest):
         self.md.subscribe(req)
+
+    def get_full_tick(self, vt_symbol: str):
+        if hasattr(self.md, "get_full_tick"):
+            return self.md.get_full_tick(vt_symbol)
+        return None
 
     def send_order(self, req: OrderRequest) -> str:
         return self.td.send_order(req)
@@ -88,6 +99,11 @@ class QmtSimGateway(BaseGateway):
         """事件循环入口，按周期触发超时订单扫描。"""
         self._timer_count += 1
 
+        try:
+            self.td.counter.process_simulation(datetime.now())
+        except Exception:
+            pass
+
         if self._timer_count % self._order_timeout_interval == 0:
             self.check_order_timeout()
 
@@ -95,10 +111,19 @@ class QmtSimGateway(BaseGateway):
         """扫描超时活动订单并执行撤单与冻结释放。"""
         now = datetime.now()
         timeout_orders = []
-        for orderid, submit_time in list(self.td.counter.order_submit_time.items()):
-            if (now - submit_time).total_seconds() <= self.td.counter.order_timeout:
-                continue
+        for orderid, submit_time in list[tuple[str, datetime]](self.td.counter.order_submit_time.items()):
             order = self.td.counter.orders.get(orderid)
+            timeout_seconds = self.td.counter.order_timeout
+            if order:
+                extra = getattr(order, "extra", None)
+                if isinstance(extra, dict):
+                    try:
+                        timeout_seconds = int(extra.get("timeout_seconds") or timeout_seconds)
+                    except Exception:
+                        timeout_seconds = self.td.counter.order_timeout
+
+            if (now - submit_time).total_seconds() <= timeout_seconds:
+                continue
             if not order:
                 self.td.counter.order_submit_time.pop(orderid, None)
                 continue

@@ -311,6 +311,8 @@ class SignalEnginePlus(BaseEngine):
         """
         gateway_name = vt_symbol.split(".")[1]
         
+        reference = strategy.get_order_reference()
+
         # Create order request
         req = OrderRequest(
             symbol=vt_symbol.split(".")[0],
@@ -320,7 +322,7 @@ class SignalEnginePlus(BaseEngine):
             type=order_type or OrderType.LIMIT,
             price=price,
             volume=volume,
-            reference=f"{APP_NAME}_{strategy.strategy_name}"
+            reference=reference
         )
         
         # Correct exchange parsing

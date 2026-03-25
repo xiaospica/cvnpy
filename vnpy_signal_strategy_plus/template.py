@@ -15,6 +15,7 @@ from vnpy.trader.utility import load_json, save_json
 if TYPE_CHECKING:
     from .engine import SignalEnginePlus
 
+
 class SignalTemplatePlus(ABC):
     """"""
 
@@ -89,6 +90,13 @@ class SignalTemplatePlus(ABC):
         for name in cls.parameters:
             class_parameters[name] = getattr(cls, name)
         return class_parameters
+
+    def get_order_reference(self) -> str:
+        """
+        获取委托的 reference 标识。
+        默认格式: {APP_NAME}_{strategy_name}
+        """
+        return f"{APP_NAME}_{self.strategy_name}"
 
     @abstractmethod
     def on_init(self) -> None:
