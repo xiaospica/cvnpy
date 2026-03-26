@@ -37,10 +37,10 @@ from vnpy.trader.constant import (
 from vnpy.trader.utility import load_json, save_json, round_to
 from vnpy.trader.converter import OffsetConverter
 
+from .base import APP_NAME
 from .template import SignalTemplatePlus
 from .mysql_signal_strategy import MySQLSignalStrategyPlus
 
-APP_NAME = "SignalStrategyPlus"
 EVENT_SIGNAL_STRATEGY_PLUS = "EVENT_SIGNAL_STRATEGY_PLUS"
 
 class SignalEnginePlus(BaseEngine):

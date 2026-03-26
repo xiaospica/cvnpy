@@ -12,6 +12,7 @@ from vnpy.trader.object import (
 )
 from vnpy.trader.utility import load_json, save_json
 
+from .base import APP_NAME
 if TYPE_CHECKING:
     from .engine import SignalEnginePlus
 

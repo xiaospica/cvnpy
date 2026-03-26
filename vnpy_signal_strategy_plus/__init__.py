@@ -2,7 +2,8 @@
 from pathlib import Path
 from vnpy.trader.app import BaseApp
 
-from .engine import APP_NAME, SignalEnginePlus
+from .base import APP_NAME
+from .engine import SignalEnginePlus
 from .mysql_signal_strategy import MySQLSignalStrategyPlus
 from .template import SignalTemplatePlus
 from .ui import SignalStrategyWidgetPlus

@@ -216,6 +216,8 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
                         self._clear_orders[str(vt_orderid)] = {"vt_symbol": pos.vt_symbol, "target": float(available), "done": False}
                 else:
                     self.write_log(f"[LIVE_TEST] 清仓下发卖单失败: {pos.vt_symbol}")
+            else:
+                self.write_log(f'可用数量异常available: {pos.vt_symbol, available}')
         
         if count == 0:
             self.write_log("当前无可用持仓，无需清仓")

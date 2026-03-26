@@ -94,8 +94,8 @@ class TD(XtQuantTraderCallback):
                           price=req.price,
                           status=Status.SUBMITTING,
                           datetime=now)
-        if ref:
-            order.extra = {"req_reference": ref}
+        if req.reference:
+            order.extra = {"req_reference": req.reference}
         self.orders[order.orderid] = order
         self.order_submit_time[order.orderid] = now
         return order.vt_orderid
