@@ -181,11 +181,22 @@ class TD(XtQuantTraderCallback):
             reference=order.order_id
         )
         old_order = self.orders.get(vn_order.orderid, None)
-        if old_order == vn_order:
-            return
+        if old_order:
+            # 恢复旧订单的 extra 字典，避免因为 extra 赋值导致的对象不相等
+            vn_order.extra = old_order.extra
+            if old_order == vn_order:
+                return
+
         if vn_order.status == Status.REJECTED:
-            self.write_log(f'【拒单】 {order.status_msg}')
-            vn_order.extra = {"status_msg": order.status_msg}
+            # 仅在状态刚刚变为 REJECTED 时打印日志，避免重复打印
+            if not old_order or old_order.status != Status.REJECTED:
+                self.write_log(f'【拒单】 {order.status_msg}')
+            
+            # 初始化或更新 extra 字典
+            if not vn_order.extra:
+                vn_order.extra = {}
+            vn_order.extra["status_msg"] = order.status_msg
+
         self.orders[vn_order.orderid] = vn_order
         if vn_order.orderid not in self.order_submit_time and vn_order.datetime:
             self.order_submit_time[vn_order.orderid] = vn_order.datetime

@@ -312,16 +312,14 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
             return super().get_order_price(vt_symbol, direction, fallback_price)
 
         if "reject_up" in signal_type:
-            if tick.limit_up and pricetick:
-                return float(tick.limit_up) + float(pricetick)
             if tick.limit_up:
-                return float(tick.limit_up) * 1.01
+                # 确保测试价格大幅度高于涨停价，以触发柜台的越界拒单
+                return float(tick.limit_up) * 1.1
 
         if "reject_down" in signal_type:
-            if tick.limit_down and pricetick:
-                return float(tick.limit_down) - float(pricetick)
             if tick.limit_down:
-                return float(tick.limit_down) * 0.99
+                # 确保测试价格大幅度低于跌停价，以触发柜台的越界拒单
+                return float(tick.limit_down) * 0.9
 
         if direction == Direction.LONG:
             if "deep" in signal_type:
