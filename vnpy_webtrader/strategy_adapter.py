@@ -1,0 +1,389 @@
+"""策略引擎通用适配层。
+
+节点侧的 WebEngine 通过本模块访问任意策略引擎 (CtaEngine / SignalEnginePlus 等),
+屏蔽不同引擎在 ``add_strategy`` / ``init_strategy`` / ``remove_strategy`` 等方法上的
+签名差异, 使得上层 REST 路由只需面对一套统一接口。
+
+新增引擎只需:
+    1. 写一个继承 ``StrategyEngineAdapter`` 的子类;
+    2. 在 ``ADAPTER_REGISTRY`` 中按 ``APP_NAME`` 注册。
+"""
+
+from __future__ import annotations
+
+from concurrent.futures import Future
+from dataclasses import dataclass, field, asdict
+from typing import Any, Callable, Dict, List, Optional, Set, Type
+
+
+# ---------------------------------------------------------------------------
+# 数据契约
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StrategyInfo:
+    """策略实例的标准化快照, 作为 REST/WS 的对外数据结构。"""
+
+    engine: str
+    name: str
+    class_name: str
+    vt_symbol: Optional[str]
+    author: Optional[str]
+    inited: bool
+    trading: bool
+    parameters: Dict[str, Any]
+    variables: Dict[str, Any]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class StrategyOpResult:
+    """策略写操作 (init/start/stop/...) 的统一返回值。"""
+
+    ok: bool
+    message: str = ""
+    data: Any = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"ok": self.ok, "message": self.message, "data": self.data}
+
+
+@dataclass
+class AddStrategyRequest:
+    """创建策略实例的统一入参 (全集字段, 各适配器按需取用)。"""
+
+    engine: str
+    class_name: str
+    strategy_name: str
+    vt_symbol: Optional[str] = None
+    setting: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AddStrategyRequest":
+        return cls(
+            engine=data["engine"],
+            class_name=data["class_name"],
+            strategy_name=data["strategy_name"],
+            vt_symbol=data.get("vt_symbol"),
+            setting=data.get("setting") or {},
+        )
+
+
+# ---------------------------------------------------------------------------
+# 适配器抽象基类
+# ---------------------------------------------------------------------------
+
+
+class StrategyEngineAdapter:
+    """策略引擎适配器基类。子类实现对具体引擎的封装。"""
+
+    #: 引擎的 APP_NAME, 与 ``main_engine.get_engine(app_name)`` 对应
+    app_name: str = ""
+    #: 面向用户的显示名
+    display_name: str = ""
+    #: 该引擎发出的策略状态事件名 (供 WebEngine 订阅后向 WS 广播)
+    event_type: str = ""
+    #: 支持的能力集合。写路由根据它决定按钮可用性, 不支持的操作返回 501
+    default_capabilities: Set[str] = frozenset(
+        {"add", "init", "start", "stop", "remove"}
+    )
+
+    def __init__(self, engine: Any) -> None:
+        self.engine = engine
+        self.capabilities: Set[str] = set(self.default_capabilities)
+
+    # ---- 元信息 -----------------------------------------------------------
+
+    def describe(self) -> Dict[str, Any]:
+        return {
+            "app_name": self.app_name,
+            "display_name": self.display_name or self.app_name,
+            "event_type": self.event_type,
+            "capabilities": sorted(self.capabilities),
+        }
+
+    # ---- 类与参数查询 -----------------------------------------------------
+
+    def list_classes(self) -> List[str]:
+        return list(self.engine.get_all_strategy_class_names())
+
+    def get_class_params(self, class_name: str) -> Dict[str, Any]:
+        return dict(self.engine.get_strategy_class_parameters(class_name))
+
+    # ---- 实例查询 ---------------------------------------------------------
+
+    def list_strategies(self) -> List[StrategyInfo]:
+        result: List[StrategyInfo] = []
+        for name, strategy in self._iter_strategies():
+            result.append(self._snapshot(name, strategy))
+        return result
+
+    def get_strategy(self, name: str) -> Optional[StrategyInfo]:
+        strategy = self._get_strategy_obj(name)
+        if strategy is None:
+            return None
+        return self._snapshot(name, strategy)
+
+    # ---- 写操作 -----------------------------------------------------------
+
+    def add_strategy(self, req: AddStrategyRequest) -> StrategyOpResult:
+        raise NotImplementedError
+
+    def init_strategy(self, name: str) -> StrategyOpResult:
+        if not self._exists(name):
+            return StrategyOpResult(False, f"策略实例不存在: {name}")
+        try:
+            ret = self.engine.init_strategy(name)
+        except Exception as exc:  # pragma: no cover - defensive
+            return StrategyOpResult(False, f"初始化异常: {exc}")
+        return self._normalize_init_result(ret)
+
+    def start_strategy(self, name: str) -> StrategyOpResult:
+        if not self._exists(name):
+            return StrategyOpResult(False, f"策略实例不存在: {name}")
+        try:
+            self.engine.start_strategy(name)
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"启动异常: {exc}")
+        return StrategyOpResult(True, "started")
+
+    def stop_strategy(self, name: str) -> StrategyOpResult:
+        if not self._exists(name):
+            return StrategyOpResult(False, f"策略实例不存在: {name}")
+        try:
+            self.engine.stop_strategy(name)
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"停止异常: {exc}")
+        return StrategyOpResult(True, "stopped")
+
+    def remove_strategy(self, name: str) -> StrategyOpResult:
+        if not self._exists(name):
+            return StrategyOpResult(False, f"策略实例不存在: {name}")
+        try:
+            ret = self.engine.remove_strategy(name)
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"移除异常: {exc}")
+        ok = True if ret is None else bool(ret)
+        return StrategyOpResult(ok, "removed" if ok else "策略移除失败, 请检查是否仍在运行")
+
+    def edit_strategy(self, name: str, setting: Dict[str, Any]) -> StrategyOpResult:
+        return StrategyOpResult(False, "该引擎不支持 edit_strategy", data={"http_status": 501})
+
+    def init_all(self) -> StrategyOpResult:
+        try:
+            self.engine.init_all_strategies()
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"批量初始化异常: {exc}")
+        return StrategyOpResult(True, "init-all dispatched")
+
+    def start_all(self) -> StrategyOpResult:
+        try:
+            self.engine.start_all_strategies()
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"批量启动异常: {exc}")
+        return StrategyOpResult(True, "start-all dispatched")
+
+    def stop_all(self) -> StrategyOpResult:
+        try:
+            self.engine.stop_all_strategies()
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"批量停止异常: {exc}")
+        return StrategyOpResult(True, "stop-all dispatched")
+
+    # ---- 子类可复写的工具 -------------------------------------------------
+
+    def _iter_strategies(self):
+        """遍历引擎内的策略 ``(name, instance)``。"""
+        strategies = getattr(self.engine, "strategies", {})
+        return list(strategies.items())
+
+    def _get_strategy_obj(self, name: str) -> Any:
+        strategies = getattr(self.engine, "strategies", {})
+        return strategies.get(name)
+
+    def _exists(self, name: str) -> bool:
+        return self._get_strategy_obj(name) is not None
+
+    def _snapshot(self, name: str, strategy: Any) -> StrategyInfo:
+        parameters: Dict[str, Any] = {}
+        variables: Dict[str, Any] = {}
+
+        if hasattr(strategy, "get_parameters"):
+            try:
+                parameters = dict(strategy.get_parameters())
+            except Exception:
+                parameters = {}
+        if hasattr(strategy, "get_variables"):
+            try:
+                variables = dict(strategy.get_variables())
+            except Exception:
+                variables = {}
+
+        return StrategyInfo(
+            engine=self.app_name,
+            name=getattr(strategy, "strategy_name", name),
+            class_name=strategy.__class__.__name__,
+            vt_symbol=getattr(strategy, "vt_symbol", None) or None,
+            author=getattr(strategy, "author", "") or None,
+            inited=bool(getattr(strategy, "inited", False)),
+            trading=bool(getattr(strategy, "trading", False)),
+            parameters=parameters,
+            variables=variables,
+        )
+
+    def _normalize_init_result(self, ret: Any) -> StrategyOpResult:
+        """把 ``init_strategy`` 的各种返回值 (None/bool/Future) 统一成 ``StrategyOpResult``."""
+        if isinstance(ret, Future):
+            try:
+                fret = ret.result(timeout=30)
+            except Exception as exc:
+                return StrategyOpResult(False, f"初始化失败: {exc}")
+            if fret is False:
+                return StrategyOpResult(False, "初始化返回 False")
+            return StrategyOpResult(True, "inited")
+        if ret is False:
+            return StrategyOpResult(False, "初始化返回 False")
+        return StrategyOpResult(True, "inited")
+
+
+# ---------------------------------------------------------------------------
+# 具体适配器
+# ---------------------------------------------------------------------------
+
+
+class CtaStrategyAdapter(StrategyEngineAdapter):
+    """对接 ``vnpy_ctastrategy.CtaEngine``. 其 ``add_strategy`` 要求 4 个位置参数。"""
+
+    app_name = "CtaStrategy"
+    display_name = "CTA策略"
+    event_type = "eCtaStrategy"
+    default_capabilities = frozenset(
+        {"add", "init", "start", "stop", "remove", "edit"}
+    )
+
+    def add_strategy(self, req: AddStrategyRequest) -> StrategyOpResult:
+        if not req.vt_symbol:
+            return StrategyOpResult(False, "CtaStrategy 引擎要求必填 vt_symbol")
+        try:
+            self.engine.add_strategy(
+                req.class_name, req.strategy_name, req.vt_symbol, req.setting
+            )
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"创建策略异常: {exc}")
+        if req.strategy_name not in getattr(self.engine, "strategies", {}):
+            return StrategyOpResult(False, "创建失败, 引擎未登记该实例, 详情见日志")
+        return StrategyOpResult(True, "added")
+
+    def edit_strategy(self, name: str, setting: Dict[str, Any]) -> StrategyOpResult:
+        if not self._exists(name):
+            return StrategyOpResult(False, f"策略实例不存在: {name}")
+        try:
+            self.engine.edit_strategy(name, setting)
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"编辑异常: {exc}")
+        return StrategyOpResult(True, "edited")
+
+
+class SignalStrategyPlusAdapter(StrategyEngineAdapter):
+    """对接 ``vnpy_signal_strategy_plus.SignalEnginePlus``.
+
+    该引擎 ``add_strategy`` 仅接受 ``class_name`` (或类本身), 策略实例由 class 自身的
+    ``strategy_name`` 决定; ``setting`` 需要通过 ``strategy.update_setting`` 应用。
+    """
+
+    app_name = "SignalStrategyPlus"
+    display_name = "Signal策略Plus"
+    event_type = "EVENT_SIGNAL_STRATEGY_PLUS"
+    default_capabilities = frozenset(
+        {"add", "init", "start", "stop", "remove", "edit"}
+    )
+
+    def add_strategy(self, req: AddStrategyRequest) -> StrategyOpResult:
+        try:
+            self.engine.add_strategy(req.class_name)
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"创建策略异常: {exc}")
+
+        # SignalEnginePlus 以策略类里硬编码的 strategy_name 为键, 这里找回实例
+        strategies = getattr(self.engine, "strategies", {})
+        created = None
+        if req.strategy_name and req.strategy_name in strategies:
+            created = strategies[req.strategy_name]
+        else:
+            # 退化到按 class_name 匹配最近创建的实例
+            for inst in strategies.values():
+                if inst.__class__.__name__ == req.class_name:
+                    created = inst
+        if created is None:
+            return StrategyOpResult(False, "创建失败, 引擎未登记对应实例, 详情见日志")
+
+        if req.setting and hasattr(created, "update_setting"):
+            try:
+                created.update_setting(req.setting)
+            except Exception as exc:
+                return StrategyOpResult(False, f"参数应用失败: {exc}")
+
+        return StrategyOpResult(
+            True, "added", data={"strategy_name": created.strategy_name}
+        )
+
+    def edit_strategy(self, name: str, setting: Dict[str, Any]) -> StrategyOpResult:
+        strategy = self._get_strategy_obj(name)
+        if strategy is None:
+            return StrategyOpResult(False, f"策略实例不存在: {name}")
+        if not hasattr(strategy, "update_setting"):
+            return StrategyOpResult(False, "策略不支持 update_setting", data={"http_status": 501})
+        try:
+            strategy.update_setting(setting)
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"编辑异常: {exc}")
+        if hasattr(self.engine, "put_strategy_event"):
+            try:
+                self.engine.put_strategy_event(strategy)
+            except Exception:  # pragma: no cover
+                pass
+        return StrategyOpResult(True, "edited")
+
+
+class LegacySignalStrategyAdapter(SignalStrategyPlusAdapter):
+    """对接旧版 ``vnpy_signal_strategy.SignalEngine``, 行为与 Plus 版一致。"""
+
+    app_name = "SignalStrategy"
+    display_name = "Signal策略"
+    event_type = "eSignalStrategy"
+
+
+# ---------------------------------------------------------------------------
+# 注册表与构建函数
+# ---------------------------------------------------------------------------
+
+
+ADAPTER_REGISTRY: Dict[str, Type[StrategyEngineAdapter]] = {
+    CtaStrategyAdapter.app_name: CtaStrategyAdapter,
+    SignalStrategyPlusAdapter.app_name: SignalStrategyPlusAdapter,
+    LegacySignalStrategyAdapter.app_name: LegacySignalStrategyAdapter,
+}
+
+
+def register_adapter(cls: Type[StrategyEngineAdapter]) -> Type[StrategyEngineAdapter]:
+    """装饰器形式注册自定义适配器。"""
+    ADAPTER_REGISTRY[cls.app_name] = cls
+    return cls
+
+
+def build_adapters(main_engine: Any) -> Dict[str, StrategyEngineAdapter]:
+    """遍历 ``main_engine.engines``, 为已知的策略引擎挂上适配器。"""
+    adapters: Dict[str, StrategyEngineAdapter] = {}
+    engines = getattr(main_engine, "engines", {}) or {}
+    for app_name, adapter_cls in ADAPTER_REGISTRY.items():
+        engine = engines.get(app_name)
+        if engine is None:
+            continue
+        try:
+            adapters[app_name] = adapter_cls(engine)
+        except Exception:  # pragma: no cover - defensive
+            continue
+    return adapters

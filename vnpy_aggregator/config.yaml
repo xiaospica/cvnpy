@@ -1,0 +1,24 @@
+aggregator:
+  host: 0.0.0.0
+  port: 9000
+  # 强烈建议通过环境变量注入真实 secret
+  jwt_secret_env: AGG_JWT_SECRET
+  jwt_secret: change-me
+  token_expire_minutes: 60
+  admin_username: admin
+  admin_password: admin
+  heartbeat_interval: 10
+  heartbeat_fail_threshold: 3
+
+nodes:
+  # 示例: 本地两节点测试
+  - node_id: local-a
+    base_url: http://127.0.0.1:8000
+    username: vnpy
+    password: vnpy
+    verify_tls: false
+  - node_id: local-b
+    base_url: http://127.0.0.1:8001
+    username: vnpy
+    password: vnpy
+    verify_tls: false
