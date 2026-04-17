@@ -15,7 +15,7 @@ from vnpy.trader.constant import Exchange, Interval
 from vnpy.trader.object import BarData, HistoryRequest
 from vnpy.trader.utility import round_to, ZoneInfo
 
-from .utils import TushareDataDownloaderEnhanced, StockDataProcessorEnhanced, DataPipelineEnhanced
+from .ml_data_build import TushareApiClient, StockDataProcessor, DataPipeline
 from .scheduler import DailyTimeTaskScheduler
 
 # 数据频率映射
@@ -135,9 +135,9 @@ class TushareDatafeedPro(BaseDatafeed):
         self.df_all_stock: DataFrame | None = None
 
         # 初始化
-        self.downloader = TushareDataDownloaderEnhanced(self.password, DATA_DIR, max_workers=10)
-        self.processor = StockDataProcessorEnhanced()
-        self.pipeline = DataPipelineEnhanced(self.downloader, self.processor)
+        self.downloader = TushareApiClient(self.password, DATA_DIR, max_workers=10)
+        self.processor = StockDataProcessor()
+        self.pipeline = DataPipeline(self.downloader, self.processor)
 
         self.scheduler = DailyTimeTaskScheduler()
         self.scheduler.register_daily_job(
