@@ -1,0 +1,3 @@
+[submodule "vnpy_tushare_pro/ml_data_build"]
+	path = vnpy_tushare_pro/ml_data_build
+	url = git@github.com:xiaospica/ml_data_build.git
