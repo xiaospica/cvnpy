@@ -1,3 +1,6 @@
 [submodule "vnpy_tushare_pro/ml_data_build"]
 	path = vnpy_tushare_pro/ml_data_build
 	url = git@github.com:xiaospica/ml_data_build.git
+[submodule "vendor/qlib_strategy_core"]
+	path = vendor/qlib_strategy_core
+	url = git@github.com:xiaospica/qlib_strategy_core.git
