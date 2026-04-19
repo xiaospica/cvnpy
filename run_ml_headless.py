@@ -138,6 +138,7 @@ def main() -> int:
 
     if ENABLE_WEBTRADER:
         from vnpy_webtrader import WebTraderApp
+        from vnpy_webtrader.engine import APP_NAME as WEB_APP_NAME
         main_engine.add_app(WebTraderApp)
 
     # 连接 gateway (触发 query_account + 订阅主题)
@@ -148,6 +149,18 @@ def main() -> int:
     # 拿 MLEngine
     from vnpy_ml_strategy import APP_NAME as ML_APP_NAME
     ml_engine = main_engine.get_engine(ML_APP_NAME)
+
+    # init_engine 会触发 _autoload_strategy_classes 注册 QlibMLStrategy;
+    # 以及启动 DailyTimeTaskScheduler. 不调的话 add_strategy 会找不到类.
+    ml_engine.init_engine()
+    print(f"[headless] MLEngine registered: {ml_engine.get_all_strategy_class_names()}")
+
+    # WebTrader 的 RPC 服务器需要手动启动(UI widget 里是点"启动"按钮触发的).
+    # 这一步之后, vnpy_webtrader.web:app uvicorn 才能连上 RPC 拿数据.
+    if ENABLE_WEBTRADER:
+        web_engine = main_engine.get_engine(WEB_APP_NAME)
+        web_engine.start_server("tcp://127.0.0.1:2014", "tcp://127.0.0.1:4102")
+        print("[headless] webtrader RPC server started on tcp://127.0.0.1:2014 / 4102")
 
     # 创建 + 初始化 + 启动策略
     print(f"[headless] adding strategy {STRATEGY_NAME} ({STRATEGY_CLASS})...")

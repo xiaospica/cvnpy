@@ -331,6 +331,15 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         self.last_stage = Stage.SELECT.value
         selected = self.select_topk(pred_df)
 
+        # Persist selections regardless of enable_trading — downstream UIs (Tab1
+        # "最新 TopK 信号" / Tab2 "历史回溯") depend on having the per-day
+        # selections.parquet on disk even in dry-run mode.
+        self.last_stage = Stage.SAVE.value
+        try:
+            self.persist_selections(selected)
+        except Exception as exc:
+            self.write_log(f"persist_selections failed: {type(exc).__name__}: {exc}")
+
         if self.enable_trading:
             self.last_stage = Stage.ORDER.value
             self.generate_orders(selected)
@@ -353,8 +362,36 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         slice_df = pred_df.xs(last_dt, level="datetime")
         return slice_df.sort_values("score", ascending=False).head(self.topk)
 
+    def persist_selections(self, selected: pd.DataFrame) -> None:
+        """Write selections.parquet to {output_root}/{name}/{yyyymmdd}/.
+
+        Default impl writes canonical schema (trade_date, instrument, rank,
+        score, weight, target_price, side, model_run_id). Subclasses may
+        override to customize (e.g. add sector weights, risk budgeting).
+
+        Always runs — does not depend on ``enable_trading``.
+        """
+        from .persistence.result_store import ResultStore
+        from .persistence.schema import (
+            COL_INSTRUMENT, COL_MODEL_RUN_ID, COL_RANK, COL_SIDE,
+            COL_TARGET_PRICE, COL_TRADE_DATE, COL_WEIGHT,
+        )
+        if selected is None or selected.empty:
+            return
+        today = date.today()
+        sel_df = selected.reset_index().copy()
+        sel_df[COL_TRADE_DATE] = today.strftime("%Y-%m-%d")
+        sel_df[COL_INSTRUMENT] = sel_df.get("instrument", sel_df.iloc[:, 0])
+        sel_df[COL_RANK] = range(1, len(sel_df) + 1)
+        sel_df[COL_WEIGHT] = 1.0 / len(sel_df)
+        sel_df[COL_TARGET_PRICE] = float("nan")
+        sel_df[COL_SIDE] = "long"
+        sel_df[COL_MODEL_RUN_ID] = self.last_model_run_id
+        store = ResultStore(self.output_root)
+        store.write_selections(self.strategy_name, today, sel_df)
+
     def generate_orders(self, selected: pd.DataFrame) -> None:
-        """子类实现. 内部调 self.send_order(...)."""
+        """子类实现. 内部调 self.send_order(...). 仅在 enable_trading=True 时被调用."""
         raise NotImplementedError("subclass should implement generate_orders")
 
     # -----------------------------------------------------------------

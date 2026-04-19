@@ -404,13 +404,19 @@ class MLStrategyAdapter(StrategyEngineAdapter):
         return []
 
     def get_prediction_summary(self, name: str) -> Optional[Dict[str, Any]]:
-        """最新一日预测 summary (top-k + histogram + n_symbols + coverage).
+        """最新一日预测 summary: metrics + topk.
 
-        从 MetricsCache 里取 — 它其实也含 score_histogram / n_predictions 等.
+        metrics/histogram 来自 MetricsCache, topk 从磁盘最新 selections.parquet 读取.
         """
         metrics = self.get_latest_metrics(name)
         if not metrics:
             return None
+
+        topk: List[Dict[str, Any]] = []
+        strat = getattr(self.engine, "strategies", {}).get(name)
+        if strat is not None:
+            topk = self._load_latest_topk(strat)
+
         return {
             "strategy": name,
             "trade_date": metrics.get("trade_date"),
@@ -419,7 +425,44 @@ class MLStrategyAdapter(StrategyEngineAdapter):
             "score_histogram": metrics.get("score_histogram", []),
             "pred_mean": metrics.get("pred_mean"),
             "pred_std": metrics.get("pred_std"),
+            "topk": topk,
         }
+
+    @staticmethod
+    def _load_latest_topk(strat: Any) -> List[Dict[str, Any]]:
+        """读 {output_root}/{name}/ 下最新一天的 selections.parquet."""
+        import pandas as pd
+        from pathlib import Path
+
+        output_root = getattr(strat, "output_root", None)
+        strat_name = getattr(strat, "strategy_name", None)
+        if not output_root or not strat_name:
+            return []
+        strat_dir = Path(output_root) / strat_name
+        if not strat_dir.exists():
+            return []
+        day_dirs = sorted(
+            (d for d in strat_dir.iterdir() if d.is_dir() and d.name.isdigit() and len(d.name) == 8),
+            reverse=True,
+        )
+        for day_dir in day_dirs:
+            p = day_dir / "selections.parquet"
+            if not p.exists():
+                continue
+            try:
+                df = pd.read_parquet(p)
+            except Exception:
+                continue
+            return [
+                {
+                    "rank": int(r.get("rank", i + 1)) if pd.notna(r.get("rank", i + 1)) else i + 1,
+                    "instrument": str(r.get("instrument", "")),
+                    "score": float(r.get("score")) if pd.notna(r.get("score")) else None,
+                    "weight": float(r.get("weight")) if pd.notna(r.get("weight")) else None,
+                }
+                for i, (_, r) in enumerate(df.iterrows())
+            ]
+        return []
 
     def get_health(self) -> Dict[str, Any]:
         """集合级健康检查: 所有 ML 策略的最新跑状态."""

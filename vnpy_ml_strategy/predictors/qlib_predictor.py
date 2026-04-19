@@ -98,6 +98,8 @@ class QlibPredictor:
         env = os.environ.copy()
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(self.core_path) + (os.pathsep + existing if existing else "")
+        # 让子进程 stdout/stderr 用 UTF-8, 避免 Windows GBK 和 qlib 中文输出打架
+        env.setdefault("PYTHONIOENCODING", "utf-8")
 
         try:
             result = subprocess.run(
@@ -105,6 +107,8 @@ class QlibPredictor:
                 env=env,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",  # 解码失败不抛异常, 用 \ufffd 替代
                 timeout=timeout_s,
             )
         except subprocess.TimeoutExpired as exc:

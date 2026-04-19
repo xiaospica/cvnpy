@@ -60,12 +60,14 @@ class DailyTimeTaskScheduler:
         hour, minute = _parse_hhmm(time_str)
 
         def wrapped() -> None:
+            from datetime import datetime as _dt
+            run_date = _dt.now().strftime("%Y-%m-%d")
             try:
-                logger.info(f"🕘 执行任务({name})：{run_date} {time_str}")
+                logger.info(f"[scheduler] start job({name}) at {run_date} {time_str}")
                 job_func()
-                logger.info(f"✅ 任务完成({name})")
+                logger.info(f"[scheduler] job done({name})")
             except Exception as e:
-                logger.exception(f"❌ 任务异常({name}): {e}")
+                logger.exception(f"[scheduler] job failed({name}): {e}")
 
         trigger = CronTrigger(hour=hour, minute=minute)
         with self._lock:

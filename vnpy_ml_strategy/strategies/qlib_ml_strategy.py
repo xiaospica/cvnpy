@@ -66,21 +66,8 @@ class QlibMLStrategy(MLStrategyTemplate):
             return
 
         today = date.today()
-        trade_date_str = today.strftime("%Y-%m-%d")
         store = ResultStore(self.output_root)
-
-        # 1. 选股落盘 (无论是否下单都记录)
-        sel_df = selected.reset_index().copy()
-        # 确保列名齐备
-        sel_df[COL_TRADE_DATE] = trade_date_str
-        sel_df[COL_INSTRUMENT] = sel_df.get("instrument", sel_df.iloc[:, 0])
-        sel_df[COL_RANK] = range(1, len(sel_df) + 1)
-        sel_df[COL_WEIGHT] = 1.0 / len(sel_df)  # 等权
-        sel_df[COL_TARGET_PRICE] = float("nan")  # 市价单
-        sel_df[COL_SIDE] = "long"
-        sel_df[COL_MODEL_RUN_ID] = self.last_model_run_id
-
-        store.write_selections(self.strategy_name, today, sel_df)
+        # selections.parquet 由父类 persist_selections 负责(无论 enable_trading)
 
         # 2. 生成 order intents + 过滤
         order_logs: List[Dict[str, Any]] = []
