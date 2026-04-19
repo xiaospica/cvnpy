@@ -105,7 +105,7 @@ def main() -> int:
         "provider_uri": r"F:/Quant/code/qlib_strategy_dev/factor_factory/qlib_data_bin",
         "output_root": OUT,
         "gateway": "QMT_SIM",
-        "trigger_time": "09:15",
+        "trigger_time": "21:00",
         "topk": 7,
         "cash_per_order": 100000,
         "lookback_days": 60,

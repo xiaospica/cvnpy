@@ -15,8 +15,18 @@ from vnpy.trader.constant import Exchange, Interval
 from vnpy.trader.object import BarData, HistoryRequest
 from vnpy.trader.utility import round_to, ZoneInfo
 
-from .ml_data_build import TushareApiClient, StockDataProcessor, DataPipeline
+from .ml_data_build import (
+    TushareApiClient,
+    StockDataProcessor,
+    DataPipeline,
+    DailyIngestPipeline,
+    OfflineIndexDataSource,
+)
 from .scheduler import DailyTimeTaskScheduler
+
+import os
+from loguru import logger
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 # 数据频率映射
 INTERVAL_VT2TS: dict[Interval, str] = {
@@ -139,23 +149,95 @@ class TushareDatafeedPro(BaseDatafeed):
         self.processor = StockDataProcessor()
         self.pipeline = DataPipeline(self.downloader, self.processor)
 
+        # Phase 4 — ML 日更编排器 (按 env 启用); 失败时 fall back 到仅做
+        # update_all_stock_history 的 19:00 cron (原有行为).
+        self.daily_ingest_pipeline: DailyIngestPipeline | None = self._build_daily_ingest_pipeline()
+
         self.scheduler = DailyTimeTaskScheduler()
-        self.scheduler.register_daily_job(
-            name="post_close_update",
-            time_str="19:00",
-            job_func=self._post_close_update,
-        )
+        if self.daily_ingest_pipeline is not None:
+            # 新: 20:00 拉数 + 过滤 + qlib bin 增量 dump
+            self.scheduler.register_daily_job(
+                name="daily_ml_ingest",
+                time_str="20:00",
+                job_func=self._daily_ml_ingest,
+            )
+        else:
+            # 旧: 19:00 只 update_all_stock_history (向后兼容)
+            self.scheduler.register_daily_job(
+                name="post_close_update",
+                time_str="19:00",
+                job_func=self._post_close_update,
+            )
         self.scheduler.start()
 
-    def _post_close_update(self) -> None:
+    def _build_daily_ingest_pipeline(self) -> DailyIngestPipeline | None:
+        """按 env 变量构造 DailyIngestPipeline, 不满足条件返回 None.
+
+        env 变量:
+          ML_DAILY_INGEST_ENABLED    "1" 启用 (默认关闭, 向后兼容)
+          ML_MERGED_PARQUET_PATH     主 parquet (e.g. .../daily_merged_all_new.parquet)
+          ML_FILTERED_PARQUET_PATH   过滤结果 (e.g. .../csi300_custom_filtered.parquet)
+          ML_BY_STOCK_CSV_DIR        qlib CSV 目录 (e.g. .../stock_data/by_stock)
+          ML_QLIB_DIR                qlib bin 根 (e.g. .../factor_factory/qlib_data_bin)
+          ML_SNAPSHOT_DIR            快照 + 审计日志 (e.g. .../factor_factory/snapshots)
+          ML_JQ_INDEX_CSV_PATHS      聚宽 CSV 路径 JSON 字符串 e.g. {"csi300":"F:/.../hs300_*.csv"}
+        """
+        if os.getenv("ML_DAILY_INGEST_ENABLED", "0") != "1":
+            return None
+        import json
+        try:
+            jq_paths = json.loads(os.environ["ML_JQ_INDEX_CSV_PATHS"])
+            index_source = OfflineIndexDataSource(
+                index_csv_paths=jq_paths,
+                index_code_config={"csi300": "000300.XSHG"},
+            )
+            return DailyIngestPipeline(
+                pipeline=self.pipeline,
+                index_source=index_source,
+                merged_parquet_path=os.environ["ML_MERGED_PARQUET_PATH"],
+                filtered_parquet_path=os.environ["ML_FILTERED_PARQUET_PATH"],
+                by_stock_csv_dir=os.environ["ML_BY_STOCK_CSV_DIR"],
+                qlib_dir=os.environ["ML_QLIB_DIR"],
+                snapshot_dir=os.environ["ML_SNAPSHOT_DIR"],
+                index_code="000300.SH",
+                lookback_days=120,
+                # event_callback 由 TushareProEngine 在 engine.init_engine 里注入
+            )
+        except KeyError as exc:
+            logger.warning(
+                f"[daily_ingest] env 配置不完整, 跳过 DailyIngestPipeline 构造: 缺 {exc}"
+            )
+            return None
+        except Exception as exc:
+            logger.warning(f"[daily_ingest] 构造 DailyIngestPipeline 失败: {exc}")
+            return None
+
+    def _daily_ml_ingest(self) -> None:
+        """Phase 4 — 每日 20:00 ML 数据管道 cron 入口."""
+        if self.daily_ingest_pipeline is None:
+            logger.warning("[daily_ingest] pipeline 未配置, cron no-op")
+            return
         run_date = datetime.now(CHINA_TZ).strftime("%Y%m%d")
-        if self.downloader.is_trade_date(run_date):
-            logger.info(f"⏭️  跳过任务({name})：非交易日 {run_date}")
+        try:
+            result = self.daily_ingest_pipeline.ingest_today(run_date)
+            logger.info(f"[daily_ingest] cron done: {result}")
+        except Exception as exc:
+            logger.exception(f"[daily_ingest] cron failed: {exc}")
+
+    def _post_close_update(self) -> None:
+        """旧版 19:00 cron — 仅做 tushare 增量, 不做过滤 / qlib dump."""
+        run_date = datetime.now(CHINA_TZ).strftime("%Y%m%d")
+        if not self.downloader.is_trade_date(run_date):
+            logger.info(f"[post_close_update] 跳过: 非交易日 {run_date}")
             return
         self.update_all_stock_history()
 
     def set_post_close_update_time(self, time_str: str) -> None:
         self.scheduler.update_job_time("post_close_update", time_str)
+
+    def set_daily_ingest_time(self, time_str: str) -> None:
+        """Phase 4 — 调整 daily_ml_ingest cron 时间."""
+        self.scheduler.update_job_time("daily_ml_ingest", time_str)
 
     def init(self, output: Callable = print) -> bool:
         """初始化"""

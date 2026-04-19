@@ -68,7 +68,10 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     parameters: List[str] = [
         "bundle_dir",          # 如 D:/vnpy_models/csi300_lgb/ab2711.../
         "inference_python",    # 研究机 Python 3.11 路径
-        "trigger_time",        # "09:15"
+        "trigger_time",        # 推荐 "21:00" (配合 TushareProApp 20:00 拉数);
+                               # 若用 "09:15", live_end 默认 today 会用昨日 bar,
+                               # 需自行错位或等待 20:00 拉完数据再触发
+
         "topk",
         "n_drop",
         "cash_per_order",
@@ -96,7 +99,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     # Parameter defaults
     bundle_dir: str = ""
     inference_python: str = r"E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.exe"
-    trigger_time: str = "09:15"
+    trigger_time: str = "21:00"  # 20:00 拉数后 1h, live_end=today 数据已齐
     topk: int = 7
     n_drop: int = 1
     cash_per_order: float = 100000.0

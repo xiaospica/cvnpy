@@ -17,6 +17,10 @@ EVENT_TUSHAREPRO_LOG = "eTushareProLog"
 EVENT_TUSHAREPRO_PROGRESS = "eTushareProProgress"
 EVENT_TUSHAREPRO_TASK_FINISHED = "eTushareProTaskFinished"
 
+# Phase 4 — 每日 20:00 ML 数据管道事件 (DailyIngestPipeline)
+EVENT_DAILY_INGEST_OK = "eDailyIngestOk"
+EVENT_DAILY_INGEST_FAILED = "eDailyIngestFailed"
+
 
 @dataclass(frozen=True)
 class TaskProgress:
@@ -49,6 +53,19 @@ class TushareProEngine(BaseEngine):
         else:
             self.write_log(_("数据服务初始化失败"))
 
+        # Phase 4 — 把 DailyIngestPipeline 的 event_callback 接到 EventEngine
+        datafeed = self._get_tushare_datafeed()
+        pipeline = getattr(datafeed, "daily_ingest_pipeline", None)
+        if pipeline is not None:
+            pipeline.event_callback = self._emit_ingest_event
+            self.write_log(_("DailyIngestPipeline event_callback 已注入"))
+
+    def _emit_ingest_event(self, event_type: str, payload: dict) -> None:
+        """DailyIngestPipeline 通过此回调把 EVENT_DAILY_INGEST_* 事件发到 vnpy EventEngine."""
+        event: Event = Event(event_type)
+        event.data = payload
+        self.event_engine.put(event)
+
     def write_log(self, msg: str) -> None:
         event: Event = Event(EVENT_TUSHAREPRO_LOG)
         event.data = msg
@@ -69,6 +86,35 @@ class TushareProEngine(BaseEngine):
 
     def _get_tushare_datafeed(self) -> TushareDatafeedPro:
         return cast(TushareDatafeedPro, self.datafeed)
+
+    # ------------------------------------------------------------------
+    # Phase 4 — 每日 20:00 ML 数据管道 (DailyIngestPipeline) 手动触发入口
+    # ------------------------------------------------------------------
+
+    def run_daily_ingest_now(self, trade_date: str | None = None) -> dict | None:
+        """UI / 运维手动触发 DailyIngestPipeline 一次.
+
+        Parameters
+        ----------
+        trade_date : str, optional
+            YYYYMMDD. 默认今天. 非交易日返回 skipped.
+
+        Returns
+        -------
+        dict with stages_done / merged_rows / ... (成功)
+        None (datafeed 没配置 pipeline)
+        """
+        datafeed = self._get_tushare_datafeed()
+        pipeline = getattr(datafeed, "daily_ingest_pipeline", None)
+        if pipeline is None:
+            self.write_log(_("DailyIngestPipeline 未配置, 手动触发失败"))
+            return None
+        try:
+            result = pipeline.ingest_today(trade_date)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            self.write_log(_("DailyIngestPipeline 手动触发失败: {}").format(exc))
+            raise
 
     def download_all_history(self, start_date: str, end_date: str) -> None:
         if self._is_running():

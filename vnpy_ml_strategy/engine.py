@@ -53,15 +53,39 @@ class MLEngine(BaseEngine):
         # 订单归属表: vt_orderid → strategy_name. 策略发单时调 track_order 登记.
         self._orderid_to_strategy: Dict[str, str] = {}
 
+        # 幂等 guard — CLI (run_ml_headless) / UI widget 都会调 init_engine;
+        # 二次调用会重复 event_engine.register 导致 order 事件被处理两次.
+        self._initialized: bool = False
+
+        # Phase 4 — 最近一次 DailyIngestPipeline 状态 (由 _on_ingest_failed 更新).
+        # pipeline 可在 run_daily_pipeline 里读此 flag, 若 failed 则发警告事件.
+        self._last_ingest_status: Dict[str, Any] = {"status": "unknown"}
+
     # ------------------------------------------------------------------
     # BaseEngine 接口
     # ------------------------------------------------------------------
 
     def init_engine(self) -> None:
-        """vnpy 启动时调用一次."""
+        """vnpy 启动时调用一次. 幂等 — 第二次调用是 no-op."""
+        if self._initialized:
+            return
         self.scheduler.start()
         self.register_order_listener()
         self._autoload_strategy_classes()
+        # Phase 4 — 监听 DailyIngestPipeline 失败事件, 21:00 推理前可读此 flag.
+        try:
+            from vnpy_tushare_pro.engine import EVENT_DAILY_INGEST_FAILED
+            self.event_engine.register(EVENT_DAILY_INGEST_FAILED, self._on_ingest_failed)
+        except ImportError:
+            pass  # TushareProApp 未加载时 skip
+        self._initialized = True
+
+    def _on_ingest_failed(self, event: Event) -> None:
+        """记录最近一次 DailyIngestPipeline 失败 — run_daily_pipeline 可读此 flag 发警告事件."""
+        payload = event.data or {}
+        self._last_ingest_status = {"status": "failed", "payload": payload}
+        from loguru import logger
+        logger.warning(f"[MLEngine] DailyIngestPipeline 失败: {payload}")
 
     def _autoload_strategy_classes(self) -> None:
         """自动登记本 app 内置策略类 — UI combobox 才有东西可选.

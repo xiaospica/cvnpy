@@ -81,7 +81,7 @@ STRATEGY_SETTING = {
     "provider_uri": r"F:/Quant/code/qlib_strategy_dev/factor_factory/qlib_data_bin",
 
     # 调度
-    "trigger_time": "09:15",        # 每日 09:15 触发 pipeline
+    "trigger_time": "21:00",        # 每日 21:00 触发 pipeline (20:00 拉完数据后 1h)
     # 选股 / 下单
     "topk": 7,
     "n_drop": 1,

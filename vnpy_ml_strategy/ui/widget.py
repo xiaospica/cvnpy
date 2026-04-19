@@ -41,6 +41,12 @@ class MLStrategyManager(QtWidgets.QWidget):
 
         self._init_ui()
         self._register_event()
+        # CRITICAL: 在更新 UI 前触发 MLEngine.init_engine() 以填充 strategy_classes
+        # 字典(通过 _autoload_strategy_classes 注册 QlibMLStrategy 等). vnpy
+        # MainEngine.add_app 只调 Engine.__init__, 不调 init_engine, 因此 UI
+        # widget 打开时必须显式触发一次. 参考 signal_strategy_plus/ui/widget.py.
+        # init_engine 是幂等的, 重复调用(CLI headless 也会调)不会出问题.
+        self.ml_engine.init_engine()
         self._update_class_combo()
         self._snapshot_existing_strategies()
 
