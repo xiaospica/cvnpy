@@ -37,5 +37,5 @@ class MLStrategyApp(BaseApp):
     app_path: Path = Path(__file__).parent
     display_name: str = "ML策略"
     engine_class: type[MLEngine] = MLEngine
-    widget_name: str = ""
+    widget_name: str = "MLStrategyManager"
     icon_name: str = ""
