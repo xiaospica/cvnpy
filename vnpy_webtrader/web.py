@@ -29,7 +29,76 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 
+import zmq
+
 from vnpy.rpc import RpcClient
+from vnpy.rpc.client import RemoteException
+
+
+class ResilientRpcClient(RpcClient):
+    """RpcClient 子类 — 在 REQ 超时 / ZMQError 时自动重建 REQ socket.
+
+    原生 vnpy.rpc.RpcClient 的 ``__getattr__`` 在 poll 超时后直接 raise
+    RemoteException 却不重置 REQ socket. REQ 的 ZMQ 语义是严格 send/recv
+    交替: "发了没收"之后再次 ``send_pyobj`` 会抛 ``Operation cannot be
+    accomplished in current state``, 整个 client 此后永久失效, 只能重启
+    uvicorn 才恢复 —— 这对 ml_snapshot_loop 这种 60s 长轮询循环是致命的.
+
+    本子类做两件事:
+      1. ``start`` 时记下 req_address, 便于后续 reconnect;
+      2. 覆盖 ``__getattr__`` 生成的 dorpc: 捕获 poll 超时 + ZMQError,
+         用一把新的 REQ socket 原子替换坏掉的, 最多重试 1 次.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._req_address: str = ""
+
+    def start(self, req_address: str, sub_address: str) -> None:  # type: ignore[override]
+        self._req_address = req_address
+        super().start(req_address, sub_address)
+
+    def _reset_req_socket(self) -> None:
+        try:
+            self._socket_req.close(linger=0)
+        except Exception:
+            pass
+        self._socket_req = self._context.socket(zmq.REQ)
+        self._socket_req.setsockopt(zmq.TCP_KEEPALIVE, 1)
+        self._socket_req.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 60)
+        if self._req_address:
+            self._socket_req.connect(self._req_address)
+
+    def __getattr__(self, name: str) -> Any:  # type: ignore[override]
+        def dorpc(*args: Any, **kwargs: Any) -> Any:
+            timeout: int = kwargs.pop("timeout", 30000)
+            req = [name, args, kwargs]
+            last_exc: Exception | None = None
+            for _ in range(2):
+                try:
+                    with self._lock:
+                        self._socket_req.send_pyobj(req)
+                        n: int = self._socket_req.poll(timeout)
+                        if not n:
+                            self._reset_req_socket()
+                            raise RemoteException(
+                                f"Timeout of {timeout}ms reached for {req}"
+                            )
+                        rep = self._socket_req.recv_pyobj()
+                    if rep[0]:
+                        return rep[1]
+                    raise RemoteException(rep[1])
+                except zmq.ZMQError as exc:
+                    last_exc = exc
+                    with self._lock:
+                        self._reset_req_socket()
+                    # retry once after reset
+                    continue
+            raise RemoteException(
+                f"ZMQError after socket reset retry: {last_exc}"
+            )
+
+        return dorpc
 from vnpy.trader.constant import Direction, Exchange, Offset, OrderType
 from vnpy.trader.event import (
     EVENT_ACCOUNT,
@@ -283,7 +352,7 @@ def _rpc_callback(topic: str, data: Any) -> None:
 
 @app.on_event("startup")
 def _startup() -> None:
-    client = RpcClient()
+    client = ResilientRpcClient()
     client.callback = _rpc_callback
     client.subscribe_topic("")
     client.start(REQ_ADDRESS, SUB_ADDRESS)

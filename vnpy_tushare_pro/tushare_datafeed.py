@@ -216,7 +216,7 @@ class TushareDatafeedPro(BaseDatafeed):
         try:
             index_source = OfflineIndexDataSource(
                 index_csv_paths=jq_paths,
-                index_code_config={"csi300": "000300.XSHG"},
+                index_code_config={"csi300": {"code": "000300.SH", "name": "沪深300"}},
             )
             return DailyIngestPipeline(
                 pipeline=self.pipeline,

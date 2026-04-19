@@ -70,25 +70,37 @@ QMT_SETTING = {
 # ML 策略配置
 STRATEGY_NAME = "csi300_lgb_headless"
 STRATEGY_CLASS = "QlibMLStrategy"
+# Phase 4 v2: 实盘数据根目录. 训练侧 rsync 过来的 bundle 也推荐落在这里.
+QS_DATA_ROOT = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
+VNPY_MODEL_ROOT = os.getenv("VNPY_MODEL_ROOT", r"D:/vnpy_data/models")
+
 STRATEGY_SETTING = {
-    # 模型 bundle — 请改成你 qs_exports 下实际 run_id 的路径
-    "bundle_dir": r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab2711178313491f9900b5695b47fa98",
+    # 模型 bundle — 训练机 rsync 到 {VNPY_MODEL_ROOT}/{exp}/{run_id}/
+    # 可用 env BUNDLE_DIR 覆盖, 不设则用训练机默认路径便于本地开发
+    "bundle_dir": os.getenv(
+        "BUNDLE_DIR",
+        r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab2711178313491f9900b5695b47fa98",
+    ),
 
     # Python 3.11 研究机环境 (subprocess 推理入口)
-    "inference_python": r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
+    "inference_python": os.getenv(
+        "INFERENCE_PYTHON",
+        r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
+    ),
 
-    # qlib 数据 bin 根 (subprocess + 本地 is_trade_day 都用)
-    "provider_uri": r"F:/Quant/code/qlib_strategy_dev/factor_factory/qlib_data_bin",
+    # qlib bin 根. Phase 4 v2 默认指向 QS_DATA_ROOT/qlib_data_bin
+    # (DailyIngestPipeline 每日 20:00 重建)
+    "provider_uri": os.getenv("QS_PROVIDER_URI", f"{QS_DATA_ROOT}/qlib_data_bin"),
 
-    # 调度
-    "trigger_time": "21:00",        # 每日 21:00 触发 pipeline (20:00 拉完数据后 1h)
+    # 调度 — 21:00 配合 20:00 拉数 cron
+    "trigger_time": "21:00",
     # 选股 / 下单
     "topk": 7,
     "n_drop": 1,
     "cash_per_order": 100000,
     "gateway": USE_GATEWAY,
-    # 落盘
-    "output_root": r"D:/ml_output",
+    # 推理产出落盘 (不是数据根, 是每次推理的 3 文件 + selections)
+    "output_root": os.getenv("ML_OUTPUT_ROOT", r"D:/ml_output"),
     # 推理
     "lookback_days": 60,
     "subprocess_timeout_s": 300,

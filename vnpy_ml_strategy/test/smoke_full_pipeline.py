@@ -76,6 +76,8 @@ sys.path.insert(0, r"F:\Quant\code\qlib_strategy_dev")
 TRIGGER_INGEST_ON_STARTUP: bool = True   # False → 只跑 vnpy 不拉数 (快速 iter)
 TRIGGER_PIPELINE_ON_STARTUP: bool = True # False → 只拉数不推理
 SPAWN_MLEARNWEB: bool = True              # False → 不启 mlearnweb live_main
+# LIVE_DATE 默认 today, 但若非交易日会自动往前找最近交易日 (见 _resolve_live_date).
+# 也可通过 env LIVE_DATE=YYYY-MM-DD 手动指定.
 LIVE_DATE: date = date.today()
 
 BUNDLE_DIR = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab2711178313491f9900b5695b47fa98"
@@ -117,6 +119,29 @@ def _load_tushare_token() -> str:
     return token
 
 
+def _resolve_live_date(downloader) -> date:
+    """返回最近交易日: 若 env LIVE_DATE 指定则尊重; 否则 today 非交易日自动回退."""
+    from datetime import timedelta
+    env_val = os.getenv("LIVE_DATE")
+    if env_val:
+        try:
+            return datetime.strptime(env_val, "%Y-%m-%d").date()
+        except ValueError:
+            _log(f"WARN: env LIVE_DATE={env_val} 格式非法, 忽略")
+
+    # today 往前找 10 天里最近的交易日
+    candidate = date.today()
+    for _ in range(10):
+        try:
+            is_td = bool(downloader.is_trade_date(candidate.strftime("%Y%m%d")))
+        except Exception:
+            is_td = True  # 失败保守当交易日
+        if is_td:
+            return candidate
+        candidate = candidate - timedelta(days=1)
+    return candidate  # fallback (理论上 10 天内必有交易日)
+
+
 def _setup_ingest_env(token: str) -> None:
     """把 DailyIngestPipeline 需要的 env 变量塞进 os.environ."""
     os.environ["TUSHARE_TOKEN"] = token
@@ -141,10 +166,6 @@ def main() -> int:
     _log(f"=== Phase 0 — 前置 ===")
     token = _load_tushare_token()
     _setup_ingest_env(token)
-
-    live_date_str = LIVE_DATE.strftime("%Y%m%d")
-    live_date_iso = LIVE_DATE.strftime("%Y-%m-%d")
-    _log(f"LIVE_DATE={LIVE_DATE}  bundle={Path(BUNDLE_DIR).name[:16]}...")
 
     # --- Phase 1: vnpy 全栈 ---
     _log("=== Phase 1 — vnpy 全栈 ===")
@@ -174,6 +195,27 @@ def main() -> int:
     tushare_engine = main_engine.get_engine(TUSHARE_APP)
     tushare_engine.init_engine()
     _log(f"TushareProEngine inited, daily_ingest_pipeline={tushare_engine._get_tushare_datafeed().daily_ingest_pipeline is not None}")
+
+    # 现在 tushare engine 已就绪, 确定 LIVE_DATE (非交易日自动回退)
+    downloader = tushare_engine._get_tushare_datafeed().downloader
+    live_date = _resolve_live_date(downloader)
+    live_date_str = live_date.strftime("%Y%m%d")
+    live_date_iso = live_date.strftime("%Y-%m-%d")
+    if live_date != date.today():
+        _log(f"WARN: today={date.today()} 非交易日, 回退 LIVE_DATE={live_date}")
+        # template.run_daily_pipeline 用 date.today() 决定 live_end + trade_day 短路.
+        # 非交易日 smoke 必须 monkey-patch, 否则 pipeline 直接发 heartbeat 不跑推理.
+        import vnpy_ml_strategy.template as _tpl_mod
+        _orig_date = _tpl_mod.date
+
+        class _SmokeDate(_orig_date):
+            @classmethod
+            def today(cls):
+                return live_date
+        _tpl_mod.date = _SmokeDate
+        _log(f"monkey-patched vnpy_ml_strategy.template.date.today() -> {live_date}")
+    else:
+        _log(f"LIVE_DATE={live_date}")
 
     ml_engine = main_engine.get_engine(ML_APP)
     ml_engine.init_engine()
@@ -230,7 +272,7 @@ def main() -> int:
         if result.get("skipped"):
             _log(f"WARN: {live_date_str} 非交易日 skipped, 推理将用 live_end=today 跑但可能 status=empty")
         else:
-            _log(f"ingest OK stages={result['stages_done']} merged_rows={result['merged_rows']} filtered_rows={result['filtered_rows']} elapsed={time.time()-t0:.1f}s")
+            _log(f"ingest OK stages={result['stages_done']} merged_rows={result['merged_rows']} filtered_today_rows={result.get('filtered_today_rows', result.get('filtered_rows'))} elapsed={time.time()-t0:.1f}s")
     else:
         _log("Phase 2 skipped (TRIGGER_INGEST_ON_STARTUP=False)")
 
