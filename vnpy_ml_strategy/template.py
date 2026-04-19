@@ -1,34 +1,48 @@
 """``MLStrategyTemplate`` — ML 日频策略的抽象基类.
 
-继承 ``SignalTemplatePlus`` 以复用 vnpy 下单管道 (``send_order`` 等). 添加
-日频 pipeline 编排 (``run_daily_pipeline``) + 子类必实现的数据/预测接口.
+Phase B 重构: 不再继承 SignalTemplatePlus (跨 app 耦合). 组合方式:
+    MLStrategyTemplate(AutoResubmitMixin, ABC)
 
-Pipeline 概览(run_daily_pipeline,APS 后台线程触发):
+  - AutoResubmitMixin 来自 vnpy_order_utils, 提供撤单/拒单自动重挂能力
+  - 本类提供:
+      * send_order / cancel_order — 直接调 main_engine, 不经过 SignalEnginePlus
+      * on_order / on_trade — 调 AutoResubmitMixin.on_order_for_resubmit (mixin 契约)
+      * on_timer — 调 on_timer_for_resubmit
+      * run_daily_pipeline — 日频主流程 (subprocess 推理 + T+1 过滤 + 下单)
+      * update_setting / get_parameters / get_variables — 设置系统 (模仿 SignalTemplatePlus)
+      * write_log / get_order_reference — 基础工具
+
+Host 契约 (OrderResubmitHost 要求):
+  * ``gateway: str``       — parameters 字段
+  * ``signal_engine``      — 指向 MLEngine; 它的 ``.main_engine`` 是 vnpy MainEngine
+                              (mixin 查 gateway + tick 走这条路径)
+  * ``send_order(...)``    — 本类实现
+  * ``write_log(msg)``     — 本类实现
+
+Pipeline 概览(run_daily_pipeline, APS 后台线程触发):
 
   is_trade_day? ──no──> return (心跳仍发)
   │ yes
-  ├─ (主进程,启子进程前)  ← 这里几乎没事, 大头在子进程里
   ├─ subprocess: fetch → preprocess → predict → metrics → 写三件套
   ├─ 主进程读 diagnostics.json:
   │    status=ok  → select_topk → T+1/涨跌停过滤 → generate_orders → send_order
   │    status=empty → EVENT_ML_EMPTY, 不下单
   │    status=failed → EVENT_ML_FAILED, 不下单
   └─ publish_metrics → MetricsCache + EVENT_ML_METRICS
-
-子类只需定义 parameters/variables + 可选覆盖 ``select_topk`` /
-``generate_orders``. 数据获取与预测已由 subprocess 封装.
 """
 
 from __future__ import annotations
 
 from abc import ABC
 from datetime import date
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from vnpy_signal_strategy_plus.template import SignalTemplatePlus
+from vnpy.trader.constant import Direction, Exchange, Offset, OrderType
+from vnpy.trader.object import OrderData, OrderRequest, TradeData
+
+from vnpy_order_utils import AutoResubmitMixin
 
 from .base import (
     EVENT_ML_EMPTY,
@@ -41,29 +55,28 @@ from .base import (
 )
 
 
-class MLStrategyTemplate(SignalTemplatePlus, ABC):
-    """ML 策略基类 — 日频 pipeline 编排."""
+class MLStrategyTemplate(AutoResubmitMixin, ABC):
+    """ML 策略基类 — 日频 pipeline 编排 + 订单重挂能力.
+
+    注意 MRO: AutoResubmitMixin 必须在左, 它的 ``__init__(*args, **kwargs)``
+    会先初始化 _resubmit_count 等状态, 再通过 super().__init__ 链到 ABC.
+    """
 
     author = "ml-team"
 
-    # vnpy 参数系统自动注入 UI (子类覆盖)
+    # vnpy 参数系统 (子类覆盖; 注意 gateway 是 AutoResubmitMixin 宿主契约必需项)
     parameters: List[str] = [
-        # 模型与 bundle
         "bundle_dir",          # 如 D:/vnpy_models/csi300_lgb/ab2711.../
         "inference_python",    # 研究机 Python 3.11 路径
-        # 调度
         "trigger_time",        # "09:15"
-        # 选股
         "topk",
         "n_drop",
         "cash_per_order",
-        # 存盘
-        "output_root",         # D:/ml_output 的根 (实际子目录按 {strategy}/{yyyymmdd})
-        # 推理参数
+        "gateway",             # 如 "QMT" / "QMT_SIM"; 下单 + mixin 价格查询都用
+        "output_root",         # D:/ml_output 根
         "lookback_days",
         "provider_uri",        # qlib bin 根
-        "baseline_path",       # 可选, 默认 bundle_dir/baseline.parquet
-        # 其它
+        "baseline_path",       # 空则用 bundle_dir/baseline.parquet
         "monitor_window_days",
         "enable_trading",      # 干跑开关
         "subprocess_timeout_s",
@@ -80,20 +93,18 @@ class MLStrategyTemplate(SignalTemplatePlus, ABC):
         "last_model_run_id",
     ]
 
-    # ------------------------------------------------------------------
-    # Parameter defaults (子类可在 __init__ 里覆盖)
-    # ------------------------------------------------------------------
-
+    # Parameter defaults
     bundle_dir: str = ""
     inference_python: str = r"E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.exe"
     trigger_time: str = "09:15"
     topk: int = 7
     n_drop: int = 1
     cash_per_order: float = 100000.0
+    gateway: str = ""
     output_root: str = "D:/ml_output"
     lookback_days: int = 60
     provider_uri: str = ""
-    baseline_path: str = ""  # 空则用 bundle_dir/baseline.parquet
+    baseline_path: str = ""
     monitor_window_days: int = 30
     enable_trading: bool = False
     subprocess_timeout_s: int = 180
@@ -109,9 +120,163 @@ class MLStrategyTemplate(SignalTemplatePlus, ABC):
     last_duration_ms: int = 0
     last_model_run_id: str = ""
 
-    # ------------------------------------------------------------------
+    # vnpy 生命周期 flag (模仿 SignalTemplatePlus 的约定)
+    inited: bool = False
+    trading: bool = False
+
+    # -----------------------------------------------------------------
+    # __init__ — mixin 需要 (signal_engine, strategy_name) 位置参数, ABC 不吃参
+    # -----------------------------------------------------------------
+
+    def __init__(self, signal_engine: Any, strategy_name: str = "") -> None:
+        """
+        Parameters
+        ----------
+        signal_engine : MLEngine
+            为了符合 AutoResubmitMixin 的宿主契约 (它通过
+            ``self.signal_engine.main_engine`` 拿 MainEngine 查 tick/gateway),
+            属性名沿用 ``signal_engine``. 对 ML app 语义上就是 MLEngine.
+        strategy_name : str
+            策略实例名. 作为 orderid 回调的索引键, 也作为 webtrader adapter
+            查询指标的键.
+        """
+        self.signal_engine = signal_engine
+        self.strategy_name = strategy_name
+        self._order_seq = 0
+        # 调 mixin 的 __init__ 初始化 _resubmit_count 等
+        super().__init__()
+
+    # -----------------------------------------------------------------
+    # 设置系统 (模仿 SignalTemplatePlus 对外形态)
+    # -----------------------------------------------------------------
+
+    def update_setting(self, setting: Dict[str, Any]) -> None:
+        for name in self.parameters:
+            if name in setting:
+                setattr(self, name, setting[name])
+
+    def get_parameters(self) -> Dict[str, Any]:
+        return {name: getattr(self, name, None) for name in self.parameters}
+
+    def get_variables(self) -> Dict[str, Any]:
+        return {name: getattr(self, name, None) for name in self.variables}
+
+    # -----------------------------------------------------------------
+    # 下单管道 (Option F: 直连 main_engine, 不经过 SignalEnginePlus)
+    # -----------------------------------------------------------------
+
+    def get_order_reference(self) -> str:
+        """生成订单 reference — 用于 mixin 重挂时打标,以及成交归因.
+
+        AutoResubmitMixin 可读取 self._is_resubmitting 判断当前是否在重挂语境.
+        """
+        self._order_seq += 1
+        suffix = "R" if getattr(self, "_is_resubmitting", False) else ""
+        return f"{self.strategy_name}:{self._order_seq}{suffix}"
+
+    def send_order(
+        self,
+        vt_symbol: str,
+        direction: Direction,
+        offset: Offset,
+        price: float,
+        volume: float,
+        order_type: Optional[OrderType] = None,
+    ) -> List[str]:
+        """通过 MainEngine.send_order 发单, 登记归属到 MLEngine 的 orderid 表.
+
+        Mixin 的 _process_single_resubmit_task 也调本方法 (走同一契约).
+        """
+        if not self.trading and not getattr(self, "_is_resubmitting", False):
+            # 非交易状态下只允许 mixin 内部重挂, 外部调用一律静默拒绝
+            self.write_log(f"[{self.strategy_name}] trading=False, 拒绝外部 send_order")
+            return []
+
+        try:
+            symbol, exchange_str = vt_symbol.rsplit(".", 1)
+            exchange = Exchange(exchange_str)
+        except (ValueError, KeyError):
+            self.write_log(f"[{self.strategy_name}] 合约代码格式错误 {vt_symbol}")
+            return []
+
+        if not self.gateway:
+            self.write_log(f"[{self.strategy_name}] gateway 未配置, 无法下单")
+            return []
+
+        req = OrderRequest(
+            symbol=symbol,
+            exchange=exchange,
+            direction=direction,
+            offset=offset,
+            type=order_type or OrderType.LIMIT,
+            price=float(price),
+            volume=float(volume),
+            reference=self.get_order_reference(),
+        )
+        main_engine = self._main_engine()
+        vt_orderid = main_engine.send_order(req, self.gateway)
+        if not vt_orderid:
+            return []
+
+        # 登记归属, 让 MLEngine 收到 eOrder / eTrade 时能找回策略实例
+        self.signal_engine.track_order(vt_orderid, self.strategy_name)
+        return [vt_orderid]
+
+    def cancel_order(self, vt_orderid: str) -> None:
+        from vnpy.trader.object import CancelRequest
+
+        main_engine = self._main_engine()
+        # vnpy 的 cancel_order 需要一个 CancelRequest
+        order = main_engine.get_order(vt_orderid)
+        if order is None:
+            self.write_log(f"[{self.strategy_name}] 撤单失败: 订单不存在 {vt_orderid}")
+            return
+        req = CancelRequest(orderid=order.orderid, symbol=order.symbol, exchange=order.exchange)
+        main_engine.cancel_order(req, order.gateway_name)
+
+    def _main_engine(self):
+        """拿 vnpy MainEngine — mixin 的 adjust_resubmit_price 也走这条路径."""
+        main_engine = getattr(self.signal_engine, "main_engine", None)
+        if main_engine is None:
+            raise RuntimeError(
+                "MLStrategyTemplate 无法拿到 main_engine. signal_engine 需是 MLEngine 实例."
+            )
+        return main_engine
+
+    # -----------------------------------------------------------------
+    # vnpy 事件回调 — 委托给 mixin + 子类扩展点
+    # -----------------------------------------------------------------
+
+    def on_order(self, order: OrderData) -> None:
+        """MLEngine 路由 eOrder 到这里. 委托给 mixin 做重挂判断."""
+        try:
+            self.on_order_for_resubmit(order)
+        except Exception as exc:
+            self.write_log(f"[{self.strategy_name}] on_order_for_resubmit 异常: {exc}")
+
+    def on_trade(self, trade: TradeData) -> None:
+        """MLEngine 路由 eTrade 到这里. 默认空实现, 子类可覆盖做持仓更新."""
+        pass
+
+    def on_timer(self) -> None:
+        """MLEngine 的秒级 timer 路由到这里 (若注册了). 委托给 mixin 做重挂队列扫描."""
+        try:
+            self.on_timer_for_resubmit()
+        except Exception as exc:
+            self.write_log(f"[{self.strategy_name}] on_timer_for_resubmit 异常: {exc}")
+
+    # -----------------------------------------------------------------
+    # write_log — mixin 宿主契约必需项
+    # -----------------------------------------------------------------
+
+    def write_log(self, msg: str) -> None:
+        """轻量日志, 直接打印 + 可选发 EVENT_ML_LOG."""
+        prefix = f"[{self.strategy_name}] " if self.strategy_name else "[MLStrategy] "
+        print(prefix + msg)
+
+    # -----------------------------------------------------------------
     # 主入口 - 被 DailyTimeTaskScheduler 在后台线程调用
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
 
     def run_daily_pipeline(self) -> None:
         """完整日频 pipeline — 主进程编排, 推理在子进程, 下单在主进程."""
@@ -120,12 +285,10 @@ class MLStrategyTemplate(SignalTemplatePlus, ABC):
         self.last_error = ""
         self.last_stage = ""
 
-        # 1. 非交易日短路
         if not self._is_trade_day(today):
             self._emit_heartbeat(reason="non_trading_day")
             return
 
-        # 2. 启子进程推理 (Phase 2.2 QlibPredictor.predict)
         self.last_stage = Stage.PREDICT.value
         try:
             result = self.signal_engine.run_inference(
@@ -156,17 +319,15 @@ class MLStrategyTemplate(SignalTemplatePlus, ABC):
         self.last_ic = metrics.get("ic", float("nan"))
         self.last_psi_mean = metrics.get("psi_mean", float("nan"))
 
-        # 3. 按 status 分支
         if diag.get("status") == InferenceStatus.FAILED.value:
             self._emit_failed(reason=diag.get("error_message", "subprocess failed"))
             return
 
         if diag.get("status") == InferenceStatus.EMPTY.value:
             self._emit_empty()
-            self._publish_metrics(metrics)  # 空预测也要记指标
+            self._publish_metrics(metrics)
             return
 
-        # status=ok 继续选股 + 下单
         self.last_stage = Stage.SELECT.value
         selected = self.select_topk(pred_df)
 
@@ -178,16 +339,14 @@ class MLStrategyTemplate(SignalTemplatePlus, ABC):
         self._publish_metrics(metrics)
         self._emit_prediction(selected, metrics)
 
-    # ------------------------------------------------------------------
-    # 默认实现 — 子类通常不需要覆盖
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
+    # 默认实现 + 子类扩展点
+    # -----------------------------------------------------------------
 
     def _is_trade_day(self, d: date) -> bool:
-        """非交易日短路. 由 MLEngine 注入的 trade_calendar 模块决定."""
         return self.signal_engine.is_trade_day(d)
 
     def select_topk(self, pred_df: pd.DataFrame) -> pd.DataFrame:
-        """从当日预测里挑 top-K (按 score 降序). 子类可覆盖做加权/分层."""
         if pred_df is None or pred_df.empty:
             return pd.DataFrame()
         last_dt = pred_df.index.get_level_values("datetime").max()
@@ -195,25 +354,14 @@ class MLStrategyTemplate(SignalTemplatePlus, ABC):
         return slice_df.sort_values("score", ascending=False).head(self.topk)
 
     def generate_orders(self, selected: pd.DataFrame) -> None:
-        """把 top-K 转成 OrderRequest 并发出. 默认等权.
-
-        **重点**: A 股 T+1 / 涨跌停过滤在此方法内做, 由 MLEngine 注入的
-        ``order_filter`` 决定. 子类可覆盖实现更精细的仓位管理.
-        """
+        """子类实现. 内部调 self.send_order(...)."""
         raise NotImplementedError("subclass should implement generate_orders")
 
-    # ------------------------------------------------------------------
-    # 事件发送 (主进程 EventEngine)
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
+    # 事件发送
+    # -----------------------------------------------------------------
 
     def _publish_metrics(self, metrics: Dict[str, Any]) -> None:
-        """写 latest.json + emit EVENT_ML_METRICS. 委托 MLEngine 做.
-
-        状态语义 — 与 diagnostics.status 对齐:
-        - ok: 有效预测,latest.json 覆盖写
-        - empty: 子进程跑完但无预测,latest.json 仍覆盖 (反映最新跑了一次的事实)
-        - failed: 子进程失败,latest.json **不覆盖**,保留上次成功的监控数据
-        """
         self.signal_engine.publish_metrics(
             strategy_name=self.strategy_name,
             metrics=metrics,
@@ -253,9 +401,9 @@ class MLStrategyTemplate(SignalTemplatePlus, ABC):
             {"strategy": self.strategy_name, "reason": reason},
         )
 
-    # ------------------------------------------------------------------
-    # vnpy 标准生命周期
-    # ------------------------------------------------------------------
+    # -----------------------------------------------------------------
+    # 生命周期
+    # -----------------------------------------------------------------
 
     def on_init(self) -> None:
         """策略初始化 — 注册每日任务, 校验 bundle 完整性."""
@@ -264,17 +412,15 @@ class MLStrategyTemplate(SignalTemplatePlus, ABC):
             trigger_time=self.trigger_time,
             callback=self.run_daily_pipeline,
         )
-        # 校验 bundle_dir 存在 + manifest 版本兼容
         self.signal_engine.validate_bundle(self.bundle_dir)
-        self.write_log(f"[{self.strategy_name}] on_init completed")
+        self.inited = True
+        self.write_log("on_init completed")
 
     def on_start(self) -> None:
-        self.write_log(f"[{self.strategy_name}] on_start")
+        self.trading = True
+        self.write_log("on_start")
 
     def on_stop(self) -> None:
+        self.trading = False
         self.signal_engine.unregister_daily_job(strategy_name=self.strategy_name)
-        self.write_log(f"[{self.strategy_name}] on_stop")
-
-    def on_timer(self) -> None:
-        # 秒级 tick, 只做心跳转发 + 订单状态巡检, 不跑推理 pipeline
-        pass
+        self.write_log("on_stop")

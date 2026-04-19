@@ -47,6 +47,9 @@ class MLEngine(BaseEngine):
         self._model_registry = ModelRegistry()
         self._trade_calendar = None  # init_engine 里 lazy 初始化 (需要 provider_uri)
 
+        # 订单归属表: vt_orderid → strategy_name. 策略发单时调 track_order 登记.
+        self._orderid_to_strategy: Dict[str, str] = {}
+
     # ------------------------------------------------------------------
     # BaseEngine 接口
     # ------------------------------------------------------------------
@@ -54,6 +57,7 @@ class MLEngine(BaseEngine):
     def init_engine(self) -> None:
         """vnpy 启动时调用一次."""
         self.scheduler.start()
+        self.register_order_listener()
 
     def close(self) -> None:
         """vnpy 关闭时调用."""
@@ -216,3 +220,56 @@ class MLEngine(BaseEngine):
 
     def put_event(self, event_type: str, payload: Any) -> None:
         self.event_engine.put(Event(type=event_type, data=payload))
+
+    # ------------------------------------------------------------------
+    # 订单管理 — AutoResubmitMixin 触发重挂时的流转中枢
+    # ------------------------------------------------------------------
+    #
+    # MLStrategyTemplate 不继承 SignalTemplatePlus, 下单走
+    # ``main_engine.send_order(req, gateway)`` 直连. 但策略收到 on_order
+    # 回报后, 需要把订单回调到对应策略实例处理 (含 AutoResubmitMixin).
+    # 我们维护一个 orderid → strategy_name 的映射, 在 MLEngine 注册 EventEngine
+    # 的 eOrder 监听, 找到目标策略调 on_order(order).
+
+    def register_order_listener(self) -> None:
+        """在 init_engine 里调用一次. 订阅 eOrder / eTrade."""
+        from vnpy.trader.event import EVENT_ORDER, EVENT_TRADE
+
+        self.event_engine.register(EVENT_ORDER, self._process_order_event)
+        self.event_engine.register(EVENT_TRADE, self._process_trade_event)
+
+    def track_order(self, vt_orderid: str, strategy_name: str) -> None:
+        """策略发单后调用, 登记归属关系."""
+        self._orderid_to_strategy[vt_orderid] = strategy_name
+
+    def _process_order_event(self, event) -> None:
+        from vnpy.trader.object import OrderData
+
+        order: OrderData = event.data
+        strategy_name = self._orderid_to_strategy.get(order.vt_orderid)
+        if strategy_name is None:
+            return
+        strategy = self.strategies.get(strategy_name)
+        if strategy is None:
+            return
+        try:
+            if hasattr(strategy, "on_order"):
+                strategy.on_order(order)
+        except Exception as exc:
+            print(f"[MLEngine] strategy.on_order failed: {exc}")
+
+    def _process_trade_event(self, event) -> None:
+        from vnpy.trader.object import TradeData
+
+        trade: TradeData = event.data
+        strategy_name = self._orderid_to_strategy.get(trade.vt_orderid)
+        if strategy_name is None:
+            return
+        strategy = self.strategies.get(strategy_name)
+        if strategy is None:
+            return
+        try:
+            if hasattr(strategy, "on_trade"):
+                strategy.on_trade(trade)
+        except Exception as exc:
+            print(f"[MLEngine] strategy.on_trade failed: {exc}")
