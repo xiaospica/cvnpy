@@ -120,7 +120,11 @@ def _load_tushare_token() -> str:
 
 
 def _resolve_live_date(downloader) -> date:
-    """返回最近交易日: 若 env LIVE_DATE 指定则尊重; 否则 today 非交易日自动回退."""
+    """返回最近"已完整收盘"的交易日: 若 env LIVE_DATE 指定则尊重; 否则
+    从 today-1 往前找, 避开今日(tushare 当日 daily bar 要到 20:00 后才有,
+    smoke 不等那么久). 周末/节假日 today 会先命中 today-1 的 Friday, 如
+    Friday 是节假日再往前.
+    """
     from datetime import timedelta
     env_val = os.getenv("LIVE_DATE")
     if env_val:
@@ -129,8 +133,8 @@ def _resolve_live_date(downloader) -> date:
         except ValueError:
             _log(f"WARN: env LIVE_DATE={env_val} 格式非法, 忽略")
 
-    # today 往前找 10 天里最近的交易日
-    candidate = date.today()
+    # 从 today-1 往前找 10 天里最近的交易日 (跳过 today, 避免当日 daily 没落)
+    candidate = date.today() - timedelta(days=1)
     for _ in range(10):
         try:
             is_td = bool(downloader.is_trade_date(candidate.strftime("%Y%m%d")))
@@ -385,11 +389,16 @@ def _run_assertions(live_date_str: str, live_date_iso: str) -> list[str]:
     fsnap = Path(SNAPSHOT_DIR) / "filtered" / f"csi300_filtered_{live_date_str}.parquet"
     _check(fsnap.exists(), f"[d] filtered snapshot 缺失: {fsnap}")
 
-    # [e] calendars/day.txt
+    # [e] calendars/day.txt — 严格校验末尾 == live_date_iso. by_stock 来自
+    # T 冻结的 merged snapshot (Stage 1 严格过滤 trade_date<=T),
+    # DumpDataAll 出的 calendar 末尾必定 == T. 不等于说明快照被污染.
     cal_path = Path(PROVIDER_URI) / "calendars" / "day.txt"
     if cal_path.exists():
-        lines = cal_path.read_text(encoding="utf-8").splitlines()
-        _check(lines[-1] == live_date_iso, f"[e] calendars last={lines[-1]} != {live_date_iso}")
+        lines = [l for l in cal_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        _check(
+            lines and lines[-1] == live_date_iso,
+            f"[e] calendars last={lines[-1] if lines else '?'} != {live_date_iso}",
+        )
     else:
         errors.append(f"[e] calendars/day.txt 不存在: {cal_path}")
 
@@ -439,14 +448,18 @@ def _run_assertions(live_date_str: str, live_date_iso: str) -> list[str]:
         errors.append(f"[i,j] webtrader REST 访问失败: {e}")
 
     # [k] SQLite 行数
+    # SQLAlchemy 在 Python 3.12 以后 datetime TEXT 存储多了微秒位
+    # ("2026-04-17 00:00:00.000000"), Python sqlite3 默认 datetime adapter
+    # 写出来是 "2026-04-17 00:00:00" — 直接 =? 比较会漏. 用 LIKE 前缀匹配
+    # 规避日期 TEXT 存储精度问题.
     if SPAWN_MLEARNWEB and MLEARNWEB_DB.exists():
         try:
             import sqlite3
             conn = sqlite3.connect(str(MLEARNWEB_DB))
-            td_iso_for_sqlite = pd.Timestamp(live_date_str).to_pydatetime()
             n = conn.execute(
-                "SELECT COUNT(*) FROM ml_metric_snapshots WHERE strategy_name=? AND trade_date=?",
-                (STRATEGY_NAME, td_iso_for_sqlite),
+                "SELECT COUNT(*) FROM ml_metric_snapshots "
+                "WHERE strategy_name=? AND trade_date LIKE ?",
+                (STRATEGY_NAME, f"{live_date_iso}%"),
             ).fetchone()[0]
             conn.close()
             _check(n >= 1, f"[k] SQLite ml_metric_snapshots({STRATEGY_NAME}, {live_date_iso}) rows={n}")
