@@ -23,6 +23,7 @@ EVENT_ML_FAILED = "eMlFailed."          # 子进程运行失败/超时
 EVENT_ML_EMPTY = "eMlEmpty."            # 子进程跑完但无有效预测 (例如未发现数据)
 EVENT_ML_HEARTBEAT = "eMlHeartbeat."    # 主进程周期心跳, 不依赖子进程存活
 EVENT_ML_LOG = "eMlLog."                # 结构化日志转发
+EVENT_ML_STRATEGY = "eMlStrategy"       # 策略实例状态 (init/start/stop 后发, UI 消费)
 
 
 # ---------------------------------------------------------------------------

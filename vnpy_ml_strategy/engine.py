@@ -19,7 +19,7 @@ from vnpy.trader.engine import BaseEngine, MainEngine
 
 from vnpy_tushare_pro.scheduler import DailyTimeTaskScheduler
 
-from .base import APP_NAME, EVENT_ML_METRICS
+from .base import APP_NAME, EVENT_ML_METRICS, EVENT_ML_STRATEGY
 from .monitoring.cache import MetricsCache
 from .monitoring.publisher import publish_metrics as _publish_metrics
 from .predictors.qlib_predictor import QlibPredictor
@@ -38,6 +38,9 @@ class MLEngine(BaseEngine):
 
         # 策略注册表 {strategy_name: MLStrategyTemplate}
         self.strategies: Dict[str, Any] = {}
+
+        # 策略类注册表 {class_name: Type} — UI 从下拉框选择类时用
+        self.strategy_classes: Dict[str, type] = {}
 
         # MetricsCache (Phase 2.5) — thread-safe 最新值 + 最近 30 日 ring buffer
         self._metrics_cache = MetricsCache(max_history_days=30)
@@ -58,6 +61,19 @@ class MLEngine(BaseEngine):
         """vnpy 启动时调用一次."""
         self.scheduler.start()
         self.register_order_listener()
+        self._autoload_strategy_classes()
+
+    def _autoload_strategy_classes(self) -> None:
+        """自动登记本 app 内置策略类 — UI combobox 才有东西可选.
+
+        延迟到 init_engine 而不是 __init__ 的原因: 避免 import 循环 (strategies 里
+        会 import MLStrategyTemplate, template import base).
+        """
+        try:
+            from .strategies.qlib_ml_strategy import QlibMLStrategy
+            self.register_strategy_class(QlibMLStrategy)
+        except Exception as exc:  # pragma: no cover — defensive
+            print(f"[MLEngine] strategy class autoload failed: {exc}")
 
     def close(self) -> None:
         """vnpy 关闭时调用."""
@@ -67,11 +83,155 @@ class MLEngine(BaseEngine):
     # 策略生命周期 — 被 MLStrategyAdapter 调用 (Phase 2.6)
     # ------------------------------------------------------------------
 
-    def add_strategy(self, strategy_name: str, strategy_obj: Any) -> None:
-        self.strategies[strategy_name] = strategy_obj
+    def register_strategy_class(self, cls: type) -> None:
+        """登记策略类到 class 注册表, UI 添加策略时从这里挑类."""
+        self.strategy_classes[cls.__name__] = cls
 
-    def remove_strategy(self, strategy_name: str) -> None:
+    def get_all_strategy_class_names(self) -> list:
+        return list(self.strategy_classes.keys())
+
+    def get_strategy_class_parameters(self, class_name: str) -> Dict[str, Any]:
+        """返回某类的默认参数字典, UI 添加策略弹窗用."""
+        cls = self.strategy_classes.get(class_name)
+        if cls is None:
+            return {}
+        params = {}
+        for name in getattr(cls, "parameters", []):
+            params[name] = getattr(cls, name, None)
+        return params
+
+    def add_strategy(
+        self,
+        first,
+        second=None,
+        setting: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """两种调用形态:
+
+        Form A (UI / 从 class 注册表实例化):
+            ``add_strategy(class_name: str, strategy_name: str, setting: dict)``
+            从 ``strategy_classes[class_name]`` 拿类, 构造实例, 应用 setting.
+
+        Form B (手动 / 脚本 — 已构造好实例):
+            ``add_strategy(strategy_obj)`` 或 ``add_strategy(strategy_obj, strategy_name)``
+            直接登记, 从 obj.strategy_name 取 name (或用 second 覆写).
+
+        返回已登记的 strategy 实例.
+        """
+        # Form B: 第一个参数是实例
+        if not isinstance(first, str):
+            inst = first
+            name = second if isinstance(second, str) and second else getattr(inst, "strategy_name", "")
+            if not name:
+                raise ValueError("strategy instance 缺少 strategy_name")
+            self.strategies[name] = inst
+            self.put_strategy_event(inst)
+            return inst
+
+        # Form A: (class_name, strategy_name, setting)
+        class_name = first
+        strategy_name = second if isinstance(second, str) else ""
+        if not strategy_name:
+            strategy_name = class_name  # fallback: 实例名 = 类名
+        cls = self.strategy_classes.get(class_name)
+        if cls is None:
+            raise ValueError(
+                f"strategy class 未注册: {class_name}, "
+                f"已知: {list(self.strategy_classes.keys())}"
+            )
+        inst = cls(self, strategy_name)
+        if setting:
+            inst.update_setting(setting)
+        self.strategies[strategy_name] = inst
+        self.put_strategy_event(inst)
+        return inst
+
+    def remove_strategy(self, strategy_name: str) -> bool:
+        """移除策略. 若还在 trading, 拒绝."""
+        strat = self.strategies.get(strategy_name)
+        if strat is None:
+            return False
+        if getattr(strat, "trading", False):
+            return False
         self.strategies.pop(strategy_name, None)
+        self.put_strategy_event(strat)
+        return True
+
+    def init_strategy(self, strategy_name: str) -> bool:
+        strat = self.strategies.get(strategy_name)
+        if strat is None or getattr(strat, "inited", False):
+            return False
+        try:
+            strat.on_init()
+        except Exception as exc:
+            print(f"[MLEngine] init_strategy({strategy_name}) failed: {exc}")
+            return False
+        self.put_strategy_event(strat)
+        return True
+
+    def start_strategy(self, strategy_name: str) -> bool:
+        strat = self.strategies.get(strategy_name)
+        if strat is None or not getattr(strat, "inited", False) or getattr(strat, "trading", False):
+            return False
+        try:
+            strat.on_start()
+        except Exception as exc:
+            print(f"[MLEngine] start_strategy({strategy_name}) failed: {exc}")
+            return False
+        self.put_strategy_event(strat)
+        return True
+
+    def stop_strategy(self, strategy_name: str) -> bool:
+        strat = self.strategies.get(strategy_name)
+        if strat is None or not getattr(strat, "trading", False):
+            return False
+        try:
+            strat.on_stop()
+        except Exception as exc:
+            print(f"[MLEngine] stop_strategy({strategy_name}) failed: {exc}")
+            return False
+        self.put_strategy_event(strat)
+        return True
+
+    def init_all_strategies(self) -> bool:
+        ok = True
+        for name in list(self.strategies.keys()):
+            ok = self.init_strategy(name) and ok
+        return ok
+
+    def start_all_strategies(self) -> None:
+        for name in list(self.strategies.keys()):
+            self.start_strategy(name)
+
+    def stop_all_strategies(self) -> None:
+        for name in list(self.strategies.keys()):
+            self.stop_strategy(name)
+
+    def run_pipeline_now(self, strategy_name: str) -> bool:
+        """UI 手动触发一次日频 pipeline (立即在 APS 后台线程跑)."""
+        if strategy_name not in self.strategies:
+            return False
+        try:
+            self.scheduler.run_job_now(strategy_name)
+            return True
+        except Exception as exc:
+            print(f"[MLEngine] run_pipeline_now({strategy_name}) failed: {exc}")
+            return False
+
+    def put_strategy_event(self, strategy) -> None:
+        """发 EVENT_ML_STRATEGY, UI 消费更新面板."""
+        if strategy is None:
+            return
+        payload = {
+            "strategy_name": getattr(strategy, "strategy_name", ""),
+            "class_name": strategy.__class__.__name__,
+            "inited": bool(getattr(strategy, "inited", False)),
+            "trading": bool(getattr(strategy, "trading", False)),
+            "parameters": strategy.get_parameters() if hasattr(strategy, "get_parameters") else {},
+            "variables": strategy.get_variables() if hasattr(strategy, "get_variables") else {},
+            "gateway": getattr(strategy, "gateway", ""),
+        }
+        self.put_event(EVENT_ML_STRATEGY, payload)
 
     def register_daily_job(
         self,
