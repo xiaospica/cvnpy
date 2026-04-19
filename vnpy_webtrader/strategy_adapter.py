@@ -356,6 +356,88 @@ class LegacySignalStrategyAdapter(SignalStrategyPlusAdapter):
     event_type = "eSignalStrategy"
 
 
+class MLStrategyAdapter(StrategyEngineAdapter):
+    """对接 ``vnpy_ml_strategy.MLEngine`` —— ML 日频策略适配器.
+
+    除了 StrategyEngineAdapter 的通用读写操作外, 另外暴露 ML 专属查询:
+
+    * ``get_latest_metrics(name)``     — 最新一日监控指标 dict
+    * ``get_metrics_history(name, n)`` — 最近 N 日指标列表
+    * ``get_health()``                 — 策略存活/最新跑时间/last_error
+    """
+
+    app_name = "MlStrategy"
+    display_name = "ML策略"
+    event_type = "eMlStrategy"
+    default_capabilities = frozenset(
+        {"add", "init", "start", "stop", "remove"}
+    )
+
+    # ---- 创建策略实例 ----
+
+    def add_strategy(self, req: AddStrategyRequest) -> StrategyOpResult:
+        """MLEngine.strategies 是由策略对象自己 register 的, 这里委托给
+        引擎的 ``add_strategy`` 方法 (若存在) 或返回未实现提示.
+
+        完整 CRUD 在后续迭代补齐; Phase 2.6 重点是读路径 (metrics 查询).
+        """
+        if not hasattr(self.engine, "add_strategy"):
+            return StrategyOpResult(False, "MLEngine.add_strategy 未实现",
+                                    data={"http_status": 501})
+        try:
+            self.engine.add_strategy(req.strategy_name, req.class_name)
+        except Exception as exc:  # pragma: no cover
+            return StrategyOpResult(False, f"创建策略异常: {exc}")
+        return StrategyOpResult(True, "added",
+                                data={"strategy_name": req.strategy_name})
+
+    # ---- ML 专属读取方法 ----
+
+    def get_latest_metrics(self, name: str) -> Optional[Dict[str, Any]]:
+        if hasattr(self.engine, "get_latest_metrics"):
+            return self.engine.get_latest_metrics(name)
+        return None
+
+    def get_metrics_history(self, name: str, days: int = 30) -> List[Dict[str, Any]]:
+        if hasattr(self.engine, "get_metrics_history"):
+            return self.engine.get_metrics_history(name, n=days)
+        return []
+
+    def get_prediction_summary(self, name: str) -> Optional[Dict[str, Any]]:
+        """最新一日预测 summary (top-k + histogram + n_symbols + coverage).
+
+        从 MetricsCache 里取 — 它其实也含 score_histogram / n_predictions 等.
+        """
+        metrics = self.get_latest_metrics(name)
+        if not metrics:
+            return None
+        return {
+            "strategy": name,
+            "trade_date": metrics.get("trade_date"),
+            "model_run_id": metrics.get("model_run_id"),
+            "n_symbols": metrics.get("n_predictions", 0),
+            "score_histogram": metrics.get("score_histogram", []),
+            "pred_mean": metrics.get("pred_mean"),
+            "pred_std": metrics.get("pred_std"),
+        }
+
+    def get_health(self) -> Dict[str, Any]:
+        """集合级健康检查: 所有 ML 策略的最新跑状态."""
+        strategies = getattr(self.engine, "strategies", {})
+        result: List[Dict[str, Any]] = []
+        for name, obj in strategies.items():
+            result.append({
+                "name": name,
+                "last_run_date": getattr(obj, "last_run_date", ""),
+                "last_status": getattr(obj, "last_status", ""),
+                "last_error": getattr(obj, "last_error", ""),
+                "last_model_run_id": getattr(obj, "last_model_run_id", ""),
+                "last_n_pred": getattr(obj, "last_n_pred", 0),
+                "last_duration_ms": getattr(obj, "last_duration_ms", 0),
+            })
+        return {"strategies": result}
+
+
 # ---------------------------------------------------------------------------
 # 注册表与构建函数
 # ---------------------------------------------------------------------------
@@ -365,6 +447,7 @@ ADAPTER_REGISTRY: Dict[str, Type[StrategyEngineAdapter]] = {
     CtaStrategyAdapter.app_name: CtaStrategyAdapter,
     SignalStrategyPlusAdapter.app_name: SignalStrategyPlusAdapter,
     LegacySignalStrategyAdapter.app_name: LegacySignalStrategyAdapter,
+    MLStrategyAdapter.app_name: MLStrategyAdapter,
 }
 
 

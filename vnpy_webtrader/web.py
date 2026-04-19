@@ -68,6 +68,7 @@ from .deps import (
 )
 from .routes_node import router as node_router
 from .routes_strategy import router as strategy_router
+from .routes_ml import router as ml_router
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,7 @@ from .routes_strategy import router as strategy_router
 app: FastAPI = FastAPI(title="vnpy_webtrader", version="1.2.0")
 app.include_router(node_router)
 app.include_router(strategy_router)
+app.include_router(ml_router)
 
 
 # ---------------------------------------------------------------------------

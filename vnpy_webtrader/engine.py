@@ -92,6 +92,12 @@ class WebEngine(BaseEngine):
         self.server.register(self.start_all_strategies)
         self.server.register(self.stop_all_strategies)
 
+        # ML 监控 (MlStrategy 专属)
+        self.server.register(self.get_ml_metrics_latest)
+        self.server.register(self.get_ml_metrics_history)
+        self.server.register(self.get_ml_prediction_summary)
+        self.server.register(self.get_ml_health)
+
     def start_server(self, rep_address: str, pub_address: str) -> None:
         """启动 RPC 服务器。"""
         if self.server.is_active():
@@ -289,6 +295,45 @@ class WebEngine(BaseEngine):
         if adapter is None:
             return self._err(f"未注册的策略引擎: {engine}", 404)
         return adapter.stop_all().to_dict()
+
+    # ------------------------------------------------------------------
+    # ML 监控专属 (MlStrategy 引擎)
+    # ------------------------------------------------------------------
+
+    ML_ENGINE_NAME = "MlStrategy"
+
+    def _ml_adapter(self):
+        return self._get_adapter(self.ML_ENGINE_NAME)
+
+    def get_ml_metrics_latest(self, name: str) -> Dict[str, Any]:
+        adapter = self._ml_adapter()
+        if adapter is None:
+            return self._err("MlStrategy 引擎未注册", 404)
+        metrics = adapter.get_latest_metrics(name)
+        if metrics is None:
+            return self._err(f"策略无最新指标: {name}", 404)
+        return {"ok": True, "message": "", "data": metrics}
+
+    def get_ml_metrics_history(self, name: str, days: int = 30) -> Dict[str, Any]:
+        adapter = self._ml_adapter()
+        if adapter is None:
+            return self._err("MlStrategy 引擎未注册", 404)
+        return {"ok": True, "message": "", "data": adapter.get_metrics_history(name, days=days)}
+
+    def get_ml_prediction_summary(self, name: str) -> Dict[str, Any]:
+        adapter = self._ml_adapter()
+        if adapter is None:
+            return self._err("MlStrategy 引擎未注册", 404)
+        summary = adapter.get_prediction_summary(name)
+        if summary is None:
+            return self._err(f"策略无最新预测: {name}", 404)
+        return {"ok": True, "message": "", "data": summary}
+
+    def get_ml_health(self) -> Dict[str, Any]:
+        adapter = self._ml_adapter()
+        if adapter is None:
+            return self._err("MlStrategy 引擎未注册", 404)
+        return {"ok": True, "message": "", "data": adapter.get_health()}
 
     # ------------------------------------------------------------------
     # 关闭
