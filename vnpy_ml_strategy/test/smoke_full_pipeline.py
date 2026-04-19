@@ -82,15 +82,17 @@ BUNDLE_DIR = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab27111783
 OUT_ROOT = r"D:/ml_output/smoke_full_pipeline"
 STRATEGY_NAME = "phase27_test"
 
-# 环境 (可由用户覆盖)
-PROVIDER_URI = r"F:/Quant/code/qlib_strategy_dev/factor_factory/qlib_data_bin"
-MERGED_PARQUET = r"F:/Quant/code/qlib_strategy_dev/factor_factory/stock_data/daily_merged_all_new.parquet"
-FILTERED_PARQUET = r"F:/Quant/code/qlib_strategy_dev/factor_factory/csi300_custom_filtered.parquet"
-BY_STOCK_DIR = r"F:/Quant/code/qlib_strategy_dev/factor_factory/stock_data/by_stock"
-SNAPSHOT_DIR = r"F:/Quant/code/qlib_strategy_dev/factor_factory/snapshots"
+# Phase 4 v2: QS_DATA_ROOT 驱动所有路径, 实盘/训练解耦
+QS_DATA_ROOT = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
+
+PROVIDER_URI = f"{QS_DATA_ROOT}/qlib_data_bin"
+MERGED_PARQUET = f"{QS_DATA_ROOT}/stock_data/daily_merged_all_new.parquet"
+FILTERED_PARQUET = f"{QS_DATA_ROOT}/csi300_custom_filtered.parquet"
+BY_STOCK_DIR = f"{QS_DATA_ROOT}/stock_data/by_stock"
+SNAPSHOT_DIR = f"{QS_DATA_ROOT}/snapshots"
 JQ_INDEX_CSV_PATHS_JSON = os.getenv(
     "ML_JQ_INDEX_CSV_PATHS",
-    '{"csi300": "F:/Quant/jointquant/index/hs300_index_info_*.csv"}',
+    json.dumps({"csi300": f"{QS_DATA_ROOT}/jq_index/hs300_*.csv"}),
 )
 
 MLEARNWEB_BACKEND = r"F:/Quant/code/qlib_strategy_dev/mlearnweb/backend"
@@ -119,6 +121,9 @@ def _setup_ingest_env(token: str) -> None:
     """把 DailyIngestPipeline 需要的 env 变量塞进 os.environ."""
     os.environ["TUSHARE_TOKEN"] = token
     os.environ["ML_DAILY_INGEST_ENABLED"] = "1"
+    # QS_DATA_ROOT 是单一入口, 其他 ML_* 路径从它派生 (tushare_datafeed 内部)
+    os.environ["QS_DATA_ROOT"] = QS_DATA_ROOT
+    # 若需要细粒度覆盖(测试用), 显式设 ML_*:
     os.environ["ML_MERGED_PARQUET_PATH"] = MERGED_PARQUET
     os.environ["ML_FILTERED_PARQUET_PATH"] = FILTERED_PARQUET
     os.environ["ML_BY_STOCK_CSV_DIR"] = BY_STOCK_DIR

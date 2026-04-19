@@ -171,22 +171,49 @@ class TushareDatafeedPro(BaseDatafeed):
         self.scheduler.start()
 
     def _build_daily_ingest_pipeline(self) -> DailyIngestPipeline | None:
-        """按 env 变量构造 DailyIngestPipeline, 不满足条件返回 None.
+        """按 env 变量构造 DailyIngestPipeline (Phase 4 v2).
 
-        env 变量:
-          ML_DAILY_INGEST_ENABLED    "1" 启用 (默认关闭, 向后兼容)
-          ML_MERGED_PARQUET_PATH     主 parquet (e.g. .../daily_merged_all_new.parquet)
-          ML_FILTERED_PARQUET_PATH   过滤结果 (e.g. .../csi300_custom_filtered.parquet)
-          ML_BY_STOCK_CSV_DIR        qlib CSV 目录 (e.g. .../stock_data/by_stock)
-          ML_QLIB_DIR                qlib bin 根 (e.g. .../factor_factory/qlib_data_bin)
-          ML_SNAPSHOT_DIR            快照 + 审计日志 (e.g. .../factor_factory/snapshots)
-          ML_JQ_INDEX_CSV_PATHS      聚宽 CSV 路径 JSON 字符串 e.g. {"csi300":"F:/.../hs300_*.csv"}
+        QS_DATA_ROOT 驱动所有路径默认, 单变量即可启用:
+          QS_DATA_ROOT=D:/vnpy_data
+
+        默认布局:
+          {QS_DATA_ROOT}/stock_data/daily_merged_all_new.parquet     (活动 merged, 观察档)
+          {QS_DATA_ROOT}/csi300_custom_filtered.parquet              (活动 filtered, 观察档)
+          {QS_DATA_ROOT}/stock_data/by_stock/                        (qlib CSV 临时区)
+          {QS_DATA_ROOT}/qlib_data_bin/                              (qlib bin, 每日重建)
+          {QS_DATA_ROOT}/snapshots/                                  (merged + filtered 快照 + 审计)
+          {QS_DATA_ROOT}/jq_index/hs300_*.csv                        (聚宽成分股 CSV)
+
+        覆盖:
+          ML_DAILY_INGEST_ENABLED    "1" 启用 (默认 "0" 关闭, 向后兼容老部署)
+          ML_MERGED_PARQUET_PATH     显式指定, 覆盖 QS_DATA_ROOT 默认
+          ML_FILTERED_PARQUET_PATH
+          ML_BY_STOCK_CSV_DIR
+          ML_QLIB_DIR
+          ML_SNAPSHOT_DIR
+          ML_JQ_INDEX_CSV_PATHS      聚宽 CSV 路径 JSON 字符串, 默认从 QS_DATA_ROOT/jq_index/
         """
         if os.getenv("ML_DAILY_INGEST_ENABLED", "0") != "1":
             return None
+
         import json
+        qs_root = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
+
+        def _env_or_default(key: str, rel_path: str) -> str:
+            return os.getenv(key) or str(Path(qs_root) / rel_path)
+
+        # 聚宽 CSV: env 覆盖优先, 否则 QS_DATA_ROOT/jq_index/hs300_*.csv
+        jq_paths_env = os.getenv("ML_JQ_INDEX_CSV_PATHS")
+        if jq_paths_env:
+            try:
+                jq_paths = json.loads(jq_paths_env)
+            except json.JSONDecodeError:
+                logger.warning(f"[daily_ingest] ML_JQ_INDEX_CSV_PATHS 非合法 JSON, 使用默认")
+                jq_paths = {"csi300": str(Path(qs_root) / "jq_index" / "hs300_*.csv")}
+        else:
+            jq_paths = {"csi300": str(Path(qs_root) / "jq_index" / "hs300_*.csv")}
+
         try:
-            jq_paths = json.loads(os.environ["ML_JQ_INDEX_CSV_PATHS"])
             index_source = OfflineIndexDataSource(
                 index_csv_paths=jq_paths,
                 index_code_config={"csi300": "000300.XSHG"},
@@ -194,20 +221,21 @@ class TushareDatafeedPro(BaseDatafeed):
             return DailyIngestPipeline(
                 pipeline=self.pipeline,
                 index_source=index_source,
-                merged_parquet_path=os.environ["ML_MERGED_PARQUET_PATH"],
-                filtered_parquet_path=os.environ["ML_FILTERED_PARQUET_PATH"],
-                by_stock_csv_dir=os.environ["ML_BY_STOCK_CSV_DIR"],
-                qlib_dir=os.environ["ML_QLIB_DIR"],
-                snapshot_dir=os.environ["ML_SNAPSHOT_DIR"],
+                merged_parquet_path=_env_or_default(
+                    "ML_MERGED_PARQUET_PATH", "stock_data/daily_merged_all_new.parquet"
+                ),
+                filtered_parquet_path=_env_or_default(
+                    "ML_FILTERED_PARQUET_PATH", "csi300_custom_filtered.parquet"
+                ),
+                by_stock_csv_dir=_env_or_default(
+                    "ML_BY_STOCK_CSV_DIR", "stock_data/by_stock"
+                ),
+                qlib_dir=_env_or_default("ML_QLIB_DIR", "qlib_data_bin"),
+                snapshot_dir=_env_or_default("ML_SNAPSHOT_DIR", "snapshots"),
                 index_code="000300.SH",
                 lookback_days=120,
                 # event_callback 由 TushareProEngine 在 engine.init_engine 里注入
             )
-        except KeyError as exc:
-            logger.warning(
-                f"[daily_ingest] env 配置不完整, 跳过 DailyIngestPipeline 构造: 缺 {exc}"
-            )
-            return None
         except Exception as exc:
             logger.warning(f"[daily_ingest] 构造 DailyIngestPipeline 失败: {exc}")
             return None

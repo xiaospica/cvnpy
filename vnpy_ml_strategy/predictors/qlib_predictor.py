@@ -75,8 +75,19 @@ class QlibPredictor:
         output_root: str,
         provider_uri: str,
         baseline_path: Optional[str] = None,
+        filter_parquet_path: Optional[str] = None,
         timeout_s: int = 180,
     ) -> Dict[str, Any]:
+        """Invoke run_inference subprocess.
+
+        Parameters
+        ----------
+        filter_parquet_path : str, optional
+            Phase 4 v2: 推理唯一输入之一. 按 live_end 指向
+            ``snapshots/filtered/csi300_filtered_{YYYYMMDD}.parquet``, 覆盖
+            bundle task.json 固化的训练时点过滤路径. 若 None, handler kwargs
+            保持 task.json 默认. 生产必设.
+        """
         out_dir = Path(output_root) / strategy_name / live_end.strftime("%Y%m%d")
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,6 +103,8 @@ class QlibPredictor:
         ]
         if baseline_path:
             cmd += ["--baseline", str(baseline_path)]
+        if filter_parquet_path:
+            cmd += ["--filter-parquet", str(filter_parquet_path)]
         if self.install_legacy_path:
             cmd += ["--install-legacy-path"]
 

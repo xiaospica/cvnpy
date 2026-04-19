@@ -308,11 +308,40 @@ class MLEngine(BaseEngine):
         output_root: str,
         provider_uri: str,
         baseline_path: Optional[str] = None,
+        filter_parquet_path: Optional[str] = None,
         timeout_s: int = 180,
     ) -> Dict[str, Any]:
-        """委托给 QlibPredictor (Phase 2.2). 现在是 Phase 2.1 占位."""
+        """委托给 QlibPredictor. Phase 4 v2 支持 filter_parquet_path 透传.
+
+        Phase 4 v2: ``filter_parquet_path`` 若 None, 会尝试从 env ``QS_DATA_ROOT``
+        自动拼 ``{QS_DATA_ROOT}/snapshots/filtered/csi300_filtered_{YYYYMMDD}.parquet``,
+        保证实盘推理按 live_end 定位到冻结的当日过滤快照(金融实盘可复现硬要求).
+        显式传入的 filter_parquet_path 优先.
+        """
+        import os as _os
+        from pathlib import Path as _Path
+
         if self._predictor is None:
-            raise RuntimeError("Predictor not set (Phase 2.2 will inject)")
+            raise RuntimeError("Predictor not set")
+
+        # Phase 4 v2: 自动按 live_end 拼 filter 快照路径
+        if filter_parquet_path is None:
+            qs_data_root = _os.getenv("QS_DATA_ROOT")
+            if qs_data_root:
+                candidate = (
+                    _Path(qs_data_root) / "snapshots" / "filtered"
+                    / f"csi300_filtered_{live_end.strftime('%Y%m%d')}.parquet"
+                )
+                if candidate.exists():
+                    filter_parquet_path = str(candidate)
+                else:
+                    # 快照不存在: warn 但不阻塞 (可能是首次跑 / 快照未到), 用 task.json 默认
+                    from loguru import logger
+                    logger.warning(
+                        f"[MLEngine] filter snapshot 不存在 {candidate}, "
+                        "handler 用 bundle task.json 默认(可能是训练时点历史值)"
+                    )
+
         return self._predictor.predict(
             bundle_dir=bundle_dir,
             live_end=live_end,
@@ -322,6 +351,7 @@ class MLEngine(BaseEngine):
             output_root=output_root,
             provider_uri=provider_uri,
             baseline_path=baseline_path,
+            filter_parquet_path=filter_parquet_path,
             timeout_s=timeout_s,
         )
 
