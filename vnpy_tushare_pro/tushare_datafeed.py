@@ -22,7 +22,7 @@ from .ml_data_build import (
     DailyIngestPipeline,
     OfflineIndexDataSource,
 )
-from .scheduler import DailyTimeTaskScheduler
+from vnpy_common.scheduler import DailyTimeTaskScheduler
 
 import os
 from loguru import logger

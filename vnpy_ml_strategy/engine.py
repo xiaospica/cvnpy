@@ -17,13 +17,14 @@ from typing import Any, Callable, Dict, Optional
 from vnpy.event import EventEngine, Event
 from vnpy.trader.engine import BaseEngine, MainEngine
 
-from vnpy_tushare_pro.scheduler import DailyTimeTaskScheduler
+from vnpy_common.scheduler import DailyTimeTaskScheduler
 
 from .base import APP_NAME, EVENT_ML_METRICS, EVENT_ML_STRATEGY
 from .monitoring.cache import MetricsCache
 from .monitoring.publisher import publish_metrics as _publish_metrics
 from .predictors.qlib_predictor import QlibPredictor
 from .predictors.model_registry import ModelRegistry
+from .services.ic_backfill import IcBackfillService, IcBackfillResult
 from .utils.trade_calendar import make_calendar
 
 
@@ -44,6 +45,10 @@ class MLEngine(BaseEngine):
 
         # MetricsCache (Phase 2.5) — thread-safe 最新值 + 最近 30 日 ring buffer
         self._metrics_cache = MetricsCache(max_history_days=30)
+
+        # IC 回填 service (方案 §2.4.5) — 每只策略一个实例, 在 publish_metrics
+        # 后台线程触发, 不阻塞主线程. lazy 创建 (需要策略实例上的路径参数).
+        self._ic_backfill_services: Dict[str, IcBackfillService] = {}
 
         # Predictor + ModelRegistry + calendar (Phase 2.2, 默认实现)
         self._predictor = QlibPredictor()
@@ -420,6 +425,55 @@ class MLEngine(BaseEngine):
                 "metrics": metrics,
             },
         )
+
+        # 方案 §2.4.5 — 当日推理产出后顺手触发一次 IC 回填扫描. 后台线程跑,
+        # debounce 60s. 失败仅 log, 不影响主流程.
+        if status == "ok" and output_root:
+            self._trigger_ic_backfill(strategy_name, output_root)
+
+    def _trigger_ic_backfill(self, strategy_name: str, output_root: str) -> None:
+        """从策略实例读 provider_uri / inference_python, lazy 起 service 后异步触发."""
+        strat = self.strategies.get(strategy_name)
+        if strat is None:
+            return
+        provider_uri = getattr(strat, "provider_uri", None)
+        inference_python = getattr(strat, "inference_python", None)
+        if not provider_uri or not inference_python:
+            return  # 策略没配齐, 跳过
+        svc = self._ic_backfill_services.get(strategy_name)
+        if svc is None:
+            svc = IcBackfillService(
+                strategy_name=strategy_name,
+                output_root=output_root,
+                provider_uri=provider_uri,
+                inference_python=inference_python,
+                forward_window=int(getattr(strat, "ic_forward_window", 2)),
+                scan_days=int(getattr(strat, "ic_backfill_scan_days", 30)),
+            )
+            self._ic_backfill_services[strategy_name] = svc
+        svc.run_async()
+
+    def run_ic_backfill_now(
+        self, strategy_name: str, *, scan_days: Optional[int] = None,
+    ) -> Optional[IcBackfillResult]:
+        """手动触发 IC 回填 (绕过 debounce, 同步阻塞返回结果). 给 REST/手动调用用."""
+        strat = self.strategies.get(strategy_name)
+        if strat is None:
+            return None
+        output_root = getattr(strat, "output_root", None)
+        provider_uri = getattr(strat, "provider_uri", None)
+        inference_python = getattr(strat, "inference_python", None)
+        if not (output_root and provider_uri and inference_python):
+            return None
+        svc = IcBackfillService(
+            strategy_name=strategy_name,
+            output_root=output_root,
+            provider_uri=provider_uri,
+            inference_python=inference_python,
+            forward_window=int(getattr(strat, "ic_forward_window", 2)),
+            scan_days=int(scan_days if scan_days is not None else getattr(strat, "ic_backfill_scan_days", 30)),
+        )
+        return svc.run_sync()
 
     def get_latest_metrics(self, strategy_name: str) -> Optional[Dict[str, Any]]:
         """供 webtrader adapter 查询 (Phase 2.6)."""
