@@ -16,12 +16,25 @@
 完整流程 7 阶段:
   Phase 0 前置: 读 api.json token + 校验聚宽 CSV / qlib bin 历史
   Phase 1 起 vnpy 全栈 + webtrader uvicorn + mlearnweb live_main uvicorn
-  Phase 2 拉真实今日数据 (DailyIngestPipeline.ingest_today)
-  Phase 3 add_strategy("QlibMLStrategy", ..., trigger_time="21:00")
-  Phase 4 run_pipeline_now (~100s subprocess)
+  Phase 3 add_strategy("QlibMLStrategy", ..., trigger_time="21:00") [提前]
+  Phase 2+4 每日 ingest+pipeline (单日或 N 日循环, 见 SIMULATE_ROLLING_DAYS)
   Phase 5 等 ml_snapshot_loop tick
   Phase 6 12 条验证断言
   Phase 7 常驻等 Ctrl+C, 清理 2 个 uvicorn 子进程
+
+## 多日模拟 (问题 3)
+
+  SIMULATE_ROLLING_DAYS=N (env) → 从 LIVE_DATE 回溯 N 自然日, 仅保留交易日,
+  逐日跑 ingest+pipeline. 每日产出独立的 diagnostics/metrics/selections,
+  前端跨天曲线才有数据. N=0 时保持原单日行为.
+
+## 关键修复 (基于 log.log 排查)
+
+  1. Phase 2 ingest 从主线程同步调用改为后台线程+心跳.
+     原设计会阻塞 vnpy RPC ~100s+, 触发 webtrader uvicorn 30s timeout → 500.
+  2. 各 Stage (fetch/filter/by_stock/dump) 独立记耗时, daily_ingest 返回
+     stages_elapsed 便于性能诊断.
+  3. Phase 4 subprocess 轮询加心跳 (默认 30s 一次), 长等待期不再静默.
 
 ## 和实盘差异
 
@@ -56,9 +69,11 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 
 # --- sys.path 注入 ------------------------------------------------------
@@ -79,6 +94,26 @@ SPAWN_MLEARNWEB: bool = True              # False → 不启 mlearnweb live_main
 # LIVE_DATE 默认 today, 但若非交易日会自动往前找最近交易日 (见 _resolve_live_date).
 # 也可通过 env LIVE_DATE=YYYY-MM-DD 手动指定.
 LIVE_DATE: date = date.today()
+
+# ========== 多日模拟 (问题 3 修复) ==========
+# 0 = 只跑 LIVE_DATE 一天 (原行为, 单日冒烟)
+# N > 0 = 从 LIVE_DATE 往前回溯 N 个自然日, 只保留交易日, 逐日跑完整 ingest+pipeline.
+#         每日结果独立落在 {OUT_ROOT}/{STRATEGY}/{yyyymmdd}/, 前端 rolling 曲线会看到 N+1 个点.
+# 也可通过 env SIMULATE_ROLLING_DAYS=N 覆盖.
+SIMULATE_ROLLING_DAYS: int = int(os.getenv("SIMULATE_ROLLING_DAYS", "0"))
+# 多日模式下, 每跑完一天等 mlearnweb ml_snapshot_loop tick 一次 (60s+余量),
+# 让当日 metrics UPSERT 进 SQLite. 0 = 不等 (快但 SQLite 只会留最后一天).
+ROLLING_PER_DAY_WAIT_S: int = int(os.getenv("ROLLING_PER_DAY_WAIT_S", "70"))
+
+# ========== Phase 2/4 心跳 (问题 1 修复) ==========
+# 后台 ingest 线程每隔 N 秒打心跳, 让用户感知进度
+INGEST_HEARTBEAT_S: float = 10.0
+# Phase 4 pipeline subprocess 轮询 diagnostics.json 时每隔 N 秒打心跳
+PIPELINE_HEARTBEAT_S: float = 30.0
+PIPELINE_TIMEOUT_S: int = 300
+
+# 多日模式下 date.today() 的动态 holder (monkey-patch 通过它读)
+_SMOKE_DATE_HOLDER: Dict[str, Optional[date]] = {"value": None}
 
 BUNDLE_DIR = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab2711178313491f9900b5695b47fa98"
 OUT_ROOT = r"D:/ml_output/smoke_full_pipeline"
@@ -164,6 +199,183 @@ def _setup_ingest_env(token: str) -> None:
     os.environ.setdefault("VNPY_DATAFEED_PASSWORD", token)
 
 
+# --- 并发 / 心跳 -------------------------------------------------------
+
+def _run_ingest_with_heartbeat(
+    tushare_engine: Any, day_str: str, *, heartbeat_s: float = INGEST_HEARTBEAT_S,
+) -> Tuple[Optional[Dict[str, Any]], float]:
+    """把 ``run_daily_ingest_now`` 丢到后台线程跑, 主线程周期性打心跳.
+
+    原本 ingest 在主线程同步执行, qlib DumpDataAll 的 I/O 会卡住主线程 ~100s+,
+    期间 webtrader RPC server 无法及时响应 → uvicorn 30s 超时抛 500
+    (见 F:/log.log 行 142 `RpcServer has no response over 30 seconds`).
+    放后台线程后主线程保持空转, RPC 事件循环不被阻塞.
+
+    Parameters
+    ----------
+    tushare_engine : TushareProEngine
+    day_str : str
+        YYYYMMDD
+    heartbeat_s : float
+        心跳间隔秒
+
+    Returns
+    -------
+    (result_dict, elapsed_s): ingest 返回的 dict (可能为 None/skipped), 总耗时
+    """
+    state: Dict[str, Any] = {"result": None, "error": None, "done": False}
+
+    def _worker() -> None:
+        try:
+            state["result"] = tushare_engine.run_daily_ingest_now(day_str)
+        except Exception as exc:  # noqa: BLE001
+            state["error"] = exc
+        finally:
+            state["done"] = True
+
+    th = threading.Thread(target=_worker, daemon=False, name=f"ingest-{day_str}")
+    t0 = time.time()
+    th.start()
+    last_hb = t0
+    while not state["done"]:
+        time.sleep(0.5)
+        now = time.time()
+        if now - last_hb >= heartbeat_s:
+            _log(f"  ... ingest[{day_str}] running ({now - t0:.0f}s elapsed)")
+            last_hb = now
+    th.join(timeout=5)
+    if state["error"] is not None:
+        raise state["error"]
+    return state["result"], time.time() - t0
+
+
+def _wait_pipeline_with_heartbeat(
+    ml_engine: Any,
+    strategy_name: str,
+    day_str: str,
+    out_root: str,
+    *,
+    timeout_s: int = PIPELINE_TIMEOUT_S,
+    heartbeat_s: float = PIPELINE_HEARTBEAT_S,
+) -> Tuple[bool, float]:
+    """触发 ``run_pipeline_now`` 后轮询 ``diagnostics.json``, 每隔 heartbeat_s 打进度.
+
+    注意: 用 ``mtime > initial_mtime`` 判断"新产出", 否则如果该日之前跑过,
+    旧 diagnostics.json 会立刻命中, 无法正确等待本次运行.
+
+    Returns
+    -------
+    (ok, elapsed_s): ok=True 表示 diagnostics 在 timeout 内被本次运行重写
+    """
+    out_day_dir = Path(out_root) / strategy_name / day_str
+    diag_path = out_day_dir / "diagnostics.json"
+    initial_mtime = diag_path.stat().st_mtime if diag_path.exists() else 0.0
+
+    # t0 必须在 run_pipeline_now 之前: 该函数实测为"同步阻塞直到 subprocess
+    # 完成"(见 smoke 日志 scheduler start→job done ~74s), 若 t0 放后面,
+    # elapsed 只计了 subprocess 完成后的 mtime 轮询时间(~2s), 严重误导.
+    t0 = time.time()
+    if not ml_engine.run_pipeline_now(strategy_name):
+        raise RuntimeError(f"run_pipeline_now failed for {day_str}")
+
+    last_hb = t0
+    while time.time() - t0 < timeout_s:
+        time.sleep(2)
+        if diag_path.exists() and diag_path.stat().st_mtime > initial_mtime:
+            return True, time.time() - t0
+        now = time.time()
+        if now - last_hb >= heartbeat_s:
+            _log(
+                f"  ... pipeline[{day_str}] running ({now - t0:.0f}s elapsed, "
+                f"waiting for {diag_path.name})"
+            )
+            last_hb = now
+    return False, time.time() - t0
+
+
+def _run_day(
+    tushare_engine: Any,
+    ml_engine: Any,
+    day: date,
+) -> bool:
+    """跑一天的 ingest + pipeline (把 Phase 2 + Phase 4 合到一起).
+
+    Returns
+    -------
+    bool: True = 本日成功完成 (或非交易日 skipped, 不算失败);
+          False = 本日出现 fatal 错误, 调用方可决定是否中断多日循环
+    """
+    day_str = day.strftime("%Y%m%d")
+    day_iso = day.strftime("%Y-%m-%d")
+    _SMOKE_DATE_HOLDER["value"] = day
+    _log(f"--- Day {day_iso} ({day_str}) ---")
+
+    # Phase 2: ingest (后台线程, 不阻塞 RPC)
+    if TRIGGER_INGEST_ON_STARTUP:
+        _log(f"[{day_str}] Phase 2 — DailyIngestPipeline.ingest_today (bg thread)")
+        try:
+            result, elapsed = _run_ingest_with_heartbeat(tushare_engine, day_str)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"  FAIL: ingest 抛异常: {type(exc).__name__}: {exc}")
+            return False
+        if result is None:
+            _log("  FAIL: run_daily_ingest_now 返回 None (pipeline 未配置)")
+            return False
+        if result.get("skipped"):
+            _log(f"  SKIPPED: {day_str} 非交易日, 跳过本日流程")
+            return True  # 非交易日不算 fatal
+        stages = result.get("stages_elapsed", {})
+        stage_parts = [
+            f"{s}={stages.get(s, 0):.1f}s"
+            for s in ("fetch", "filter", "by_stock", "dump")
+            if s in stages
+        ]
+        stages_str = " | ".join(stage_parts) if stage_parts else "no-stage-data"
+        _log(
+            f"  ingest OK merged_rows={result['merged_rows']} "
+            f"filtered_today_rows={result.get('filtered_today_rows')} "
+            f"stages=[{stages_str}] total={elapsed:.1f}s"
+        )
+    else:
+        _log(f"[{day_str}] Phase 2 skipped (TRIGGER_INGEST_ON_STARTUP=False)")
+
+    # Phase 4: pipeline (subprocess, 主线程轮询 diagnostics)
+    if TRIGGER_PIPELINE_ON_STARTUP:
+        _log(f"[{day_str}] Phase 4 — run_pipeline_now")
+        try:
+            ok, elapsed = _wait_pipeline_with_heartbeat(
+                ml_engine, STRATEGY_NAME, day_str, OUT_ROOT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log(f"  FAIL: pipeline 抛异常: {type(exc).__name__}: {exc}")
+            return False
+        if ok:
+            _log(f"  pipeline done elapsed={elapsed:.1f}s")
+        else:
+            _log(
+                f"  TIMEOUT: pipeline 未在 {PIPELINE_TIMEOUT_S}s 内产出新 diagnostics "
+                f"(elapsed={elapsed:.1f}s)"
+            )
+            return False
+    else:
+        _log(f"[{day_str}] Phase 4 skipped (TRIGGER_PIPELINE_ON_STARTUP=False)")
+
+    return True
+
+
+def _build_rolling_days(live_date: date, n_days: int, downloader: Any) -> list[date]:
+    """从 live_date 往前 n_days 个自然日, 只保留交易日 (含 live_date 本身)."""
+    candidates = [live_date - timedelta(days=i) for i in range(n_days, -1, -1)]
+    days: list[date] = []
+    for d in candidates:
+        try:
+            if bool(downloader.is_trade_date(d.strftime("%Y%m%d"))):
+                days.append(d)
+        except Exception:  # noqa: BLE001
+            days.append(d)  # 查失败保守保留
+    return days
+
+
 # --- 主流程 -------------------------------------------------------------
 
 def main() -> int:
@@ -207,19 +419,25 @@ def main() -> int:
     live_date_iso = live_date.strftime("%Y-%m-%d")
     if live_date != date.today():
         _log(f"WARN: today={date.today()} 非交易日, 回退 LIVE_DATE={live_date}")
-        # template.run_daily_pipeline 用 date.today() 决定 live_end + trade_day 短路.
-        # 非交易日 smoke 必须 monkey-patch, 否则 pipeline 直接发 heartbeat 不跑推理.
-        import vnpy_ml_strategy.template as _tpl_mod
-        _orig_date = _tpl_mod.date
-
-        class _SmokeDate(_orig_date):
-            @classmethod
-            def today(cls):
-                return live_date
-        _tpl_mod.date = _SmokeDate
-        _log(f"monkey-patched vnpy_ml_strategy.template.date.today() -> {live_date}")
     else:
         _log(f"LIVE_DATE={live_date}")
+
+    # 无条件 monkey-patch: 单日模式 holder=live_date 行为不变; 多日循环模式
+    # 每次 _run_day 会更新 holder.  template.run_daily_pipeline 用
+    # date.today() 决定 live_end + trade_day 短路, 必须动态.
+    _SMOKE_DATE_HOLDER["value"] = live_date
+    import vnpy_ml_strategy.template as _tpl_mod
+    _orig_date = _tpl_mod.date
+
+    class _SmokeDate(_orig_date):
+        @classmethod
+        def today(cls):
+            return _SMOKE_DATE_HOLDER["value"] or _orig_date.today()
+    _tpl_mod.date = _SmokeDate
+    _log(
+        "monkey-patched vnpy_ml_strategy.template.date.today() -> dynamic "
+        f"(initial={live_date})"
+    )
 
     ml_engine = main_engine.get_engine(ML_APP)
     ml_engine.init_engine()
@@ -264,23 +482,8 @@ def main() -> int:
         _log(f"FAIL: webtrader uvicorn died early (rc={webtrader_uv.returncode})")
         return 2
 
-    # --- Phase 2: 拉真实数据 ---
-    if TRIGGER_INGEST_ON_STARTUP:
-        _log("=== Phase 2 — DailyIngestPipeline.ingest_today ===")
-        t0 = time.time()
-        result = tushare_engine.run_daily_ingest_now(live_date_str)
-        if result is None:
-            _log("FAIL: run_daily_ingest_now 返回 None (pipeline 未配置)")
-            _teardown(main_engine, webtrader_uv, mlearnweb_uv)
-            return 3
-        if result.get("skipped"):
-            _log(f"WARN: {live_date_str} 非交易日 skipped, 推理将用 live_end=today 跑但可能 status=empty")
-        else:
-            _log(f"ingest OK stages={result['stages_done']} merged_rows={result['merged_rows']} filtered_today_rows={result.get('filtered_today_rows', result.get('filtered_rows'))} elapsed={time.time()-t0:.1f}s")
-    else:
-        _log("Phase 2 skipped (TRIGGER_INGEST_ON_STARTUP=False)")
-
-    # --- Phase 3: add + init + start 策略 ---
+    # --- Phase 3: add + init + start 策略 (提前到 Phase 2 之前, 以便多日
+    # 循环模式下策略已就绪, 每日 run_pipeline_now 直接复用同一策略实例) ---
     _log("=== Phase 3 — add_strategy ===")
     strat = ml_engine.add_strategy("QlibMLStrategy", STRATEGY_NAME, {
         "bundle_dir": BUNDLE_DIR,
@@ -299,21 +502,45 @@ def main() -> int:
     assert ml_engine.start_strategy(STRATEGY_NAME)
     _log(f"strategy inited+started, inited={strat.inited} trading={strat.trading}")
 
-    # --- Phase 4: run_pipeline_now ---
-    if TRIGGER_PIPELINE_ON_STARTUP:
-        _log("=== Phase 4 — run_pipeline_now (~100s) ===")
-        t0 = time.time()
-        assert ml_engine.run_pipeline_now(STRATEGY_NAME)
-        out_day_dir = Path(OUT_ROOT) / STRATEGY_NAME / live_date_str
-        diag_path = out_day_dir / "diagnostics.json"
-        deadline = time.time() + 300
-        while not diag_path.exists() and time.time() < deadline:
-            time.sleep(2)
-        _log(f"pipeline done elapsed={time.time()-t0:.1f}s")
+    # --- Phase 2 + Phase 4: 每日 ingest + pipeline ---
+    # SIMULATE_ROLLING_DAYS=0 → 仅 LIVE_DATE (原行为)
+    # SIMULATE_ROLLING_DAYS>0 → 回溯 N 天逐日跑, 每日产出独立 diagnostics/metrics/selections
+    #                            让前端跨天曲线有数据.
+    if SIMULATE_ROLLING_DAYS > 0:
+        days = _build_rolling_days(live_date, SIMULATE_ROLLING_DAYS, downloader)
+        if not days:
+            _log(f"FAIL: 回溯 {SIMULATE_ROLLING_DAYS} 天内没有交易日")
+            _teardown(main_engine, webtrader_uv, mlearnweb_uv)
+            return 3
+        _log(
+            f"=== Phase 2/4 — Rolling simulation: {len(days)} 交易日 "
+            f"[{days[0]} ~ {days[-1]}] (自然日回溯 {SIMULATE_ROLLING_DAYS}) ==="
+        )
     else:
-        _log("Phase 4 skipped (TRIGGER_PIPELINE_ON_STARTUP=False)")
+        days = [live_date]
+        _log("=== Phase 2/4 — 单日模式 ===")
 
-    # --- Phase 5: 等 ml_snapshot_loop tick ---
+    for idx, day in enumerate(days):
+        is_last = idx == len(days) - 1
+        _log(f"=== Day {idx + 1}/{len(days)} ===")
+        ok = _run_day(tushare_engine, ml_engine, day)
+        if not ok:
+            _log(f"FAIL: Day {day} 失败, 中断多日循环")
+            _teardown(main_engine, webtrader_uv, mlearnweb_uv)
+            return 3
+        # 多日模式下, 每日跑完等 ml_snapshot_loop tick 一次, 让当日 metrics
+        # UPSERT 进 SQLite (否则 mlearnweb 只会采到最后一天 latest)
+        if (
+            not is_last
+            and SIMULATE_ROLLING_DAYS > 0
+            and SPAWN_MLEARNWEB
+            and TRIGGER_PIPELINE_ON_STARTUP
+            and ROLLING_PER_DAY_WAIT_S > 0
+        ):
+            _log(f"  等 mlearnweb ml_snapshot_loop tick ({ROLLING_PER_DAY_WAIT_S}s)...")
+            time.sleep(ROLLING_PER_DAY_WAIT_S)
+
+    # --- Phase 5: 等 ml_snapshot_loop tick (最后一天) ---
     if SPAWN_MLEARNWEB and TRIGGER_PIPELINE_ON_STARTUP:
         _log("=== Phase 5 — 等 ml_snapshot_loop tick (70s) ===")
         time.sleep(70)

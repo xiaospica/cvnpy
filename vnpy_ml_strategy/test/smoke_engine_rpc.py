@@ -89,6 +89,16 @@ TEST_LIVE_END = _d(2026, 1, 10)
 #         前端 UI 看到策略存在并展示历史 SQLite 数据" 的场景.
 TRIGGER_PIPELINE_ON_STARTUP = False
 
+# 是否派生 mlearnweb live_main uvicorn 子进程 (:8100).
+#
+# 前端读取"历史 metrics/prediction"走 mlearnweb, 不走 webtrader; 若只起
+# webtrader (:8001), 前端会打 /api/v1/ml/strategies/.../metrics/latest 得到
+# 404 (因 MetricsCache 为空), UI 一片空白. 对应方案中 mlearnweb 作为"历史
+# 聚合 + SQLite 暴露层"的角色.
+SPAWN_MLEARNWEB = True
+MLEARNWEB_BACKEND = r"F:/Quant/code/qlib_strategy_dev/mlearnweb/backend"
+PY311 = r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe"
+
 
 def main() -> int:
     ev = EventEngine()
@@ -212,18 +222,42 @@ def main() -> int:
         env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     print(f"[smoke] spawned webtrader uvicorn pid={uvicorn_proc.pid} on :8001", flush=True)
+
+    # 派生 mlearnweb live_main uvicorn (:8100) —— 前端读历史 metrics/prediction
+    # 走这一侧. 不启则 UI 空白 (MetricsCache 空 + SQLite 对外没 API).
+    mlearnweb_proc = None
+    if SPAWN_MLEARNWEB:
+        mlearnweb_proc = subprocess.Popen(
+            [
+                PY311, "-u", "-m", "uvicorn",
+                "app.live_main:app", "--host", "127.0.0.1", "--port", "8100",
+            ],
+            cwd=MLEARNWEB_BACKEND,
+            env={
+                **os.environ,
+                "PYTHONIOENCODING": "utf-8",
+                "ML_LIVE_OUTPUT_ROOT": OUT,  # ml_snapshot_loop 扫这个目录
+                "VNPY_SNAPSHOT_RETENTION_DAYS": "365",
+            },
+        )
+        print(f"[smoke] spawned mlearnweb live_main pid={mlearnweb_proc.pid} on :8100", flush=True)
+
     # Give uvicorn a few seconds to bind + connect RPC.
     time.sleep(3)
     if uvicorn_proc.poll() is not None:
         print(f"[smoke] FAIL: webtrader uvicorn exited early (rc={uvicorn_proc.returncode})", flush=True)
+        if mlearnweb_proc is not None:
+            mlearnweb_proc.terminate()
         main_engine.close()
         return 2
 
+    ready_on = ":2014 / :4102 / :8001" + (" / :8100" if SPAWN_MLEARNWEB else "")
     print(
-        "[smoke] READY — trading + webtrader REST 全部就绪 on :2014 / :4102 / :8001",
+        f"[smoke] READY — trading + webtrader REST{' + mlearnweb' if SPAWN_MLEARNWEB else ''} "
+        f"全部就绪 on {ready_on}",
         flush=True,
     )
-    print("[smoke] Ctrl+C to exit (will also tear down uvicorn child).", flush=True)
+    print("[smoke] Ctrl+C to exit (will also tear down uvicorn children).", flush=True)
 
     stop = {"v": False}
 
@@ -235,18 +269,28 @@ def main() -> int:
         time.sleep(1)
         if uvicorn_proc.poll() is not None:
             print(
-                f"[smoke] uvicorn child exited unexpectedly (rc={uvicorn_proc.returncode}). "
-                "Shutting down.",
+                f"[smoke] webtrader uvicorn 自退 (rc={uvicorn_proc.returncode}).",
+                flush=True,
+            )
+            stop["v"] = True
+        if mlearnweb_proc is not None and mlearnweb_proc.poll() is not None:
+            print(
+                f"[smoke] mlearnweb uvicorn 自退 (rc={mlearnweb_proc.returncode}).",
                 flush=True,
             )
             stop["v"] = True
 
-    print("[smoke] shutting down uvicorn child...", flush=True)
-    try:
-        uvicorn_proc.terminate()
-        uvicorn_proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        uvicorn_proc.kill()
+    print("[smoke] shutting down uvicorn children...", flush=True)
+    for proc, name in ((uvicorn_proc, "webtrader"), (mlearnweb_proc, "mlearnweb")):
+        if proc is None:
+            continue
+        try:
+            proc.terminate()
+            proc.wait(timeout=10)
+            print(f"  {name} terminated", flush=True)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            print(f"  {name} killed", flush=True)
     print("[smoke] shutting down trader...", flush=True)
     eng.stop_strategy(STRATEGY_NAME)
     main_engine.close()
