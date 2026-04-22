@@ -115,9 +115,9 @@ PIPELINE_TIMEOUT_S: int = 300
 # 多日模式下 date.today() 的动态 holder (monkey-patch 通过它读)
 _SMOKE_DATE_HOLDER: Dict[str, Optional[date]] = {"value": None}
 
-BUNDLE_DIR = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab2711178313491f9900b5695b47fa98"
+BUNDLE_DIR = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964"
 OUT_ROOT = r"D:/ml_output/smoke_full_pipeline"
-STRATEGY_NAME = "phase27_test"
+STRATEGY_NAME = "jq41_csi300_2026"
 
 # Phase 4 v2: QS_DATA_ROOT 驱动所有路径, 实盘/训练解耦
 QS_DATA_ROOT = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
@@ -154,11 +154,18 @@ def _load_tushare_token() -> str:
     return token
 
 
+TUSHARE_DAILY_READY_HOUR: int = 20
+
+
 def _resolve_live_date(downloader) -> date:
-    """返回最近"已完整收盘"的交易日: 若 env LIVE_DATE 指定则尊重; 否则
-    从 today-1 往前找, 避开今日(tushare 当日 daily bar 要到 20:00 后才有,
-    smoke 不等那么久). 周末/节假日 today 会先命中 today-1 的 Friday, 如
-    Friday 是节假日再往前.
+    """返回最近"已完整收盘"的交易日.
+
+    策略:
+      1. env LIVE_DATE 指定 → 尊重
+      2. today 是交易日 且 当前时间 >= 20:00 → 用 today
+         (tushare 当日 daily bar 通常 20:00 后落盘)
+      3. 否则从 today-1 往前找 10 天里最近的交易日
+         (白天跑 smoke, tushare 当日数据还没落, 用昨日)
     """
     from datetime import timedelta
     env_val = os.getenv("LIVE_DATE")
@@ -168,14 +175,20 @@ def _resolve_live_date(downloader) -> date:
         except ValueError:
             _log(f"WARN: env LIVE_DATE={env_val} 格式非法, 忽略")
 
-    # 从 today-1 往前找 10 天里最近的交易日 (跳过 today, 避免当日 daily 没落)
-    candidate = date.today() - timedelta(days=1)
-    for _ in range(10):
+    def _is_trade_date(d: date) -> bool:
         try:
-            is_td = bool(downloader.is_trade_date(candidate.strftime("%Y%m%d")))
-        except Exception:
-            is_td = True  # 失败保守当交易日
-        if is_td:
+            return bool(downloader.is_trade_date(d.strftime("%Y%m%d")))
+        except Exception:  # noqa: BLE001
+            return True  # 查失败保守当交易日
+
+    today = date.today()
+    if datetime.now().hour >= TUSHARE_DAILY_READY_HOUR and _is_trade_date(today):
+        return today
+
+    # 从 today-1 往前找 10 天里最近的交易日
+    candidate = today - timedelta(days=1)
+    for _ in range(10):
+        if _is_trade_date(candidate):
             return candidate
         candidate = candidate - timedelta(days=1)
     return candidate  # fallback (理论上 10 天内必有交易日)
@@ -417,10 +430,18 @@ def main() -> int:
     live_date = _resolve_live_date(downloader)
     live_date_str = live_date.strftime("%Y%m%d")
     live_date_iso = live_date.strftime("%Y-%m-%d")
-    if live_date != date.today():
-        _log(f"WARN: today={date.today()} 非交易日, 回退 LIVE_DATE={live_date}")
+    today = date.today()
+    if live_date == today:
+        _log(f"LIVE_DATE={live_date} (today, tushare 当日 bar 已落)")
+    elif os.getenv("LIVE_DATE"):
+        _log(f"LIVE_DATE={live_date} (来自 env)")
+    elif datetime.now().hour < TUSHARE_DAILY_READY_HOUR:
+        _log(
+            f"LIVE_DATE={live_date}: 当前 {datetime.now():%H:%M} < "
+            f"{TUSHARE_DAILY_READY_HOUR}:00, tushare 当日 bar 未落, 回退 today-1"
+        )
     else:
-        _log(f"LIVE_DATE={live_date}")
+        _log(f"LIVE_DATE={live_date}: today={today} 非交易日, 回退到最近交易日")
 
     # 无条件 monkey-patch: 单日模式 holder=live_date 行为不变; 多日循环模式
     # 每次 _run_day 会更新 holder.  template.run_daily_pipeline 用
