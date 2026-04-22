@@ -457,6 +457,7 @@ class MLStrategyAdapter(StrategyEngineAdapter):
                 {
                     "rank": int(r.get("rank", i + 1)) if pd.notna(r.get("rank", i + 1)) else i + 1,
                     "instrument": str(r.get("instrument", "")),
+                    "name": (str(r.get("name")) if pd.notna(r.get("name")) else None),
                     "score": float(r.get("score")) if pd.notna(r.get("score")) else None,
                     "weight": float(r.get("weight")) if pd.notna(r.get("weight")) else None,
                 }

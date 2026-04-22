@@ -376,7 +376,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         """
         from .persistence.result_store import ResultStore
         from .persistence.schema import (
-            COL_INSTRUMENT, COL_MODEL_RUN_ID, COL_RANK, COL_SIDE,
+            COL_INSTRUMENT, COL_MODEL_RUN_ID, COL_NAME, COL_RANK, COL_SIDE,
             COL_TARGET_PRICE, COL_TRADE_DATE, COL_WEIGHT,
         )
         if selected is None or selected.empty:
@@ -390,6 +390,14 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         sel_df[COL_TARGET_PRICE] = float("nan")
         sel_df[COL_SIDE] = "long"
         sel_df[COL_MODEL_RUN_ID] = self.last_model_run_id
+        # 写时 enrichment: ts_code → 股票中文简称. 失败不阻断落盘 (selections
+        # 数据可用性优先于 name 装饰), 缺失时 name 为 None.
+        try:
+            from vnpy_tushare_pro.ml_data_build import enrich_with_name
+            sel_df = enrich_with_name(sel_df, code_col=COL_INSTRUMENT, name_col=COL_NAME)
+        except Exception as exc:  # noqa: BLE001
+            self.write_log(f"stock name enrich failed (non-fatal): {type(exc).__name__}: {exc}")
+            sel_df[COL_NAME] = None
         store = ResultStore(self.output_root)
         store.write_selections(self.strategy_name, today, sel_df)
 

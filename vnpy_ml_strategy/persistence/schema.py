@@ -10,6 +10,7 @@ from __future__ import annotations
 # selections.parquet columns
 COL_TRADE_DATE = "trade_date"
 COL_INSTRUMENT = "instrument"
+COL_NAME = "name"          # 股票中文简称 (写时 enrichment, 可能为 None/空串)
 COL_SCORE = "score"
 COL_RANK = "rank"
 COL_WEIGHT = "weight"
@@ -20,6 +21,7 @@ COL_MODEL_RUN_ID = "model_run_id"
 SELECTION_COLUMNS = [
     COL_TRADE_DATE,
     COL_INSTRUMENT,
+    COL_NAME,
     COL_SCORE,
     COL_RANK,
     COL_WEIGHT,
