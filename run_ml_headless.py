@@ -1,26 +1,32 @@
 # -*- coding: utf-8 -*-
-"""ML 策略无 Qt 启动示例 — 脚本化运行, 方便冒烟测试和定时任务.
+"""ML 策略无 Qt 启动脚本 — 支持单/多 gateway 多策略沙盒。
 
 启动姿势:
     F:/Program_Home/vnpy/python.exe run_ml_headless.py
 
-功能:
-    1. 启动 MainEngine, 不用 Qt, 不起 MainWindow
-    2. 挂 QmtSimGateway 模拟账户
-    3. 挂 MLStrategyApp + TushareProApp + WebTraderApp
-    4. 按配置创建 + 初始化 + 启动 QlibMLStrategy 一个实例
-    5. 可选立即触发一次 pipeline (--trigger-now)
-    6. 进入主循环阻塞, Ctrl+C 优雅退出
+两种模式:
+    模式 A · 实盘 miniqmt（单 gateway）
+        USE_GATEWAY_KIND = "QMT"
+        GATEWAYS = [{"name": "QMT", "setting": QMT_SETTING}]
+        STRATEGIES = [{"gateway_name": "QMT", ...}, ...]   # 所有策略共用 QMT 网关
+        约束：miniqmt 单进程单账户，多策略只能合并到一个账户
+
+    模式 B · 模拟多策略沙盒（多 gateway，方案 Y）
+        USE_GATEWAY_KIND = "QMT_SIM"
+        GATEWAYS = [
+            {"name": "QMT_SIM_csi300", "setting": {...}},
+            {"name": "QMT_SIM_zz500",  "setting": {...}},
+        ]
+        STRATEGIES = [
+            {"gateway_name": "QMT_SIM_csi300", ...},
+            {"gateway_name": "QMT_SIM_zz500",  ...},
+        ]
+        每策略独立 SQLite + 独立账户，mlearnweb 前端三策略各自一条权益曲线
 
 与 run_sim.py 的差异:
     - 无 Qt 依赖, 可在 Windows Service / docker 里跑
-    - 策略配置写死在脚本顶部的 CONFIG dict, 不走 UI
-    - 默认只起 QmtSimGateway (模拟), 不碰真实 QmtGateway, 避免手滑下错单
-
-使用要点:
-    1. 首次使用请先把 CONFIG 里的 BUNDLE_DIR 改成你本地 Phase 1 产出的 bundle 路径
-    2. 若要启动真实交易, 改 ENABLE_TRADING=True (默认 False 干跑)
-    3. 推理子进程走研究机 Python 3.11, INFERENCE_PYTHON 路径务必对
+    - 配置写死在脚本顶部, 不走 UI
+    - 默认起 QmtSimGateway (模拟), 不碰真实 QmtGateway, 避免手滑下错单
 """
 
 import os
@@ -31,8 +37,6 @@ from pathlib import Path
 
 
 # ─── sys.path 注入 ─────────────────────────────────────────────────────
-# 和 run_sim.py 保持一致: 让 vnpy_ml_strategy 能 import qlib_strategy_core
-# (用于 subprocess 入口 vnpy_strategy_core.cli.run_inference 的模块查找)
 os.environ["VNPY_DOCK_BACKEND"] = "ads"
 _HERE = Path(__file__).resolve().parent
 _CORE_DIR = _HERE / "vendor" / "qlib_strategy_core"
@@ -43,79 +47,109 @@ if (_QLIB_SOURCE / "qlib" / "__init__.py").exists() and str(_QLIB_SOURCE) not in
     sys.path.insert(0, str(_QLIB_SOURCE))
 
 
-# ─── 策略 / 网关配置 (按需改) ──────────────────────────────────────────
+# ─── 模式选择 ───────────────────────────────────────────────────────────
+USE_GATEWAY_KIND = "QMT_SIM"   # "QMT_SIM" | "QMT"
 
-# Gateway 选一个 — QMT_SIM 是模拟盘, QMT 是 miniQMT 实盘
-USE_GATEWAY = "QMT_SIM"   # "QMT_SIM" | "QMT"
 
-# QmtSimGateway 连接参数
-QMT_SIM_SETTING = {
-    "账户": "test_headless",
-    "模拟资金": 1000000.0,
+# ─── QmtSimGateway 默认参数（模拟模式各 gateway 共享） ───────────────────
+QMT_SIM_BASE_SETTING = {
+    "模拟资金": 1_000_000.0,
     "部分成交率": 0.0,
     "拒单率": 0.0,
     "订单超时秒数": 30,
     "成交延迟毫秒": 0,
     "报单上报延迟毫秒": 0,
     "卖出持仓不足拒单": "是",
+    "行情源": "merged_parquet",
+    "merged_parquet_merged_root": r"D:\vnpy_data\snapshots\merged",
+    "merged_parquet_reference_kind": "prev_close",
+    "merged_parquet_fallback_days": 10,
+    "merged_parquet_stale_warn_hours": 48,
+    "启用持久化": "是",
+    "持久化目录": r"F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state",
+    # "账户" 字段不写：QmtSimGateway.connect 会用 gateway_name 兜底，
+    # 多 gateway 实例之间天然有不同 account_id（独立 SQLite 文件）。
 }
 
-# QmtGateway (真 miniQMT) 连接参数 — 仅当 USE_GATEWAY=="QMT"
+
+# ─── QmtGateway 实盘参数 ────────────────────────────────────────────────
 QMT_SETTING = {
-    # 请按你的 miniQMT 客户端填
     "资金账号": "",
     "客户端路径": r"E:\迅投极速交易终端 睿智融科版\userdata_mini",
 }
 
-# ML 策略配置
-STRATEGY_NAME = "csi300_lgb_headless"
-STRATEGY_CLASS = "QlibMLStrategy"
-# Phase 4 v2: 实盘数据根目录. 训练侧 rsync 过来的 bundle 也推荐落在这里.
+
+# ─── Gateways 列表 ─────────────────────────────────────────────────────
+# 模拟模式下默认 1 个 gateway（与历史行为等价）；启用多策略沙盒在下面注释处加。
+# 实盘模式下必为 1 个 gateway（miniqmt 单账户约束）。
+
+if USE_GATEWAY_KIND == "QMT_SIM":
+    GATEWAYS = [
+        {"name": "QMT_SIM_csi300", "setting": dict(QMT_SIM_BASE_SETTING)},
+        # 启用多策略沙盒示例（取消注释下方两行 + 同步加 STRATEGIES）：
+        # {"name": "QMT_SIM_zz500",   "setting": dict(QMT_SIM_BASE_SETTING)},
+        # {"name": "QMT_SIM_alldata", "setting": dict(QMT_SIM_BASE_SETTING)},
+    ]
+elif USE_GATEWAY_KIND == "QMT":
+    GATEWAYS = [{"name": "QMT", "setting": QMT_SETTING}]
+else:
+    raise ValueError(f"unknown USE_GATEWAY_KIND: {USE_GATEWAY_KIND}")
+
+
+# ─── ML 策略基础参数（所有策略共用） ───────────────────────────────────
 QS_DATA_ROOT = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
 VNPY_MODEL_ROOT = os.getenv("VNPY_MODEL_ROOT", r"D:/vnpy_data/models")
 
-STRATEGY_SETTING = {
-    # 模型 bundle — 训练机 rsync 到 {VNPY_MODEL_ROOT}/{exp}/{run_id}/
-    # 可用 env BUNDLE_DIR 覆盖, 不设则用训练机默认路径便于本地开发
-    "bundle_dir": os.getenv(
-        "BUNDLE_DIR",
-        r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab2711178313491f9900b5695b47fa98",
-    ),
-
-    # Python 3.11 研究机环境 (subprocess 推理入口)
+STRATEGY_BASE_SETTING = {
     "inference_python": os.getenv(
         "INFERENCE_PYTHON",
         r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
     ),
-
-    # qlib bin 根. Phase 4 v2 默认指向 QS_DATA_ROOT/qlib_data_bin
-    # (DailyIngestPipeline 每日 20:00 重建)
     "provider_uri": os.getenv("QS_PROVIDER_URI", f"{QS_DATA_ROOT}/qlib_data_bin"),
-
-    # 调度 — 21:00 配合 20:00 拉数 cron
     "trigger_time": "21:00",
-    # 选股 / 下单
-    "topk": 7,
-    "n_drop": 1,
-    "cash_per_order": 100000,
-    "gateway": USE_GATEWAY,
-    # 推理产出落盘 (不是数据根, 是每次推理的 3 文件 + selections)
     "output_root": os.getenv("ML_OUTPUT_ROOT", r"D:/ml_output"),
-    # 推理
     "lookback_days": 60,
     "subprocess_timeout_s": 300,
-    # baseline.parquet 默认从 bundle_dir 里取; 想指向别的路径在这里填
     "baseline_path": "",
-    # 监控窗口
     "monitor_window_days": 30,
     # **安全开关 — 默认干跑**
     "enable_trading": False,
 }
 
-# 是否启动后立即触发一次 pipeline (不等 trigger_time)
-TRIGGER_ON_STARTUP = True
 
-# 是否挂载 WebTrader (mlearnweb 要读 /api/v1/ml/* 则必须开)
+# ─── 策略列表 ──────────────────────────────────────────────────────────
+# 每条策略一个 add_strategy 调用。gateway_name 必须在 GATEWAYS 中存在。
+# 实盘模式下所有策略指向同一个 "QMT"；模拟沙盒下各指向自己的 QMT_SIM_*。
+
+STRATEGIES = [
+    {
+        "strategy_name": "csi300_lgb_headless",
+        "strategy_class": "QlibMLStrategy",
+        "gateway_name": "QMT_SIM_csi300" if USE_GATEWAY_KIND == "QMT_SIM" else "QMT",
+        "setting_override": {
+            "bundle_dir": os.getenv(
+                "BUNDLE_DIR",
+                r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab2711178313491f9900b5695b47fa98",
+            ),
+            "topk": 7,
+            "n_drop": 1,
+            "cash_per_order": 100_000,
+        },
+    },
+    # 多策略沙盒示例（仅 QMT_SIM 模式下意义；记得同步打开上面 GATEWAYS 的对应行）：
+    # {
+    #     "strategy_name": "zz500_lgb_headless",
+    #     "strategy_class": "QlibMLStrategy",
+    #     "gateway_name": "QMT_SIM_zz500",
+    #     "setting_override": {
+    #         "bundle_dir": os.getenv("BUNDLE_DIR_ZZ500", r"...zz500_bundle..."),
+    #         "topk": 5, "n_drop": 1, "cash_per_order": 200_000,
+    #     },
+    # },
+]
+
+
+TRIGGER_ON_STARTUP = True
 ENABLE_WEBTRADER = True
 
 
@@ -129,17 +163,15 @@ def main() -> int:
     event_engine = EventEngine()
     main_engine = MainEngine(event_engine)
 
-    # 挂 gateway
-    if USE_GATEWAY == "QMT_SIM":
-        from vnpy_qmt_sim import QmtSimGateway
-        main_engine.add_gateway(QmtSimGateway, gateway_name="QMT_SIM")
-        connect_setting = QMT_SIM_SETTING
-    elif USE_GATEWAY == "QMT":
-        from vnpy_qmt import QmtGateway
-        main_engine.add_gateway(QmtGateway, gateway_name="QMT")
-        connect_setting = QMT_SETTING
+    # 挂 gateway 类
+    if USE_GATEWAY_KIND == "QMT_SIM":
+        from vnpy_qmt_sim import QmtSimGateway as _GatewayClass
     else:
-        raise ValueError(f"unknown USE_GATEWAY: {USE_GATEWAY}")
+        from vnpy_qmt import QmtGateway as _GatewayClass
+
+    # 注册所有 gateway 实例
+    for gw in GATEWAYS:
+        main_engine.add_gateway(_GatewayClass, gateway_name=gw["name"])
 
     # 挂 app
     from vnpy_tushare_pro import TushareProApp
@@ -153,55 +185,70 @@ def main() -> int:
         from vnpy_webtrader.engine import APP_NAME as WEB_APP_NAME
         main_engine.add_app(WebTraderApp)
 
-    # 连接 gateway (触发 query_account + 订阅主题)
-    print(f"[headless] connecting gateway {USE_GATEWAY}...")
-    main_engine.connect(connect_setting, USE_GATEWAY)
-    time.sleep(2)  # 等连接完成; 真实场景建议监听 eContract 事件再 add_strategy
+    # 连接所有 gateway
+    for gw in GATEWAYS:
+        print(f"[headless] connecting gateway {gw['name']}...")
+        main_engine.connect(gw["setting"], gw["name"])
+    time.sleep(2)
 
     # 拿 MLEngine
     from vnpy_ml_strategy import APP_NAME as ML_APP_NAME
     ml_engine = main_engine.get_engine(ML_APP_NAME)
 
-    # init_engine 会触发 _autoload_strategy_classes 注册 QlibMLStrategy;
-    # 以及启动 DailyTimeTaskScheduler. 不调的话 add_strategy 会找不到类.
     ml_engine.init_engine()
     print(f"[headless] MLEngine registered: {ml_engine.get_all_strategy_class_names()}")
 
-    # WebTrader 的 RPC 服务器需要手动启动(UI widget 里是点"启动"按钮触发的).
-    # 这一步之后, vnpy_webtrader.web:app uvicorn 才能连上 RPC 拿数据.
     if ENABLE_WEBTRADER:
         web_engine = main_engine.get_engine(WEB_APP_NAME)
         web_engine.start_server("tcp://127.0.0.1:2014", "tcp://127.0.0.1:4102")
         print("[headless] webtrader RPC server started on tcp://127.0.0.1:2014 / 4102")
 
-    # 创建 + 初始化 + 启动策略
-    print(f"[headless] adding strategy {STRATEGY_NAME} ({STRATEGY_CLASS})...")
-    try:
-        strat = ml_engine.add_strategy(STRATEGY_CLASS, STRATEGY_NAME, STRATEGY_SETTING)
-    except Exception as exc:
-        print(f"[headless] add_strategy 失败: {exc}")
+    # 校验：每个策略的 gateway_name 必须在 GATEWAYS 中
+    valid_gw_names = {gw["name"] for gw in GATEWAYS}
+    started: list[str] = []
+
+    for strat_def in STRATEGIES:
+        name = strat_def["strategy_name"]
+        cls = strat_def["strategy_class"]
+        gw_name = strat_def["gateway_name"]
+
+        if gw_name not in valid_gw_names:
+            print(f"[headless] 策略 {name} 引用了未注册的 gateway {gw_name}，跳过")
+            continue
+
+        setting = {
+            **STRATEGY_BASE_SETTING,
+            **strat_def["setting_override"],
+            "gateway": gw_name,
+        }
+
+        print(f"[headless] adding strategy {name} ({cls}) → gateway={gw_name}...")
+        try:
+            ml_engine.add_strategy(cls, name, setting)
+        except Exception as exc:
+            print(f"[headless] add_strategy({name}) 失败: {exc}")
+            continue
+
+        if not ml_engine.init_strategy(name):
+            print(f"[headless] init_strategy({name}) 失败")
+            continue
+
+        if not ml_engine.start_strategy(name):
+            print(f"[headless] start_strategy({name}) 失败")
+            continue
+
+        started.append(name)
+        if TRIGGER_ON_STARTUP:
+            print(f"[headless] 立即触发 {name} pipeline...")
+            ml_engine.run_pipeline_now(name)
+
+    if not started:
+        print("[headless] 没有策略成功启动，退出")
         main_engine.close()
         return 1
 
-    print(f"[headless] init_strategy({STRATEGY_NAME})...")
-    if not ml_engine.init_strategy(STRATEGY_NAME):
-        print("[headless] init 失败, 请检查 bundle_dir / provider_uri / gateway 连接")
-        main_engine.close()
-        return 2
-
-    print(f"[headless] start_strategy({STRATEGY_NAME})...")
-    if not ml_engine.start_strategy(STRATEGY_NAME):
-        print("[headless] start 失败")
-        main_engine.close()
-        return 3
-
-    # 可选: 立即触发一次
-    if TRIGGER_ON_STARTUP:
-        print(f"[headless] 立即触发 pipeline (subprocess 推理, 约 60-120s)...")
-        ml_engine.run_pipeline_now(STRATEGY_NAME)
-
-    # 主循环 — Ctrl+C 退出
-    print(f"[headless] 策略已就绪. trigger_time={STRATEGY_SETTING['trigger_time']}. Ctrl+C 退出.")
+    # 主循环
+    print(f"[headless] {len(started)} 个策略已就绪: {started}. Ctrl+C 退出.")
     stop_flag = {"stop": False}
 
     def _sigint(_sig, _frm):
@@ -215,8 +262,9 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        print("[headless] stop_strategy...")
-        ml_engine.stop_strategy(STRATEGY_NAME)
+        for name in started:
+            print(f"[headless] stop_strategy({name})...")
+            ml_engine.stop_strategy(name)
         print("[headless] main_engine.close()...")
         main_engine.close()
 
