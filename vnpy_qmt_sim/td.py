@@ -1,5 +1,5 @@
-from typing import Dict, List, Any
-from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional, TYPE_CHECKING
+from datetime import date, datetime, timedelta
 from vnpy.trader.gateway import BaseGateway
 from vnpy.trader.object import (
     OrderRequest,
@@ -15,6 +15,9 @@ from vnpy.trader.constant import (
     Status,
     Offset
 )
+
+if TYPE_CHECKING:
+    from .persistence import QmtSimPersistence
 
 class SimulationCounter:
     """模拟柜台"""
@@ -60,6 +63,68 @@ class SimulationCounter:
         self.reject_short_if_no_position: bool = True
         self.order_tasks: Dict[str, Dict[str, Any]] = {}
 
+        # T+1 卖单的持仓冻结追踪：orderid -> (pos_key, frozen_amount)。
+        # 成交/撤单/拒单时按剩余未成交量释放冻结。
+        self.order_position_freeze: Dict[str, tuple[str, float]] = {}
+
+        # 上次日终结算的日期，用于 gateway timer 检测自然日切换。
+        self.last_settle_date: Optional[date] = None
+
+        # SQLite 持久化层（可选）。由 gateway.connect 在启用时注入。
+        self._persistence: Optional["QmtSimPersistence"] = None
+
+    def attach_persistence(self, persistence: "QmtSimPersistence") -> None:
+        self._persistence = persistence
+
+    def _persist_account(self, account: AccountData) -> None:
+        if self._persistence is None:
+            return
+        try:
+            self._persistence.upsert_account(account)
+        except Exception as exc:
+            self.gateway.write_log(f"账户持久化失败: {exc}")
+
+    def _persist_position(self, pos: PositionData) -> None:
+        if self._persistence is None:
+            return
+        try:
+            self._persistence.upsert_position(pos)
+        except Exception as exc:
+            self.gateway.write_log(f"持仓持久化失败: {exc}")
+
+    def _persist_order(self, order: OrderData) -> None:
+        if self._persistence is None:
+            return
+        try:
+            self._persistence.upsert_order(order)
+        except Exception as exc:
+            self.gateway.write_log(f"订单持久化失败: {exc}")
+
+    def _persist_trade(self, trade: TradeData) -> None:
+        if self._persistence is None:
+            return
+        try:
+            self._persistence.insert_trade(trade)
+        except Exception as exc:
+            self.gateway.write_log(f"成交持久化失败: {exc}")
+
+    # 推送 + 持久化合并 helper。状态变更后调用，确保前端事件与 DB 状态一致。
+    def _emit_order(self, order: OrderData) -> None:
+        self.gateway.on_order(order)
+        self._persist_order(order)
+
+    def _emit_trade(self, trade: TradeData) -> None:
+        self.gateway.on_trade(trade)
+        self._persist_trade(trade)
+
+    def _emit_position(self, pos: PositionData) -> None:
+        self.gateway.on_position(pos)
+        self._persist_position(pos)
+
+    def _emit_account(self, account: AccountData) -> None:
+        self.gateway.on_account(account)
+        self._persist_account(account)
+
     def process_simulation(self, now: datetime) -> None:
         for orderid, task in list(self.order_tasks.items()):
             order = self.orders.get(orderid)
@@ -79,7 +144,7 @@ class SimulationCounter:
                 order.status = Status.NOTTRADED
                 self._set_order_status_msg(order, str(task.get("status_msg") or ""))
                 self._set_order_extra(order, {"qmt_status": "ORDER_REPORTED", "case_tag": task.get("case_tag")})
-                self.gateway.on_order(order)
+                self._emit_order(order)
                 task["phase"] = "reported"
                 continue
 
@@ -156,7 +221,7 @@ class SimulationCounter:
         self._set_order_extra(order, {"status_msg": status_msg, "qmt_status": "ORDER_JUNK"})
         self.order_submit_time.pop(order.orderid, None)
         self.order_reject_reason[order.orderid] = "case_reject"
-        self.gateway.on_order(order)
+        self._emit_order(order)
         self.push_account()
         try:
             self.gateway.write_log(f"模拟拒单：{order.vt_orderid} {status_msg}")
@@ -192,8 +257,8 @@ class SimulationCounter:
         else:
             order.status = Status.PARTTRADED
 
-        self.gateway.on_order(order)
-        self.gateway.on_trade(trade)
+        self._emit_order(order)
+        self._emit_trade(trade)
         self.update_position(trade)
         self.update_account(trade)
         try:
@@ -234,14 +299,15 @@ class SimulationCounter:
             vol_int = int(float(order.volume))
         except Exception:
             vol_int = 0
-        if vol_int <= 0 or vol_int % 100 != 0:
+        # A 股规则：买单需为 100 股整数倍；卖单允许零股一次性卖出（不强制 100 倍数）
+        if vol_int <= 0 or (order.direction == Direction.LONG and vol_int % 100 != 0):
             order.status = Status.REJECTED
             msg = f"委托数量不合法: volume={order.volume}"
             self._set_order_status_msg(order, msg)
             self._set_order_extra(order, {"status_msg": msg, "qmt_status": "ORDER_JUNK"})
             self.order_reject_reason[orderid] = "invalid_volume"
             self.order_submit_time.pop(orderid, None)
-            self.gateway.on_order(order)
+            self._emit_order(order)
             self.gateway.write_log(f"拒单：{msg}")
             return order.vt_orderid
 
@@ -251,7 +317,7 @@ class SimulationCounter:
             self._set_order_extra(order, {"status_msg": "持仓不足(用例强制)", "qmt_status": "ORDER_JUNK"})
             self.order_reject_reason[orderid] = "force_sell_no_position"
             self.order_submit_time.pop(orderid, None)
-            self.gateway.on_order(order)
+            self._emit_order(order)
             self.gateway.write_log("拒单：持仓不足(用例强制)")
             return order.vt_orderid
 
@@ -271,7 +337,7 @@ class SimulationCounter:
                             self._set_order_extra(order, {"status_msg": msg, "qmt_status": "ORDER_JUNK", "limit_up": limit_up, "limit_down": limit_down})
                             self.order_reject_reason[orderid] = "price_limit_up"
                             self.order_submit_time.pop(orderid, None)
-                            self.gateway.on_order(order)
+                            self._emit_order(order)
                             self.gateway.write_log(msg)
                             return order.vt_orderid
                         if limit_down > 0 and float(order.price) < limit_down:
@@ -281,7 +347,7 @@ class SimulationCounter:
                             self._set_order_extra(order, {"status_msg": msg, "qmt_status": "ORDER_JUNK", "limit_up": limit_up, "limit_down": limit_down})
                             self.order_reject_reason[orderid] = "price_limit_down"
                             self.order_submit_time.pop(orderid, None)
-                            self.gateway.on_order(order)
+                            self._emit_order(order)
                             self.gateway.write_log(msg)
                             return order.vt_orderid
             except Exception:
@@ -290,16 +356,22 @@ class SimulationCounter:
         if order.direction == Direction.SHORT and self.reject_short_if_no_position:
             pos_key = f"{order.symbol}.{order.exchange.value}.{Direction.LONG.value}"
             pos = self.positions.get(pos_key)
-            pos_volume = float(pos.volume) if pos else 0.0
-            if float(order.volume) > pos_volume:
+            # A 股 T+1：可卖持仓 = 昨仓 - 已冻结。今仓不可卖。
+            yd_volume = float(pos.yd_volume) if pos else 0.0
+            frozen_volume = float(pos.frozen) if pos else 0.0
+            available_yd = max(yd_volume - frozen_volume, 0.0)
+            if float(order.volume) > available_yd:
                 order.status = Status.REJECTED
-                self._set_order_status_msg(order, "持仓不足")
-                self._set_order_extra(order, {"status_msg": "持仓不足", "qmt_status": "ORDER_JUNK"})
+                msg = f"可用持仓不足(T+1): yd={yd_volume} frozen={frozen_volume} volume={order.volume}"
+                self._set_order_status_msg(order, msg)
+                self._set_order_extra(order, {"status_msg": msg, "qmt_status": "ORDER_JUNK"})
                 self.order_reject_reason[orderid] = "insufficient_position"
                 self.order_submit_time.pop(orderid, None)
-                self.gateway.on_order(order)
-                self.gateway.write_log(f"拒单：持仓不足 pos={pos_volume} volume={order.volume}")
+                self._emit_order(order)
+                self.gateway.write_log(f"拒单：{msg}")
                 return order.vt_orderid
+            pos.frozen = frozen_volume + float(order.volume)
+            self.order_position_freeze[orderid] = (pos_key, float(order.volume))
 
         if order.direction == Direction.LONG:
             estimate_price = self._get_effective_price(order.price)
@@ -316,7 +388,7 @@ class SimulationCounter:
                 self._set_order_extra(order, {"status_msg": "260200:可用资金不足", "qmt_status": "ORDER_JUNK"})
                 self.order_reject_reason[orderid] = "insufficient_funds"
                 self.order_submit_time.pop(orderid, None)
-                self.gateway.on_order(order)
+                self._emit_order(order)
                 self.gateway.write_log(
                     f"拒单：可用资金不足，可用={available_cash:.2f}，需冻结={need_frozen:.2f}"
                 )
@@ -326,7 +398,7 @@ class SimulationCounter:
             self.order_frozen_cash[orderid] = need_frozen
             self.push_account()
 
-        self.gateway.on_order(order)
+        self._emit_order(order)
         
         if order.status != Status.REJECTED:
             needs_scheduling = bool(case_tag) or self.fill_delay_ms > 0 or self.reporting_delay_ms > 0
@@ -389,16 +461,17 @@ class SimulationCounter:
             return
 
         self.release_order_frozen_cash(order.orderid)
+        self.release_order_position_freeze(order.orderid)
         order.status = Status.CANCELLED
         self.order_submit_time.pop(order.orderid, None)
-        self.gateway.on_order(order)
+        self._emit_order(order)
 
     def match_order(self, order: OrderData):
         """模拟撮合逻辑"""
         # 简单的立即成交逻辑
         if order.status == Status.SUBMITTING:
             order.status = Status.NOTTRADED
-            self.gateway.on_order(order)
+            self._emit_order(order)
 
         # 拒单模拟
         if self.reject_rate > 0:
@@ -409,7 +482,7 @@ class SimulationCounter:
                 order.status_msg = "模拟随机拒单"
                 self.order_reject_reason[order.orderid] = "random_reject"
                 self.order_submit_time.pop(order.orderid, None)
-                self.gateway.on_order(order)
+                self._emit_order(order)
                 # 拒单后不生成成交，不更新持仓/账户
                 return
 
@@ -448,8 +521,8 @@ class SimulationCounter:
         else:
             order.status = Status.PARTTRADED
             
-        self.gateway.on_order(order)
-        self.gateway.on_trade(trade)
+        self._emit_order(order)
+        self._emit_trade(trade)
 
         try:
             extra = getattr(order, "extra", None)
@@ -474,6 +547,59 @@ class SimulationCounter:
         transfer_fee = trade_amount * self.transfer_fee_rate
         stamp_duty = trade_amount * self.stamp_duty_rate if direction == Direction.SHORT else 0.0
         return commission + transfer_fee + stamp_duty
+
+    def settle_end_of_day(self, settle_date: date) -> None:
+        """日终结算：T+1 持仓结转 + mark-to-market 用 pct_chg 累乘。
+
+        - yd_volume = volume：今日买入的股票从明日起转为可卖
+        - pos.price *= (1 + pct_chg/100)：按当日复权涨跌幅累计 mark price
+          （pct_chg 已含除权，分红/送股/转增/配股的价格效应自动隐含）
+
+        重复调用同一日期是幂等的（last_settle_date 守门）。
+        """
+        if self.last_settle_date is not None and settle_date <= self.last_settle_date:
+            return
+
+        md = getattr(self.gateway, "md", None)
+        get_quote = getattr(md, "get_quote", None) if md else None
+
+        for pos in self.positions.values():
+            if pos.volume <= 0:
+                pos.yd_volume = pos.volume
+                continue
+            if callable(get_quote):
+                quote = get_quote(pos.vt_symbol)
+                if quote is not None and pos.price > 0:
+                    pos.price = pos.price * (1.0 + float(quote.pct_chg) / 100.0)
+            pos.yd_volume = pos.volume
+            self._emit_position(pos)
+
+        self.last_settle_date = settle_date
+        try:
+            self.gateway.write_log(f"日终结算完成: {settle_date}")
+        except Exception:
+            pass
+
+    def release_order_position_freeze(self, orderid: str, traded_amount: float = 0.0) -> None:
+        """释放卖单对持仓的冻结。traded_amount>0 表示成交回填（部分扣减），否则释放剩余。"""
+        entry = self.order_position_freeze.get(orderid)
+        if not entry:
+            return
+        pos_key, frozen_amount = entry
+        pos = self.positions.get(pos_key)
+        if not pos:
+            self.order_position_freeze.pop(orderid, None)
+            return
+        if traded_amount > 0:
+            unfreeze = min(traded_amount, frozen_amount)
+        else:
+            unfreeze = frozen_amount
+        pos.frozen = max(float(pos.frozen) - unfreeze, 0.0)
+        remain = frozen_amount - unfreeze
+        if remain > 0:
+            self.order_position_freeze[orderid] = (pos_key, remain)
+        else:
+            self.order_position_freeze.pop(orderid, None)
 
     def release_order_frozen_cash(
         self,
@@ -510,7 +636,7 @@ class SimulationCounter:
             gateway_name=self.gateway.gateway_name
         )
         self.accounts[account.accountid] = account
-        self.gateway.on_account(account)
+        self._emit_account(account)
 
     def update_position(self, trade: TradeData):
         vt_symbol = f"{trade.symbol}.{trade.exchange.value}"
@@ -530,18 +656,24 @@ class SimulationCounter:
             self.positions[pos_long_id] = pos
             print(f'创建新持仓{pos.vt_positionid}')
         if trade.direction == Direction.LONG:
+            # 买入：增加总持仓，但 yd_volume（可卖昨仓）不变 → T+1 当日不可卖。
             pos.volume += trade.volume
         else:
+            # 卖出：扣减总持仓 + 昨仓 + 持仓冻结。
             pos.volume -= trade.volume
-            
-        # Ensure volume not negative
+            pos.yd_volume = max(float(pos.yd_volume) - float(trade.volume), 0.0)
+            self.release_order_position_freeze(trade.orderid, traded_amount=float(trade.volume))
+
         if pos.volume < 0:
             pos.volume = 0
+        if pos.yd_volume > pos.volume:
+            pos.yd_volume = pos.volume  # 防御：极端撮合中保证不超持
 
-        # TODO 实际是不对的，这里只是模拟测试，看看成交逻辑，实际价格应该实时的价格，这里只提供成交的价格
+        # pos.price 保持"最近成交价"语义（开发者原 TODO 标注），由 settle_end_of_day
+        # 在每日盘后按 pct_chg 累乘做 mark-to-market。
         pos.price = trade.price
-            
-        self.gateway.on_position(pos)
+
+        self._emit_position(pos)
 
     def update_account(self, trade: TradeData):
         trade_amount = trade.price * trade.volume
