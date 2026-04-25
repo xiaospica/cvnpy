@@ -46,6 +46,13 @@ class QmtSimGateway(BaseGateway):
     exchanges = [Exchange.SSE, Exchange.SZSE]
 
     def __init__(self, event_engine: EventEngine, gateway_name: str):
+        # 命名约定强校验：QmtSimGateway 实例的 gateway_name 必须分类为 "sim"
+        # （即以 'QMT_SIM' 开头）。这避免实例化时类与命名错配的隐蔽 bug，
+        # 比如有人写 QmtSimGateway(ee, "QMT") → mlearnweb 会把它误标为实盘。
+        # 详见 vnpy_common/naming.py 模块 docstring。
+        from vnpy_common.naming import validate_gateway_name
+        validate_gateway_name(gateway_name, expected_class="sim")
+
         super().__init__(event_engine, gateway_name)
 
         self.md = QmtSimMd(self)

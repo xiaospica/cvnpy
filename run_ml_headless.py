@@ -156,7 +156,35 @@ ENABLE_WEBTRADER = True
 # ─── 主函数 ────────────────────────────────────────────────────────────
 
 
+def _validate_startup_config() -> None:
+    """启动前对 GATEWAYS / STRATEGIES 做命名约定与一致性校验。
+
+    详见 vnpy_common/naming.py 模块 docstring。
+    任何不合规命名 / 引用不存在的 gateway → 启动直接 raise，避免运行后才发现。
+    """
+    from vnpy_common.naming import validate_gateway_name
+
+    expected_cls = "sim" if USE_GATEWAY_KIND == "QMT_SIM" else "live"
+    gw_names = set()
+    for gw in GATEWAYS:
+        name = gw["name"]
+        validate_gateway_name(name, expected_class=expected_cls)
+        if name in gw_names:
+            raise ValueError(f"GATEWAYS 中 name={name!r} 重复")
+        gw_names.add(name)
+
+    for s in STRATEGIES:
+        gw = s["gateway_name"]
+        if gw not in gw_names:
+            raise ValueError(
+                f"策略 {s['strategy_name']!r} 引用了未注册的 gateway_name={gw!r}。"
+                f"已注册：{sorted(gw_names)}"
+            )
+
+
 def main() -> int:
+    _validate_startup_config()
+
     from vnpy.event import EventEngine
     from vnpy.trader.engine import MainEngine
 
