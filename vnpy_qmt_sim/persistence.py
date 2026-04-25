@@ -110,9 +110,11 @@ CREATE TABLE IF NOT EXISTS sim_trades (
     price      REAL NOT NULL,
     volume     REAL NOT NULL,
     datetime   TEXT NOT NULL,
+    reference  TEXT,
     PRIMARY KEY (account_id, tradeid)
 );
 CREATE INDEX IF NOT EXISTS ix_sim_trades_datetime ON sim_trades(datetime);
+-- ix_sim_trades_reference 由 _migrate() 创建（旧 db 该列后加，CREATE INDEX 必须在 ALTER 之后）
 """
 
 _ACTIVE_ORDER_STATUSES = {Status.SUBMITTING, Status.NOTTRADED, Status.PARTTRADED}
@@ -154,9 +156,20 @@ class QmtSimPersistence:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
         except Exception:
             self._release_process_lock()
             raise
+
+    def _migrate(self) -> None:
+        """schema 演进：旧 db 缺少新增列时按需 ALTER TABLE。幂等。"""
+        existing_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(sim_trades)")}
+        if "reference" not in existing_cols:
+            self._conn.execute("ALTER TABLE sim_trades ADD COLUMN reference TEXT")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_sim_trades_reference "
+            "ON sim_trades(account_id, reference)"
+        )
 
     def _release_process_lock(self) -> None:
         if self._lock_fd >= 0:
@@ -228,16 +241,17 @@ class QmtSimPersistence:
                 ),
             )
 
-    def insert_trade(self, trade: TradeData) -> None:
+    def insert_trade(self, trade: TradeData, reference: str = "") -> None:
         with self._lock:
             self._conn.execute(
                 """INSERT OR IGNORE INTO sim_trades(account_id, tradeid, orderid, vt_symbol, direction,
-                                                    offset, price, volume, datetime)
-                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                                                    offset, price, volume, datetime, reference)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (
                     self.account_id, trade.tradeid, trade.orderid, trade.vt_symbol,
                     trade.direction.value, trade.offset.value,
                     float(trade.price), float(trade.volume), _fmt_dt(trade.datetime),
+                    reference or "",
                 ),
             )
 

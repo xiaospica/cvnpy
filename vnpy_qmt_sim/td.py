@@ -103,8 +103,14 @@ class SimulationCounter:
     def _persist_trade(self, trade: TradeData) -> None:
         if self._persistence is None:
             return
+        # 从对应 order 反查 reference 一并持久化，便于按策略名审计成交流水
+        # （vnpy_ml_strategy 在 reference 里填 "{strategy_name}:{seq}"）
+        reference = ""
+        order = self.orders.get(trade.orderid)
+        if order is not None:
+            reference = getattr(order, "reference", "") or ""
         try:
-            self._persistence.insert_trade(trade)
+            self._persistence.insert_trade(trade, reference=reference)
         except Exception as exc:
             self.gateway.write_log(f"成交持久化失败: {exc}")
 
@@ -288,7 +294,8 @@ class SimulationCounter:
             traded=0,
             status=Status.SUBMITTING,
             datetime=datetime.now(),
-            gateway_name=self.gateway.gateway_name
+            gateway_name=self.gateway.gateway_name,
+            reference=getattr(req, "reference", "") or "",
         )
         self.orders[orderid] = order
         self.order_submit_time[orderid] = order.datetime

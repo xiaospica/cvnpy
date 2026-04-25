@@ -177,3 +177,75 @@ def test_persistence_disabled_counter_still_works(tmp_path: Path) -> None:
     _buy(counter, "000001.SZSE", 200, 11.0)
     pos = counter.positions[f"000001.SZSE.{Direction.LONG.value}"]
     assert pos.volume == 200
+
+
+def test_trades_carry_reference_for_per_strategy_audit(tmp_path: Path) -> None:
+    """订单 reference（含 strategy_name）写入 sim_trades，便于按策略查询。"""
+    counter, p = _make_counter(tmp_path, "ACC_E", 1_000_000.0)
+
+    sym, ex = "000001.SZSE".split(".")
+    req_a = OrderRequest(
+        symbol=sym, exchange=Exchange(ex),
+        direction=Direction.LONG, type=OrderType.LIMIT,
+        offset=Offset.OPEN, price=11.0, volume=200,
+        reference="csi300_lgb:1",
+    )
+    counter.send_order(req_a)
+
+    req_b = OrderRequest(
+        symbol=sym, exchange=Exchange(ex),
+        direction=Direction.LONG, type=OrderType.LIMIT,
+        offset=Offset.OPEN, price=11.0, volume=100,
+        reference="zz500_lgb:7",
+    )
+    counter.send_order(req_b)
+
+    # 按策略名前缀查询成交流水
+    csi_rows = list(p._conn.execute(
+        "SELECT volume FROM sim_trades WHERE account_id=? AND reference LIKE ?",
+        ("ACC_E", "csi300_lgb:%"),
+    ))
+    zz_rows = list(p._conn.execute(
+        "SELECT volume FROM sim_trades WHERE account_id=? AND reference LIKE ?",
+        ("ACC_E", "zz500_lgb:%"),
+    ))
+    assert len(csi_rows) == 1 and csi_rows[0][0] == pytest.approx(200.0)
+    assert len(zz_rows) == 1 and zz_rows[0][0] == pytest.approx(100.0)
+
+
+def test_schema_migration_adds_reference_to_old_db(tmp_path: Path) -> None:
+    """旧 db 缺 reference 列时，QmtSimPersistence 启动用 ALTER TABLE 兼容。"""
+    import sqlite3
+
+    db_path = tmp_path / "sim_LEGACY.db"
+    legacy_conn = sqlite3.connect(db_path)
+    legacy_conn.executescript(
+        """CREATE TABLE sim_trades (
+               account_id TEXT NOT NULL,
+               tradeid    TEXT NOT NULL,
+               orderid    TEXT NOT NULL,
+               vt_symbol  TEXT NOT NULL,
+               direction  TEXT NOT NULL,
+               offset     TEXT NOT NULL,
+               price      REAL NOT NULL,
+               volume     REAL NOT NULL,
+               datetime   TEXT NOT NULL,
+               PRIMARY KEY (account_id, tradeid)
+           );
+           INSERT INTO sim_trades VALUES('LEGACY','t1','o1','000001.SZSE','多','开仓',11.0,200,'2026-04-22T15:00:00');"""
+    )
+    legacy_conn.commit()
+    legacy_conn.close()
+
+    p = QmtSimPersistence(account_id="LEGACY", root=tmp_path)
+    try:
+        cols = {r[1] for r in p._conn.execute("PRAGMA table_info(sim_trades)")}
+        assert "reference" in cols
+        # 旧记录的 reference 列为 NULL，新记录可正常写入
+        old = p._conn.execute(
+            "SELECT volume, reference FROM sim_trades WHERE tradeid='t1'"
+        ).fetchone()
+        assert old[0] == 200.0
+        assert old[1] is None
+    finally:
+        p.close()
