@@ -236,17 +236,26 @@ class MLEngine(BaseEngine):
         for name in list(self.strategies.keys()):
             self.stop_strategy(name)
 
-    def run_pipeline_now(self, strategy_name: str) -> bool:
+    def run_pipeline_now(self, strategy_name: str, as_of_date=None) -> bool:
         """UI 手动触发一次日频 pipeline (立即在 APS 后台线程跑).
 
         ``scheduler.run_job_now`` 同步阻塞直到 job 完成 (subprocess 推理 ~60-90s).
         run_daily_pipeline 内部已用 try/finally 保证发 put_strategy_event,
         这里再显式 put 一次作为双保险 (若 template 是旧版则保兜底).
+
+        Phase 4 回放支持
+        ----------------
+        ``as_of_date`` (datetime.date) 给定时透传给 ``run_daily_pipeline``，
+        让推理子进程命令行 ``--live-end`` 用历史日期，回放控制器逐日调用即可。
+        默认 None → 走 ``date.today()``，保持实盘 trigger_time 行为不变。
         """
         if strategy_name not in self.strategies:
             return False
         try:
-            self.scheduler.run_job_now(strategy_name)
+            kwargs = {}
+            if as_of_date is not None:
+                kwargs["as_of_date"] = as_of_date
+            self.scheduler.run_job_now(strategy_name, **kwargs)
             self.put_strategy_event(self.strategies[strategy_name])
             return True
         except Exception as exc:

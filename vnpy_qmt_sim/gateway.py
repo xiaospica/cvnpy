@@ -62,6 +62,9 @@ class QmtSimGateway(BaseGateway):
         self.connected = False
         # 上次 timer tick 看到的日期，用于检测自然日切换触发 settle_end_of_day
         self._last_seen_date = None
+        # Phase 4 回放支持：回放期间禁用自动 settle，由回放控制器按"逻辑日"
+        # 显式调 td.counter.settle_end_of_day(day)。回放完成后恢复为 True。
+        self._auto_settle_enabled = True
 
     def connect(self, setting: dict):
         """连接行情与交易模块，并注册超时检查定时任务。"""
@@ -193,10 +196,13 @@ class QmtSimGateway(BaseGateway):
         if self._last_seen_date is None:
             self._last_seen_date = today
         elif today > self._last_seen_date:
-            try:
-                self.td.counter.settle_end_of_day(self._last_seen_date)
-            except Exception as exc:
-                self.write_log(f"日终结算失败: {exc}")
+            # Phase 4：回放期间自动 settle 被禁用，由回放控制器按"逻辑日"显式调
+            # td.counter.settle_end_of_day(day)，避免按真实自然日污染回放状态。
+            if self._auto_settle_enabled:
+                try:
+                    self.td.counter.settle_end_of_day(self._last_seen_date)
+                except Exception as exc:
+                    self.write_log(f"日终结算失败: {exc}")
             self._last_seen_date = today
 
         try:
@@ -206,6 +212,18 @@ class QmtSimGateway(BaseGateway):
 
         if self._timer_count % self._order_timeout_interval == 0:
             self.check_order_timeout()
+
+    def enable_auto_settle(self, enabled: bool) -> None:
+        """Phase 4：开关 timer 自动 settle_end_of_day。
+
+        回放控制器在回放开始时调 ``enable_auto_settle(False)``，期间 timer 跨真实
+        自然日不再触发 settle；回放控制器逐日显式调 ``td.counter.settle_end_of_day(day)``。
+        回放完成后调 ``enable_auto_settle(True)`` 恢复。
+
+        按 gateway 实例隔离：禁用某个 sim gateway 不影响其他 gateway 实例（包括
+        实盘 QMT gateway 或其他沙盒）。
+        """
+        self._auto_settle_enabled = bool(enabled)
 
     def check_order_timeout(self) -> None:
         """扫描超时活动订单并执行撤单与冻结释放。"""

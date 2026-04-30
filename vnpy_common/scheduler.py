@@ -59,12 +59,12 @@ class DailyTimeTaskScheduler:
     ) -> None:
         hour, minute = _parse_hhmm(time_str)
 
-        def wrapped() -> None:
+        def wrapped(**kwargs) -> None:
             from datetime import datetime as _dt
             run_date = _dt.now().strftime("%Y-%m-%d")
             try:
-                logger.info(f"[scheduler] start job({name}) at {run_date} {time_str}")
-                job_func()
+                logger.info(f"[scheduler] start job({name}) at {run_date} {time_str} kwargs={kwargs}")
+                job_func(**kwargs)
                 logger.info(f"[scheduler] job done({name})")
             except Exception as e:
                 logger.exception(f"[scheduler] job failed({name}): {e}")
@@ -91,9 +91,33 @@ class DailyTimeTaskScheduler:
                 raise KeyError(f"任务不存在: {name}")
             self._scheduler.reschedule_job(name, trigger=trigger)
 
-    def run_job_now(self, name: str) -> None:
+    def run_job_now(self, name: str, **kwargs) -> None:
+        """立即同步执行已注册 job，透传 kwargs 给 job_func。
+
+        实盘 cron 触发：wrapped() 无 kwargs → job_func() 走 today。
+        回放手动触发：wrapped(as_of_date=day) → job_func(as_of_date=day) 走指定逻辑日。
+        """
         with self._lock:
             func = self._job_wrapped_funcs.get(name)
         if func is None:
             raise KeyError(f"任务不存在: {name}")
-        func()
+        func(**kwargs)
+
+    def pause_job(self, name: str) -> None:
+        """暂停指定 cron job（按 job name 精确隔离，不影响其他 job）。
+
+        Phase 4 回放期间用：仅暂停本策略自己的 trigger_time，避免回放与
+        实时推理并发起两个推理子进程。回放完成后调 resume_job 恢复。
+        """
+        with self._lock:
+            self._scheduler.pause_job(name)
+
+    def resume_job(self, name: str) -> None:
+        with self._lock:
+            self._scheduler.resume_job(name)
+
+    def get_job_next_run_time(self, name: str):
+        """返回 job 下次触发时间。暂停时返回 None。供测试断言用。"""
+        with self._lock:
+            job = self._scheduler.get_job(name)
+        return job.next_run_time if job else None

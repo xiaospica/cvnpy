@@ -34,8 +34,11 @@ Pipeline 概览(run_daily_pipeline, APS 后台线程触发):
 from __future__ import annotations
 
 from abc import ABC
-from datetime import date
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime, timedelta
+import json
+import threading
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -86,6 +89,11 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         "monitor_window_days",
         "enable_trading",      # 干跑开关
         "subprocess_timeout_s",
+        # Phase 4 回放支持（仅 sim 模式生效，实盘 gateway 自动跳过）
+        "enable_replay",                  # 总开关，默认 True
+        "replay_start_date",              # 可选 override，空则从 bundle task.json test[0] 推导
+        "replay_end_date",                # 可选 override，空则取 today-1
+        "replay_skip_existing",           # 跳过已写过 diagnostics.json 的日期（重启续跑友好）
     ]
     variables: List[str] = [
         "last_run_date",
@@ -97,6 +105,10 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         "last_status",
         "last_duration_ms",
         "last_model_run_id",
+        # Phase 4 回放运行时状态
+        "replay_status",                  # idle | running | completed | error | skipped_live
+        "replay_progress",                # "23/80"
+        "replay_last_done",               # 最后一个完成的逻辑日 ISO
     ]
 
     # Parameter defaults
@@ -115,6 +127,12 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     enable_trading: bool = False
     subprocess_timeout_s: int = 180
 
+    # Phase 4 回放参数
+    enable_replay: bool = True
+    replay_start_date: str = ""
+    replay_end_date: str = ""
+    replay_skip_existing: bool = True
+
     # Runtime state
     last_run_date: str = ""
     last_stage: str = ""
@@ -125,6 +143,11 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     last_status: str = ""
     last_duration_ms: int = 0
     last_model_run_id: str = ""
+
+    # Phase 4 回放运行时状态
+    replay_status: str = "idle"
+    replay_progress: str = ""
+    replay_last_done: str = ""
 
     # vnpy 生命周期 flag (模仿 SignalTemplatePlus 的约定)
     inited: bool = False
@@ -300,15 +323,22 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     # 主入口 - 被 DailyTimeTaskScheduler 在后台线程调用
     # -----------------------------------------------------------------
 
-    def run_daily_pipeline(self) -> None:
+    def run_daily_pipeline(self, as_of_date=None) -> None:
         """完整日频 pipeline — 主进程编排, 推理在子进程, 下单在主进程.
+
+        Parameters
+        ----------
+        as_of_date : Optional[datetime.date]
+            Phase 4 回放支持。给定时强制使用该日期作为 ``today``（推理子进程
+            ``--live-end`` 也走该日期），让回放循环可以"假装今天是 X 日"逐日跑过历史。
+            默认 None → ``date.today()``，保持实盘 trigger_time / 单日手动触发行为不变。
 
         try/finally 包整个函数体: 任意 return 路径 (non_trading_day/predict 异常/
         failed/empty/正常完成) 都会触发一次 ``put_strategy_event``, 让 UI variables
         表刷新最新 last_status/last_n_pred/last_error 等. 否则 UI 永远停在初始值.
         """
         try:
-            today = date.today()
+            today = as_of_date if as_of_date is not None else date.today()
             self.last_run_date = str(today)
             self.last_error = ""
             self.last_stage = ""
@@ -518,8 +548,222 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     def on_start(self) -> None:
         self.trading = True
         self.write_log("on_start")
+        # Phase 4：仅 sim 模式策略启动后台线程跑回放（不阻塞 on_start 返回）
+        try:
+            self._start_replay_if_needed()
+        except Exception as exc:
+            # 回放启动失败不影响策略实时模式；记日志即可
+            self.write_log(f"_start_replay_if_needed failed: {exc}")
 
     def on_stop(self) -> None:
         self.trading = False
         self.signal_engine.unregister_daily_job(strategy_name=self.strategy_name)
         self.write_log("on_stop")
+
+    # -----------------------------------------------------------------
+    # Phase 4: 模拟模式加速回放
+    # -----------------------------------------------------------------
+    # 详见 plan 文档 Phase 4 章节。核心思路：
+    #   1. 仅 sim 模式（gateway 名以 "QMT_SIM" 开头）启用，实盘自动跳过
+    #   2. 起止日自动从 bundle task.json 推导，零配置可用
+    #   3. 后台线程跑 + 暂停本策略 cron + 禁本 gateway 自动 settle，
+    #      避免与 trigger_time 实时任务并发或被 timer 自然日切换污染
+    #   4. 用 output_root/{name}/{day_str}/diagnostics.json 做 idempotency
+
+    def _resolve_replay_window(self) -> Optional[Tuple[date, date]]:
+        """从 setting + bundle task.json 推导回放起止日期。返回 None 表示跳过。"""
+        if not self.enable_replay:
+            return None
+
+        # 起点：setting override > bundle task.json test[0]
+        if self.replay_start_date:
+            start = datetime.strptime(self.replay_start_date, "%Y-%m-%d").date()
+        else:
+            task_path = Path(self.bundle_dir) / "task.json"
+            try:
+                task_json = json.loads(task_path.read_text(encoding="utf-8"))
+                test_segment = task_json["dataset"]["kwargs"]["segments"]["test"]
+                # tushare segment 可能是 ISO 字符串或 [yyyy, mm, dd] 列表，统一转 date
+                start_raw = test_segment[0]
+                if isinstance(start_raw, str):
+                    start = datetime.strptime(start_raw[:10], "%Y-%m-%d").date()
+                elif isinstance(start_raw, (list, tuple)) and len(start_raw) == 3:
+                    start = date(*start_raw)
+                else:
+                    raise ValueError(f"无法解析 task.json test[0]={start_raw!r}")
+            except Exception as exc:
+                self.write_log(f"读 bundle task.json 推导 replay_start 失败: {exc}")
+                return None
+
+        # 终点：setting override > today - 1
+        if self.replay_end_date:
+            end = datetime.strptime(self.replay_end_date, "%Y-%m-%d").date()
+        else:
+            end = date.today() - timedelta(days=1)
+
+        if start > end:
+            # 已经追上实时（如新部署的 bundle 即时启动），无需回放
+            return None
+        return start, end
+
+    def _start_replay_if_needed(self) -> None:
+        """on_start 末尾调用。仅 sim 模式启用回放，实盘自动跳过。"""
+        from vnpy_common.naming import classify_gateway
+
+        if classify_gateway(self.gateway) != "sim":
+            self.replay_status = "skipped_live"
+            self.write_log(
+                f"gateway={self.gateway!r} 非模拟模式，跳过回放，"
+                f"直接进入每日 trigger_time 实时推理"
+            )
+            return
+
+        # 显式 override 校验（隐式推导永远不会触发此 case）
+        if self.replay_start_date:
+            try:
+                self._validate_explicit_replay_start()
+            except ValueError as exc:
+                self.replay_status = "error"
+                self.last_error = str(exc)
+                self.write_log(f"回放参数校验失败: {exc}")
+                return
+
+        window = self._resolve_replay_window()
+        if window is None:
+            self.replay_status = "skipped_live"
+            self.write_log("回放窗口为空（已追上实时或 enable_replay=False），跳过")
+            return
+
+        self.replay_status = "running"
+        self.write_log(
+            f"[replay] resolved window: {window[0]} ~ {window[1]} "
+            f"(将自然日 {(window[1] - window[0]).days + 1}d 内逐交易日回放)"
+        )
+        threading.Thread(
+            target=self._run_replay_loop,
+            args=window,
+            name=f"replay-{self.strategy_name}",
+            daemon=True,
+        ).start()
+
+    def _validate_explicit_replay_start(self) -> None:
+        """显式 replay_start_date 校验：必须 ≥ bundle test_start，防历史泄漏。"""
+        explicit = datetime.strptime(self.replay_start_date, "%Y-%m-%d").date()
+        task_path = Path(self.bundle_dir) / "task.json"
+        task_json = json.loads(task_path.read_text(encoding="utf-8"))
+        test_segment = task_json["dataset"]["kwargs"]["segments"]["test"]
+        start_raw = test_segment[0]
+        if isinstance(start_raw, str):
+            test_start = datetime.strptime(start_raw[:10], "%Y-%m-%d").date()
+        else:
+            test_start = date(*start_raw)
+        if explicit < test_start:
+            raise ValueError(
+                f"显式 replay_start_date={self.replay_start_date} 早于 bundle "
+                f"test_start={test_start}，会发生历史数据泄漏（验证集训练数据被用作回放）。"
+            )
+
+    def _run_replay_loop(self, start: date, end: date) -> None:
+        """后台线程跑回放循环。详见 plan 文档 Phase 4 边界控制。"""
+        scheduler = getattr(self.signal_engine, "scheduler", None)
+        gateway = self._get_own_gateway()
+
+        # 1. 暂停本策略 APScheduler cron（仅按 strategy_name 隔离，不影响其他策略）
+        if scheduler is not None:
+            try:
+                scheduler.pause_job(self.strategy_name)
+                self.write_log(f"[replay] 暂停 cron job ({self.strategy_name})")
+            except Exception as exc:
+                self.write_log(f"[replay] pause_job 失败 (continuing): {exc}")
+
+        # 2. 禁用本 gateway 自动 settle（仅按 gateway 实例隔离）
+        if gateway is not None:
+            try:
+                gateway.enable_auto_settle(False)
+                self.write_log(f"[replay] 禁用 gateway={self.gateway} 自动 settle")
+            except Exception as exc:
+                self.write_log(f"[replay] enable_auto_settle(False) 失败: {exc}")
+
+        try:
+            self._replay_loop_body(start, end, gateway)
+            self.replay_status = "completed"
+            self.write_log("[replay] 全部交易日完成，进入实时模式")
+        except Exception as exc:
+            self.replay_status = "error"
+            self.last_error = f"replay_loop: {type(exc).__name__}: {exc}"
+            self.write_log(f"[replay] 异常退出: {self.last_error}")
+        finally:
+            # 4. 恢复 gateway 自动 settle
+            if gateway is not None:
+                try:
+                    gateway.enable_auto_settle(True)
+                except Exception:
+                    pass
+            # 5. 恢复本策略 cron
+            if scheduler is not None:
+                try:
+                    scheduler.resume_job(self.strategy_name)
+                    self.write_log(f"[replay] 恢复 cron job ({self.strategy_name})")
+                except Exception as exc:
+                    self.write_log(f"[replay] resume_job 失败: {exc}")
+
+    def _replay_loop_body(self, start: date, end: date, gateway: Any) -> None:
+        """实际逐交易日循环。提取出来便于 try/finally 恢复 cron。"""
+        # 生成交易日序列（依赖现有 _is_trade_day 方法）
+        days: List[date] = []
+        cursor = start
+        while cursor <= end:
+            if self._is_trade_day(cursor):
+                days.append(cursor)
+            cursor += timedelta(days=1)
+
+        total = len(days)
+        if total == 0:
+            self.write_log(f"[replay] 起止 {start} ~ {end} 内无交易日，跳过")
+            return
+
+        for i, day in enumerate(days):
+            day_str = day.strftime("%Y%m%d")
+            day_iso = day.strftime("%Y-%m-%d")
+
+            # 续跑幂等：已有完成的 diagnostics.json 跳过推理（仍需 settle 让 yd_volume 演进）
+            skip = False
+            if self.replay_skip_existing:
+                diag_path = Path(self.output_root) / self.strategy_name / day_str / "diagnostics.json"
+                if diag_path.exists():
+                    try:
+                        diag = json.loads(diag_path.read_text(encoding="utf-8"))
+                        if diag.get("status") in ("ok", "completed"):
+                            skip = True
+                    except Exception:
+                        pass
+
+            if skip:
+                self.write_log(f"[replay] day {i+1}/{total} {day_iso}: skip (existing diagnostics)")
+            else:
+                self.write_log(f"[replay] day {i+1}/{total} {day_iso}: pipeline start")
+                ok = self.signal_engine.run_pipeline_now(self.strategy_name, as_of_date=day)
+                if not ok:
+                    self.write_log(f"[replay] day {i+1}/{total} {day_iso}: pipeline failed (continuing)")
+                else:
+                    self.write_log(f"[replay] day {i+1}/{total} {day_iso}: pipeline ok")
+
+            # 显式 settle_end_of_day(逻辑日)：替代被禁用的 gateway 自动 settle
+            if gateway is not None:
+                try:
+                    gateway.td.counter.settle_end_of_day(day)
+                except Exception as exc:
+                    self.write_log(f"[replay] day {day_iso} settle 失败: {exc}")
+
+            self.replay_progress = f"{i+1}/{total}"
+            self.replay_last_done = day_iso
+
+    def _get_own_gateway(self) -> Optional[Any]:
+        """从 main_engine 拿本策略的 gateway 实例（用于回放 enable_auto_settle 控制）。"""
+        try:
+            main_engine = getattr(self.signal_engine, "main_engine", None)
+            if main_engine is None:
+                return None
+            return main_engine.get_gateway(self.gateway)
+        except Exception:
+            return None
