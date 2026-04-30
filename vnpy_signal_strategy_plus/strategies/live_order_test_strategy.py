@@ -4,10 +4,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from vnpy.trader.constant import Direction, Offset, OrderType, Status
+from vnpy.trader.utility import round_to
 from vnpy_signal_strategy_plus.utils import convert_code_to_vnpy_type
 
 from vnpy_signal_strategy_plus.base import CHINA_TZ, EngineType
 from vnpy_signal_strategy_plus.mysql_signal_strategy import MySQLSignalStrategyPlus, Stock
+from vnpy_signal_strategy_plus.template import SignalTemplatePlus
 
 
 class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
@@ -18,7 +20,10 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
     resubmit_limit: int = 2
     resubmit_interval: int = 2
 
-    test_symbol: str = "510300.SH"
+    # 默认使用黄金 ETF（518880.SH），二级市场 T+0，可在同一交易日内完整跑通 buy → sell 链路。
+    # 若要换其它 T+0 标的可选：513100.SH（纳指 ETF）、513050.SH（中概互联）、159980.SZ（有色商品 ETF）等。
+    # 普通股票 ETF（如 510300.SH）是 T+1，sell_smoke / sell_passive 当日会被"无可卖持仓"拦截。
+    test_symbol: str = "518880.SH"
     test_pct: float = 0.01
 
     def __init__(self, signal_engine: Any):
@@ -119,16 +124,18 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
             self.write_log(f"[LIVE_TEST] 清仓单标的完成: {vt_symbol} traded={traded} target={target}")
 
     def _finalize_clear_positions(self) -> None:
-        symbols = set(self._clear_target.keys())
+        """
+        基于自身累计的清仓成交量(_clear_traded) vs 目标量(_clear_target) 判断完整性。
+        说明：不再回查 main_engine.get_all_positions()，因为成交回报与持仓查询在
+        QMT 侧是异步刷新的，回报瞬间持仓快照仍可能是旧值，导致误报"清仓未完成"。
+        """
+        symbols = list(self._clear_target.keys())
         remain_parts: list[str] = []
-        for pos in self.signal_engine.main_engine.get_all_positions():
-            if pos.vt_symbol not in symbols:
-                continue
-            expected_gateway = self.get_gateway_name(pos.vt_symbol)
-            if expected_gateway and expected_gateway != pos.gateway_name:
-                continue
-            if pos.volume > 0:
-                remain_parts.append(f"{pos.vt_symbol} volume={pos.volume} frozen={pos.frozen}")
+        for vt_symbol in symbols:
+            target = float(self._clear_target.get(vt_symbol, 0.0))
+            traded = float(self._clear_traded.get(vt_symbol, 0.0))
+            if traded < target:
+                remain_parts.append(f"{vt_symbol} traded={traded}/{target}")
 
         if not remain_parts:
             self.write_log(f"[LIVE_TEST] 清仓完成 symbols={len(symbols)}")
@@ -176,6 +183,8 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
     def clear_all_positions(self) -> None:
         """
         一键清仓
+        说明：available = pos.volume - pos.frozen，依赖网关正确填充 frozen 字段
+        （A 股 T+1 当日买入冻结、风险锁定等都计入 frozen）。available<=0 时跳过下单。
         """
         self.write_log("开始执行一键清仓")
         self._clear_active = False
@@ -185,42 +194,60 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
         self._clear_done_symbols = set()
         positions = self.signal_engine.main_engine.get_all_positions()
         count = 0
+        skipped_frozen = 0
         for pos in positions:
-            available = pos.volume - pos.frozen
-            if available > 0 and pos.direction == Direction.LONG:
-                expected_gateway = self.get_gateway_name(pos.vt_symbol)
-                if not expected_gateway or expected_gateway != pos.gateway_name:
-                    continue
+            if pos.direction != Direction.LONG:
+                continue
 
-                tick = self.get_active_tick(pos.vt_symbol)
-                if tick and tick.limit_down:
-                    price = float(tick.limit_down)
-                else:
-                    price = self.get_order_price(pos.vt_symbol, Direction.SHORT, fallback_price=0.0)
-                
-                order_type = OrderType.LIMIT if price > 0 else OrderType.MARKET
-                
-                vt_orderids = self.send_order(
-                    vt_symbol=pos.vt_symbol,
-                    direction=Direction.SHORT,
-                    offset=Offset.CLOSE,
-                    price=float(price),
-                    volume=float(available),
-                    order_type=order_type,
+            expected_gateway = self.get_gateway_name(pos.vt_symbol)
+            if not expected_gateway or expected_gateway != pos.gateway_name:
+                continue
+
+            available = int(pos.volume) - int(getattr(pos, "frozen", 0) or 0)
+
+            if pos.volume <= 0:
+                continue
+
+            if available <= 0:
+                # 有持仓但全部不可卖（典型场景：A 股 T+1 当日买入冻结）
+                self.write_log(
+                    f"[LIVE_TEST] 跳过清仓(无可卖部分): {pos.vt_symbol} volume={pos.volume} frozen={pos.frozen} 可用=0"
                 )
-                if vt_orderids:
-                    self.write_log(f"[LIVE_TEST] 清仓下发卖单成功: {pos.vt_symbol} 数量: {available}")
-                    count += 1
-                    self._clear_target[pos.vt_symbol] = float(self._clear_target.get(pos.vt_symbol, 0.0)) + float(available)
-                    for vt_orderid in vt_orderids:
-                        self._clear_orders[str(vt_orderid)] = {"vt_symbol": pos.vt_symbol, "target": float(available), "done": False}
-                else:
-                    self.write_log(f"[LIVE_TEST] 清仓下发卖单失败: {pos.vt_symbol}")
+                skipped_frozen += 1
+                continue
+
+            tick = self.get_active_tick(pos.vt_symbol)
+            if tick and tick.limit_down:
+                price = float(tick.limit_down)
             else:
-                self.write_log(f'可用数量异常available: {pos.vt_symbol, available}')
-        
+                price = self.get_order_price(pos.vt_symbol, Direction.SHORT, fallback_price=0.0)
+
+            order_type = OrderType.LIMIT if price > 0 else OrderType.MARKET
+
+            vt_orderids = self.send_order(
+                vt_symbol=pos.vt_symbol,
+                direction=Direction.SHORT,
+                offset=Offset.CLOSE,
+                price=float(price),
+                volume=float(available),
+                order_type=order_type,
+            )
+            if vt_orderids:
+                self.write_log(
+                    f"[LIVE_TEST] 清仓下发卖单成功: {pos.vt_symbol} 数量: {available} (持仓{pos.volume}/冻结{pos.frozen})"
+                )
+                count += 1
+                self._clear_target[pos.vt_symbol] = float(self._clear_target.get(pos.vt_symbol, 0.0)) + float(available)
+                for vt_orderid in vt_orderids:
+                    self._clear_orders[str(vt_orderid)] = {"vt_symbol": pos.vt_symbol, "target": float(available), "done": False}
+            else:
+                self.write_log(f"[LIVE_TEST] 清仓下发卖单失败: {pos.vt_symbol}")
+
         if count == 0:
-            self.write_log("当前无可用持仓，无需清仓")
+            if skipped_frozen > 0:
+                self.write_log(f"当前持仓全部不可卖(T+1/冻结)，无可清仓部分 skipped={skipped_frozen}")
+            else:
+                self.write_log("当前无可用持仓，无需清仓")
             return
 
         self._clear_active = True
@@ -313,13 +340,27 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
 
         if "reject_up" in signal_type:
             if tick.limit_up:
-                # 确保测试价格大幅度高于涨停价，以触发柜台的越界拒单
-                return float(tick.limit_up) * 1.1
+                # 确保测试价格高于涨停价，以触发柜台的越界拒单。
+                # 注意：必须按 pricetick 对齐，否则会先因"最小价差校验"被拒，
+                # 测不到真正的"价格越界"路径。
+                limit_up = float(tick.limit_up)
+                if pricetick:
+                    target = round_to(limit_up * 1.05, float(pricetick))
+                    if target <= limit_up:
+                        target = limit_up + float(pricetick)
+                    return target
+                return limit_up + 0.05
 
         if "reject_down" in signal_type:
             if tick.limit_down:
-                # 确保测试价格大幅度低于跌停价，以触发柜台的越界拒单
-                return float(tick.limit_down) * 0.9
+                # 确保测试价格低于跌停价，以触发柜台的越界拒单（同样需要按 pricetick 对齐）
+                limit_down = float(tick.limit_down)
+                if pricetick:
+                    target = round_to(limit_down * 0.95, float(pricetick))
+                    if target >= limit_down:
+                        target = max(float(pricetick), limit_down - float(pricetick))
+                    return target
+                return max(0.01, limit_down - 0.05)
 
         if direction == Direction.LONG:
             if "deep" in signal_type:
@@ -405,7 +446,10 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
                 order_type = OrderType.MARKET
                 price = 0
 
-            vt_orderids = self.send_order(
+            # 绕过 MySQLSignalStrategyPlus.send_order 的"数量修正/拦截"，
+            # 强制把 1 股下到柜台，验证柜台拒单回报与日志口径
+            vt_orderids = SignalTemplatePlus.send_order(
+                self,
                 vt_symbol=vt_symbol,
                 direction=Direction.LONG,
                 offset=Offset.OPEN,
@@ -414,7 +458,7 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
                 order_type=order_type,
             )
             if vt_orderids:
-                self.write_log(f"[LIVE_TEST] invalid_volume 已下发买单: {vt_orderids}")
+                self.write_log(f"[LIVE_TEST] invalid_volume 已下发买单(绕过本地数量校验): {vt_orderids}")
             else:
                 self.write_log("[LIVE_TEST] invalid_volume 下单失败")
             return True
@@ -429,85 +473,85 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
             # 用例目的：验证信号写库->策略轮询->下单的最短链路（冒烟）。
             # 触发原理：普通 buy 信号，不注入特殊 case，网关按默认逻辑处理，这里使用aggressive定价更容易成交。
             # 预期现象：日志出现“收到信号/Send new order/下单成功”，并能看到 order/trade/position 更新。
-            {"code": sym, "pct": pct, "type": "buy_smoke aggressive", "price": 4.497, "label": f"buy_smoke_{run_id}"},
+            {"code": sym, "pct": pct, "type": "buy_smoke aggressive", "price": 6.500, "label": f"buy_smoke_{run_id}"},
 
             # 用例目的：验证卖出链路（含 Offset=CLOSE 方向解析、持仓不足拦截等基础行为）。
             # 触发原理：普通 sell 信号，若无持仓则会被策略侧拦截（用于确认策略的保护逻辑存在），这里使用aggressive定价更容易成交。
             # 预期现象：若无持仓，日志会提示“未找到持仓”；若有持仓，能正常下发卖单并成交。
-            {"code": sym, "pct": pct, "type": "sell_smoke aggressive", "price": 4.497, "label": f"sell_smoke_{run_id}"},
+            {"code": sym, "pct": pct, "type": "sell_smoke aggressive", "price": 6.500, "label": f"sell_smoke_{run_id}"},
         ]
 
         basic = [
             # 用例目的：验证被动盘口价下单（更贴近实盘）。
             # 触发原理：type 中包含 passive，测试策略会返回买一/卖一作为委托价。
             # 预期现象：订单更容易成交或快速进入 NOTTRADED/ALLTRADED，日志可见定价输出。
-            {"code": sym, "pct": pct, "type": "buy passive", "price": 4.497, "label": f"buy_passive_{run_id}"},
+            {"code": sym, "pct": pct, "type": "buy passive", "price": 6.500, "label": f"buy_passive_{run_id}"},
 
             # 用例目的：验证卖出被动价下单路径。
             # 触发原理：type 中包含 passive，卖单使用卖一价格。
             # 预期现象：若有持仓则成交/撤单等回报正常；无持仓则被策略侧拦截（保护行为）。
-            {"code": sym, "pct": pct, "type": "sell passive", "price": 4.497, "label": f"sell_passive_{run_id}"},
+            {"code": sym, "pct": pct, "type": "sell passive", "price": 6.500, "label": f"sell_passive_{run_id}"},
 
             # 用例目的：验证“价格越界导致拒单（模拟涨停上方报价）”的处理。
             # 触发原理：type 中包含 reject_up，测试策略会把价格设置到涨停价之上（若 tick 有 limit_up）。
             # 预期现象：网关返回 REJECTED；策略侧不应进入资金不足的延时重挂分支。
-            {"code": sym, "pct": pct, "type": "buy reject_up", "price": 4.497, "label": f"buy_reject_up_{run_id}"},
+            {"code": sym, "pct": pct, "type": "buy reject_up", "price": 6.500, "label": f"buy_reject_up_{run_id}"},
 
             # 用例目的：验证“长时间不成交 -> 超时撤单 -> 自动重挂”的关键实盘链路。
             # 触发原理：type 中包含 no_fill_60s，策略会把该 token 作为 case 标签注入 OrderRequest.reference；
             #          注意：实盘中无法直接模拟 no_fill_60s，因为实盘订单是否成交取决于市场盘口，无法强制不成交，实盘中主要依赖挂单价格偏离盘口来增加不成交概率。
             #          QMT_SIM 模拟网关根据 case 保持 NOTTRADED，直到超时撤单触发 CANCELLED，策略侧触发撤单重挂。
             # 预期现象：出现“订单超时自动撤单”->“触发撤单重挂”->“重挂已提交”。
-            {"code": sym, "pct": pct, "type": "buy no_fill_60s passive", "price": 4.497, "label": f"buy_no_fill_60s_{run_id}"},
+            {"code": sym, "pct": pct, "type": "buy no_fill_60s passive", "price": 6.500, "label": f"buy_no_fill_60s_{run_id}"},
 
             # 用例目的：验证“非法委托数量”导致柜台拒单。
             # 触发原理：type 中包含 invalid_volume，策略强制下发非100整数倍（例如1股）订单。
             # 预期现象：柜台或网关返回 REJECTED（如“最高委托数量合法性校验失败”）。
-            {"code": sym, "pct": pct, "type": "buy invalid_volume", "price": 4.497, "label": f"buy_invalid_volume_{run_id}"},
+            {"code": sym, "pct": pct, "type": "buy invalid_volume", "price": 6.500, "label": f"buy_invalid_volume_{run_id}"},
 
             # 用例目的：验证“卖出无持仓 -> 网关拒单（持仓不足）”的异常路径与策略处理。
             # 触发原理：type 中包含 force_sell_no_position，测试策略绕过父类持仓校验，强制下发卖单；
             #          注意：实盘中如果在策略层被拦截，就不会下发到网关，这里通过强制下发来测试网关的拒单行为。
             # 预期现象：日志出现“REJECTED 持仓不足”，且策略不应进入资金不足的延时重挂分支。
-            {"code": sym, "pct": pct, "type": "sell force_sell_no_position", "price": 4.497, "label": f"sell_force_no_pos_{run_id}"},
+            {"code": sym, "pct": pct, "type": "sell force_sell_no_position", "price": 6.500, "label": f"sell_force_no_pos_{run_id}"},
         ]
 
         full = [
             # 用例目的：验证被动价全量链路（用于回归对比）。
             # 触发原理：passive 定价，不注入 case。
             # 预期现象：下单/成交/持仓更新正常。
-            {"code": sym, "pct": pct, "type": "buy passive", "price": 4.497, "label": f"full_buy_passive_{run_id}"},
+            {"code": sym, "pct": pct, "type": "buy passive", "price": 6.500, "label": f"full_buy_passive_{run_id}"},
 
             # 用例目的：验证深度价下单在盘口变化时更容易“不成交->撤单重挂”的链路。
             # 触发原理：deep 定价，不注入 case；若盘口变化快可能进入 NOTTRADED 并被超时撤单。
             # 预期现象：可能出现撤单重挂日志（依赖超时参数与撮合参数）。
-            {"code": sym, "pct": pct, "type": "buy deep", "price": 4.497, "label": f"full_buy_deep_{run_id}"},
+            {"code": sym, "pct": pct, "type": "buy deep", "price": 6.500, "label": f"full_buy_deep_{run_id}"},
 
             # 用例目的：验证“部分成交后长时间不继续成交 -> 超时撤单 -> 仅重挂剩余数量”。
             # 触发原理：type 中包含 partial_then_stall，QMT_SIM 在上报后只成交一部分并保持挂起，直到超时撤单。
             # 预期现象：先出现 PARTTRADED，随后出现“订单超时自动撤单”，策略重挂日志中“剩余量=原量-已成交”。
-            {"code": sym, "pct": pct, "type": "buy partial_then_stall_5s", "price": 4.497, "label": f"buy_partial_then_stall_{run_id}"},
+            {"code": sym, "pct": pct, "type": "buy partial_then_stall_5s", "price": 6.500, "label": f"buy_partial_then_stall_{run_id}"},
 
             # 用例目的：验证“延迟成交”的状态机（先 NOTTRADED，后 ALLTRADED）。
             # 触发原理：type 中包含 delayed_fill_5s，QMT_SIM 在上报后延迟撮合成交。
             # 预期现象：先看到 NOTTRADED，约 5s 后看到成交回报；若超时秒数小于 5s 则会先撤单。
-            {"code": sym, "pct": pct, "type": "buy delayed_fill_5s passive", "price": 4.497, "label": f"buy_delayed_fill_5s_{run_id}"},
+            {"code": sym, "pct": pct, "type": "buy delayed_fill_5s passive", "price": 6.500, "label": f"buy_delayed_fill_5s_{run_id}"},
 
             # 用例目的：验证“卖出无持仓 -> 网关拒单（持仓不足）”的异常路径与策略处理。
             # 触发原理：type 中包含 force_sell_no_position，测试策略绕过父类持仓校验，强制下发 100 股卖单；
             #          QMT_SIM 开启“卖出持仓不足拒单”后应返回 REJECTED。
             # 预期现象：日志出现“REJECTED 持仓不足”，且策略不应进入资金不足的延时重挂分支。
-            {"code": sym, "pct": pct, "type": "sell force_sell_no_position", "price": 4.497, "label": f"sell_force_no_pos_{run_id}"},
+            {"code": sym, "pct": pct, "type": "sell force_sell_no_position", "price": 6.500, "label": f"sell_force_no_pos_{run_id}"},
 
             # 用例目的：验证“强制拒单（非资金不足）”时策略不应错误重试。
             # 触发原理：type 中包含 force_reject，QMT_SIM 在上报后直接返回 REJECTED（模拟 ORDER_JUNK/UNKNOWN）。
             # 预期现象：出现 REJECTED，但策略侧不会进入资金不足延时重挂逻辑。
-            {"code": sym, "pct": pct, "type": "buy force_reject passive", "price": 4.497, "label": f"buy_force_reject_{run_id}"},
+            {"code": sym, "pct": pct, "type": "buy force_reject passive", "price": 6.500, "label": f"buy_force_reject_{run_id}"},
 
             # 用例目的：验证“价格越界导致拒单（模拟跌停下方报价）”的处理。
             # 触发原理：type 中包含 reject_down，测试策略会把卖单价格设置到跌停价之下（若 tick 有 limit_down）。
             # 预期现象：网关返回 REJECTED；策略侧不应进入资金不足的延时重挂分支。
-            {"code": sym, "pct": pct, "type": "sell reject_down", "price": 4.497, "label": f"sell_reject_down_{run_id}"},
+            {"code": sym, "pct": pct, "type": "sell reject_down", "price": 6.500, "label": f"sell_reject_down_{run_id}"},
         ]
 
         if suite == "smoke":

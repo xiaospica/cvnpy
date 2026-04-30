@@ -342,11 +342,25 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
                     self.write_log(f"未找到持仓: {vt_positionid}")
                     return True
 
-                if vol_int > int(pos.volume):
-                    vol_int = int(pos.volume)
+                # A股 T+1: 当日买入持仓被冻结，不可当日卖出。可用 = volume - frozen
+                available = int(pos.volume) - int(getattr(pos, "frozen", 0) or 0)
+                if available <= 0:
+                    self.write_log(
+                        f"未找到可卖持仓(可用为0): {vt_positionid} volume={pos.volume} frozen={getattr(pos, 'frozen', 0)}"
+                    )
+                    return True
+
+                if vol_int > available:
+                    vol_int = available
+
+                if vol_int <= 0:
+                    self.write_log(
+                        f"未找到可卖持仓(数量修正后为0): {vt_positionid} 可用={available}"
+                    )
+                    return True
 
                 self.write_log(
-                    f"百分比仓位计算(卖出): 持仓{pos.volume} * 比例{signal.pct} = 数量{vol_int}"
+                    f"百分比仓位计算(卖出): 持仓{pos.volume}(可用{available}) * 比例{signal.pct} = 数量{vol_int}"
                 )
         else:
             self.write_log(f'百分比异常！{pct}')
