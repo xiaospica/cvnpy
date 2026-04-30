@@ -54,67 +54,22 @@ class QlibMLStrategy(MLStrategyTemplate):
     # ------------------------------------------------------------------
 
     def generate_orders(self, selected: pd.DataFrame) -> None:
-        """把 selected 转成 send_order 调用. 当 enable_trading=False 只落盘不下单.
+        """把 selected 转换为 rebalance 调仓动作（先卖后买）。
 
-        过滤规则 (A 股实盘):
-          1. **一字涨停**: last tick limit_up == last_price → 过滤买入
-          2. **T+1**: 当日新买入的仓位不可卖出 (yd_volume=0 时)
-          3. **ST / 停牌**: universe 在子进程 preprocess 已处理, 这里兜底再检查一次
-          4. **涨跌停买入方向**: 买入时若涨停, 无法成交 → 过滤
+        策略真实时序（实盘）：T 日 21:00 推理 → T+1 日 09:30 开盘 rebalance。
+        本方法是实时模式下 ``run_daily_pipeline`` 末尾的入口，只是简单委托给父类
+        ``rebalance_to_target`` 做 diff 调仓 — 当前持仓与新 topk 比较，先卖后买。
+
+        回放模式不走本方法，由 ``_replay_loop_body`` 直接在次日开盘调
+        ``rebalance_to_target(prev_day_topk, on_day=current_day)``。
+
+        子类如果有更复杂的过滤逻辑（ST/停牌/涨跌停 hard skip）可以覆写
+        ``rebalance_to_target`` 而非 ``generate_orders``。
         """
-        if selected is None or selected.empty:
+        if not self.enable_trading:
+            self.write_log("generate_orders: enable_trading=False, skipping (dry-run)")
             return
-
-        today = date.today()
-        store = ResultStore(self.output_root)
-        # selections.parquet 由父类 persist_selections 负责(无论 enable_trading)
-
-        # 2. 生成 order intents + 过滤
-        order_logs: List[Dict[str, Any]] = []
-        for rank, (instrument, row) in enumerate(selected.iterrows(), start=1):
-            vt_symbol = self._to_vt_symbol(str(instrument))
-            log: Dict[str, Any] = {
-                ORDER_FIELD_INSTRUMENT: str(instrument),
-                ORDER_FIELD_EXCHANGE: vt_symbol.split(".")[-1] if "." in vt_symbol else "",
-                ORDER_FIELD_DIRECTION: "long",
-                ORDER_FIELD_OFFSET: "open",
-                ORDER_FIELD_PRICE: 0.0,
-                ORDER_FIELD_VOLUME: self._compute_volume(row),
-                ORDER_FIELD_ORDER_TYPE: "market",
-                ORDER_FIELD_STATUS: "pending",
-                ORDER_FIELD_FILTER_REASON: "",
-            }
-
-            # 过滤: 涨停一字板
-            if self._is_limit_up(vt_symbol):
-                log[ORDER_FIELD_STATUS] = "filtered_out"
-                log[ORDER_FIELD_FILTER_REASON] = "limit_up"
-                order_logs.append(log)
-                continue
-
-            # TODO: ST / 停牌兜底 check (Phase 2.7 补)
-
-            # 实际下单
-            if self.enable_trading:
-                try:
-                    self.send_order(
-                        vt_symbol=vt_symbol,
-                        direction=Direction.LONG,
-                        offset=Offset.OPEN,
-                        price=0.0,
-                        volume=log[ORDER_FIELD_VOLUME],
-                        order_type=OrderType.MARKET,
-                    )
-                    log[ORDER_FIELD_STATUS] = "submitted"
-                except Exception as exc:
-                    log[ORDER_FIELD_STATUS] = "failed"
-                    log[ORDER_FIELD_FILTER_REASON] = f"{type(exc).__name__}: {exc}"
-            else:
-                log[ORDER_FIELD_STATUS] = "dry_run"
-            order_logs.append(log)
-
-        # 3. 订单落盘 (成交 / 过滤 / 失败 / 干跑 都记)
-        store.append_orders(self.strategy_name, today, order_logs)
+        self.rebalance_to_target(selected, on_day=date.today())
 
     # ------------------------------------------------------------------
     # Helpers

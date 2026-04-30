@@ -275,3 +275,136 @@ def test_replay_pause_resume_only_own_cron() -> None:
         assert sched.get_job_next_run_time("stratA") is not None
     finally:
         sched.stop(wait=False)
+
+
+# ---- Phase 5: rebalance_to_target -----------------------------------
+
+
+def test_instrument_to_vt_conversion(tmp_path) -> None:
+    bundle = _make_task_json(tmp_path, test_start="2026-01-01")
+    strat = _make_strategy(bundle)
+    assert strat._instrument_to_vt("000001.SZ") == "000001.SZSE"
+    assert strat._instrument_to_vt("600519.SH") == "600519.SSE"
+    assert strat._instrument_to_vt("000001.SZSE") == "000001.SZSE"  # 已是 vt
+    assert strat._instrument_to_vt("") is None
+    assert strat._instrument_to_vt("nodot") is None
+
+
+def test_compute_buy_volume_rounds_to_lots(tmp_path) -> None:
+    bundle = _make_task_json(tmp_path, test_start="2026-01-01")
+    strat = _make_strategy(bundle, cash_per_order=100_000)
+    # price 11.0 → 9090.9 raw shares → 9000 (90 lots)
+    assert strat._compute_buy_volume(11.0) == 9000
+    # price 50.0 → 2000 raw → 2000 (20 lots)
+    assert strat._compute_buy_volume(50.0) == 2000
+    # price 1500.0 → 66.6 raw → 0 (cash_per_order 不够买 100 股)
+    assert strat._compute_buy_volume(1500.0) == 0
+    assert strat._compute_buy_volume(0) == 0
+    assert strat._compute_buy_volume(-10) == 0
+
+
+def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
+    """关键：当前持仓 vs 目标 topk diff 正确产出 sells/buys/keeps。"""
+    import pandas as pd
+    bundle = _make_task_json(tmp_path, test_start="2026-01-01")
+    strat = _make_strategy(bundle, cash_per_order=100_000)
+    strat.trading = True
+
+    # mock 当前持仓: 000001.SZSE (yd=200), 600000.SSE (yd=300)
+    pos_a = MagicMock()
+    pos_a.gateway_name = strat.gateway
+    pos_a.direction = "多"  # Direction.LONG.value
+    pos_a.volume = 200
+    pos_a.yd_volume = 200
+    pos_a.vt_symbol = "000001.SZSE"
+    pos_b = MagicMock()
+    pos_b.gateway_name = strat.gateway
+    pos_b.direction = "多"
+    pos_b.volume = 300
+    pos_b.yd_volume = 300
+    pos_b.vt_symbol = "600000.SSE"
+    strat.signal_engine.main_engine.get_all_positions.return_value = [pos_a, pos_b]
+
+    # mock tick 价格（用于买入手数计算）
+    def fake_get_tick(vt):
+        tick = MagicMock()
+        tick.last_price = 10.0
+        tick.pre_close = 10.0
+        return tick
+    strat.signal_engine.main_engine.get_tick.side_effect = fake_get_tick
+
+    # mock send_order 记录调用
+    sent = []
+    def fake_send_order(**kwargs):
+        sent.append(kwargs)
+        return ["mock_orderid"]
+    strat.send_order = fake_send_order
+
+    # 目标 topk: 000001.SZ (=current), 000002.SZ (new)
+    # → sells: 600000.SSE; buys: 000002.SZSE; keeps: 000001.SZSE
+    target = pd.DataFrame(
+        {"score": [0.9, 0.8]},
+        index=pd.Index(["000001.SZ", "000002.SZ"], name="instrument"),
+    )
+
+    stats = strat.rebalance_to_target(target, on_day=date(2026, 1, 5))
+
+    assert stats["sells_dispatched"] == 1
+    assert stats["buys_dispatched"] == 1
+    # 验证 sell 是 600000.SSE
+    sells = [s for s in sent if s["direction"].value == "空"]
+    assert len(sells) == 1
+    assert sells[0]["vt_symbol"] == "600000.SSE"
+    assert sells[0]["volume"] == 300  # full yd_volume
+    # 验证 buy 是 000002.SZSE，volume = floor(100000/10/100)*100 = 10000
+    buys = [s for s in sent if s["direction"].value == "多"]
+    assert len(buys) == 1
+    assert buys[0]["vt_symbol"] == "000002.SZSE"
+    assert buys[0]["volume"] == 10000
+
+
+def test_rebalance_skips_sell_when_yd_volume_zero(tmp_path) -> None:
+    """T+1 限制：yd_volume=0（当日新买）时跳过卖出。"""
+    import pandas as pd
+    bundle = _make_task_json(tmp_path, test_start="2026-01-01")
+    strat = _make_strategy(bundle)
+    strat.trading = True
+
+    pos = MagicMock()
+    pos.gateway_name = strat.gateway
+    pos.direction = "多"
+    pos.volume = 200
+    pos.yd_volume = 0  # 当日新买
+    pos.vt_symbol = "000001.SZSE"
+    strat.signal_engine.main_engine.get_all_positions.return_value = [pos]
+    strat.signal_engine.main_engine.get_tick.return_value = None
+    sent = []
+    strat.send_order = lambda **kw: sent.append(kw) or ["mock"]
+
+    # 空 target → 应该 sell 持仓，但 yd=0 跳过
+    stats = strat.rebalance_to_target(pd.DataFrame(), on_day=date(2026, 1, 5))
+    assert stats["sells_dispatched"] == 0
+    assert stats["sells_skipped"] == 1
+    assert len(sent) == 0
+
+
+def test_rebalance_skips_buy_when_no_ref_price(tmp_path) -> None:
+    """无参考价（tick 缺失）时跳过买入，不影响其他股票。"""
+    import pandas as pd
+    bundle = _make_task_json(tmp_path, test_start="2026-01-01")
+    strat = _make_strategy(bundle, cash_per_order=100_000)
+    strat.trading = True
+    strat.signal_engine.main_engine.get_all_positions.return_value = []
+
+    # tick 返 None → 没参考价
+    strat.signal_engine.main_engine.get_tick.return_value = None
+    sent = []
+    strat.send_order = lambda **kw: sent.append(kw) or ["mock"]
+
+    target = pd.DataFrame(
+        {"score": [0.9]}, index=pd.Index(["000001.SZ"], name="instrument"),
+    )
+    stats = strat.rebalance_to_target(target, on_day=date(2026, 1, 5))
+    assert stats["buys_dispatched"] == 0
+    assert stats["buys_skipped"] == 1
+    assert len(sent) == 0
