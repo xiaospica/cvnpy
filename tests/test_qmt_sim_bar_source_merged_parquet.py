@@ -121,6 +121,72 @@ def test_mtime_cache_invalidation(tmp_path: Path) -> None:
     assert q2.pre_close == pytest.approx(20.0), "source should invalidate cache when file mtime changes"
 
 
+def test_replay_future_snapshot_fallback(tmp_path: Path, caplog) -> None:
+    """回放场景：disk 上只有 4 月份 snapshot，但查 1 月份的 as_of_date —
+    应该挑最早的 ≥ as_of_date 的 snapshot（含滚动窗口数据）。
+    """
+    # 模拟用户实际部署：4 月份每日 snapshot，每个含从 2025-12-23 起的滚动窗口
+    _make_snapshot(tmp_path, "20260407", [
+        # 含历史数据（snapshot 是滚动窗口 — 每个文件含约 4 个月历史）
+        _row("000001.SZ", "2026-01-06", close=11.50),
+        _row("000001.SZ", "2026-04-07", close=12.00),
+    ])
+    _make_snapshot(tmp_path, "20260422", [
+        _row("000001.SZ", "2026-01-06", close=11.50),
+        _row("000001.SZ", "2026-04-22", close=11.10),
+    ])
+
+    src = MergedParquetBarSource(merged_root=str(tmp_path), reference_kind="today_open")
+    # 查 2026-01-06 → 应该选 daily_merged_20260407（最早 ≥ 01-06）
+    with caplog.at_level("INFO"):
+        q = src.get_quote("000001.SZSE", date(2026, 1, 6))
+    assert q is not None
+    assert q.last_price == pytest.approx(11.50)  # 01-06 的 open（== close in fixture）
+    # 必须有日志显示"未来兜底"
+    fallback_logs = [r.getMessage() for r in caplog.records if "回放兜底" in r.getMessage()]
+    assert len(fallback_logs) >= 1
+
+
+def test_replay_picks_earliest_future_snapshot(tmp_path: Path) -> None:
+    """有多个 ≥ as_of_date 的 snapshot 时，挑**最早**的（最贴近当时）。"""
+    _make_snapshot(tmp_path, "20260407", [
+        _row("000001.SZ", "2026-01-06", close=11.50),
+    ])
+    _make_snapshot(tmp_path, "20260422", [
+        _row("000001.SZ", "2026-01-06", close=11.50),
+    ])
+    _make_snapshot(tmp_path, "20260429", [
+        _row("000001.SZ", "2026-01-06", close=11.50),
+    ])
+    src = MergedParquetBarSource(merged_root=str(tmp_path))
+    f = src._resolve_file(date(2026, 1, 6))
+    assert f is not None
+    assert f.name == "daily_merged_20260407.parquet"
+
+
+def test_replay_uses_past_fallback_when_no_future_snapshot(tmp_path: Path) -> None:
+    """所有 snapshot 都 < as_of_date 时，过去 fallback_days 内的最新 snapshot 兜底。"""
+    _make_snapshot(tmp_path, "20260417", [
+        _row("000001.SZ", "2026-04-17", close=11.01),
+    ])
+    src = MergedParquetBarSource(merged_root=str(tmp_path), fallback_days=10)
+    # 查 04-20（周一），04-17 snapshot（周五）距 -3d ≤ 10 → 兜底命中
+    f = src._resolve_file(date(2026, 4, 20))
+    assert f is not None
+    assert f.name == "daily_merged_20260417.parquet"
+
+
+def test_replay_rejects_too_stale_past_snapshot(tmp_path: Path) -> None:
+    """过去 snapshot 距 as_of_date > fallback_days → 拒绝（防数据过旧导致悄悄失真）。"""
+    _make_snapshot(tmp_path, "20260301", [
+        _row("000001.SZ", "2026-03-01", close=10.0),
+    ])
+    src = MergedParquetBarSource(merged_root=str(tmp_path), fallback_days=10)
+    # 查 04-22，04-01 snapshot 距 -52d > 10 → 拒绝
+    f = src._resolve_file(date(2026, 4, 22))
+    assert f is None
+
+
 def test_stale_warning_emitted_once(tmp_path: Path, caplog) -> None:
     p = _make_snapshot(tmp_path, "20260422", [
         _row("000001.SZ", "2026-04-22", close=10.0),

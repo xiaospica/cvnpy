@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import OrderedDict
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -64,11 +64,81 @@ class MergedParquetBarSource(SimBarSource):
         self._stale_warned_for: set[str] = set()
 
     def _resolve_file(self, as_of_date: date) -> Optional[Path]:
-        for offset in range(0, self.fallback_days):
-            d = as_of_date - timedelta(days=offset)
-            candidate = self.merged_root / f"daily_merged_{d:%Y%m%d}.parquet"
-            if candidate.exists():
-                return candidate
+        """选包含 as_of_date 数据的 snapshot。
+
+        重要：每个 daily_merged_YYYYMMDD.parquet 文件不是单日数据，
+        而是含从约 4 个月前到文件名当日的**滚动窗口**全量历史
+        (典型 78 个交易日 × 5500 只股票)。
+
+        三优先级：
+          1. 精确匹配 daily_merged_{as_of_date}.parquet — 实盘语义（每日 cron 写当日 snapshot）
+          2. 未来兜底：文件名 ≥ as_of_date 的**最早**一个 — 回放语义
+             （snapshot 含滚动窗口必含目标日；选最早保证数据"最贴近当时"）
+          3. 过去兜底：文件名 < as_of_date 但 (as_of_date - file_date) ≤ fallback_days 的**最新**一个
+             — 兼容周末查工作日 / cron 漏跑场景
+          4. 都失败 → None
+
+        优先级 2 是关键修复：用户机器 disk 上只有 4 月份 snapshot，但回放窗口从 1 月起；
+        旧实现按"as_of_date - offset"向前找永远落空 → "bar_source 未命中"全屏刷。
+        """
+        if not self.merged_root.exists():
+            logger.debug("merged_root %s 不存在", self.merged_root)
+            return None
+
+        # 1. 精确匹配（实盘 hot path，避免无谓扫目录）
+        exact = self.merged_root / f"daily_merged_{as_of_date:%Y%m%d}.parquet"
+        if exact.exists():
+            logger.debug("[bar_source] %s exact-match → %s", as_of_date, exact.name)
+            return exact
+
+        # 扫目录，构造 (file_date, path) 列表
+        snapshots: list[Tuple[date, Path]] = []
+        for entry in self.merged_root.iterdir():
+            if not entry.is_file():
+                continue
+            name = entry.name
+            if not name.startswith("daily_merged_") or not name.endswith(".parquet"):
+                continue
+            stem = entry.stem.replace("daily_merged_", "")
+            if len(stem) != 8 or not stem.isdigit():
+                continue
+            try:
+                d = date(int(stem[:4]), int(stem[4:6]), int(stem[6:8]))
+            except ValueError:
+                continue
+            snapshots.append((d, entry))
+
+        if not snapshots:
+            logger.warning("[bar_source] %s 目录无任何 daily_merged_*.parquet", self.merged_root)
+            return None
+
+        snapshots.sort()
+
+        # 2. 未来兜底
+        future_candidates = [(d, p) for d, p in snapshots if d >= as_of_date]
+        if future_candidates:
+            picked_d, picked_p = future_candidates[0]
+            logger.info(
+                "[bar_source] %s 无精确 snapshot，回放兜底用未来 snapshot %s (距目标日 +%dd)",
+                as_of_date, picked_p.name, (picked_d - as_of_date).days,
+            )
+            return picked_p
+
+        # 3. 过去兜底（fallback_days 内）
+        latest_date, latest_path = snapshots[-1]
+        gap = (as_of_date - latest_date).days
+        if gap <= self.fallback_days:
+            logger.info(
+                "[bar_source] %s 无未来 snapshot，过去兜底用 %s (距目标日 -%dd ≤ fallback_days=%d)",
+                as_of_date, latest_path.name, gap, self.fallback_days,
+            )
+            return latest_path
+
+        # 4. 都失败
+        logger.warning(
+            "[bar_source] %s 解析失败：最新 snapshot %s 距目标日 -%dd 超出 fallback_days=%d，未来 snapshot 无",
+            as_of_date, latest_path.name, gap, self.fallback_days,
+        )
         return None
 
     def _load(self, path: Path) -> pd.DataFrame:
