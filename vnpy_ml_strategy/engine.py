@@ -237,11 +237,17 @@ class MLEngine(BaseEngine):
             self.stop_strategy(name)
 
     def run_pipeline_now(self, strategy_name: str) -> bool:
-        """UI 手动触发一次日频 pipeline (立即在 APS 后台线程跑)."""
+        """UI 手动触发一次日频 pipeline (立即在 APS 后台线程跑).
+
+        ``scheduler.run_job_now`` 同步阻塞直到 job 完成 (subprocess 推理 ~60-90s).
+        run_daily_pipeline 内部已用 try/finally 保证发 put_strategy_event,
+        这里再显式 put 一次作为双保险 (若 template 是旧版则保兜底).
+        """
         if strategy_name not in self.strategies:
             return False
         try:
             self.scheduler.run_job_now(strategy_name)
+            self.put_strategy_event(self.strategies[strategy_name])
             return True
         except Exception as exc:
             print(f"[MLEngine] run_pipeline_now({strategy_name}) failed: {exc}")

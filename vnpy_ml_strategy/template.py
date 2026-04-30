@@ -39,12 +39,15 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from vnpy.event import Event
 from vnpy.trader.constant import Direction, Exchange, Offset, OrderType
-from vnpy.trader.object import OrderData, OrderRequest, TradeData
+from vnpy.trader.event import EVENT_LOG
+from vnpy.trader.object import LogData, OrderData, OrderRequest, TradeData
 
 from vnpy_order_utils import AutoResubmitMixin
 
 from .base import (
+    APP_NAME,
     EVENT_ML_EMPTY,
     EVENT_ML_FAILED,
     EVENT_ML_HEARTBEAT,
@@ -273,83 +276,131 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     # -----------------------------------------------------------------
 
     def write_log(self, msg: str) -> None:
-        """轻量日志, 直接打印 + 可选发 EVENT_ML_LOG."""
+        """日志: print 到 stdout + 发 vnpy EVENT_LOG, 让 UI LogMonitor 也能看到.
+
+        原实现只 print, 导致 UI 右侧日志面板和 vnpy loguru 都看不到策略内部状态;
+        异常路径里 _emit_failed/_emit_empty 又都是自定义事件 UI 不订阅, 等于"全黑".
+        改成同时发 vnpy 标准 LogData 事件 (gateway_name=APP_NAME), MainWindow 的
+        Logger handler 会自动写入 vt_YYYYMMDD.log, ML UI 的 LogMonitor 也会显示.
+        """
         prefix = f"[{self.strategy_name}] " if self.strategy_name else "[MLStrategy] "
-        print(prefix + msg)
+        full_msg = prefix + msg
+        print(full_msg)
+        try:
+            event_engine = self.signal_engine.event_engine
+        except AttributeError:
+            return  # 单测/无 engine 场景下退化为只 print
+        try:
+            log = LogData(msg=full_msg, gateway_name=APP_NAME)
+            event_engine.put(Event(type=EVENT_LOG, data=log))
+        except Exception:
+            pass
 
     # -----------------------------------------------------------------
     # 主入口 - 被 DailyTimeTaskScheduler 在后台线程调用
     # -----------------------------------------------------------------
 
     def run_daily_pipeline(self) -> None:
-        """完整日频 pipeline — 主进程编排, 推理在子进程, 下单在主进程."""
-        today = date.today()
-        self.last_run_date = str(today)
-        self.last_error = ""
-        self.last_stage = ""
+        """完整日频 pipeline — 主进程编排, 推理在子进程, 下单在主进程.
 
-        if not self._is_trade_day(today):
-            self._emit_heartbeat(reason="non_trading_day")
-            return
-
-        self.last_stage = Stage.PREDICT.value
+        try/finally 包整个函数体: 任意 return 路径 (non_trading_day/predict 异常/
+        failed/empty/正常完成) 都会触发一次 ``put_strategy_event``, 让 UI variables
+        表刷新最新 last_status/last_n_pred/last_error 等. 否则 UI 永远停在初始值.
+        """
         try:
-            result = self.signal_engine.run_inference(
-                bundle_dir=self.bundle_dir,
-                live_end=today,
-                lookback_days=self.lookback_days,
-                strategy_name=self.strategy_name,
-                inference_python=self.inference_python,
-                output_root=self.output_root,
-                provider_uri=self.provider_uri,
-                baseline_path=self.baseline_path or None,
-                timeout_s=self.subprocess_timeout_s,
+            today = date.today()
+            self.last_run_date = str(today)
+            self.last_error = ""
+            self.last_stage = ""
+
+            if not self._is_trade_day(today):
+                self.write_log(f"non-trading day {today}, pipeline skipped")
+                self._emit_heartbeat(reason="non_trading_day")
+                return
+
+            self.last_stage = Stage.PREDICT.value
+            self.write_log(
+                f"pipeline start: live_end={today} bundle={self.bundle_dir} "
+                f"lookback={self.lookback_days}"
             )
-        except Exception as exc:
-            self.last_error = f"{type(exc).__name__}: {exc}"
-            self.last_status = InferenceStatus.FAILED.value
-            self._emit_failed(reason=self.last_error)
-            return
+            try:
+                result = self.signal_engine.run_inference(
+                    bundle_dir=self.bundle_dir,
+                    live_end=today,
+                    lookback_days=self.lookback_days,
+                    strategy_name=self.strategy_name,
+                    inference_python=self.inference_python,
+                    output_root=self.output_root,
+                    provider_uri=self.provider_uri,
+                    baseline_path=self.baseline_path or None,
+                    timeout_s=self.subprocess_timeout_s,
+                )
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                self.last_status = InferenceStatus.FAILED.value
+                self.write_log(f"pipeline failed at predict: {self.last_error}")
+                self._emit_failed(reason=self.last_error)
+                return
 
-        diag = result["diagnostics"]
-        metrics = result.get("metrics", {})
-        pred_df = result.get("pred_df")
+            diag = result["diagnostics"]
+            metrics = result.get("metrics", {})
+            pred_df = result.get("pred_df")
 
-        self.last_status = diag.get("status", "")
-        self.last_duration_ms = diag.get("duration_ms", 0)
-        self.last_model_run_id = diag.get("model_run_id", "")
-        self.last_n_pred = diag.get("rows", 0)
-        self.last_ic = metrics.get("ic", float("nan"))
-        self.last_psi_mean = metrics.get("psi_mean", float("nan"))
+            self.last_status = diag.get("status", "")
+            self.last_duration_ms = diag.get("duration_ms", 0)
+            self.last_model_run_id = diag.get("model_run_id", "")
+            self.last_n_pred = diag.get("rows", 0)
+            self.last_ic = metrics.get("ic", float("nan"))
+            self.last_psi_mean = metrics.get("psi_mean", float("nan"))
 
-        if diag.get("status") == InferenceStatus.FAILED.value:
-            self._emit_failed(reason=diag.get("error_message", "subprocess failed"))
-            return
+            if diag.get("status") == InferenceStatus.FAILED.value:
+                err = diag.get("error_message", "subprocess failed")
+                self.last_error = err
+                self.write_log(f"pipeline subprocess failed: {err}")
+                self._emit_failed(reason=err)
+                return
 
-        if diag.get("status") == InferenceStatus.EMPTY.value:
-            self._emit_empty()
+            if diag.get("status") == InferenceStatus.EMPTY.value:
+                self.write_log(
+                    f"pipeline empty: rows=0 (检查今日数据是否已拉/qlib bin 是否覆盖 "
+                    f"live_end={today}; 通常因 DailyIngestPipeline 未运行导致)"
+                )
+                self._emit_empty()
+                self._publish_metrics(metrics)
+                return
+
+            self.last_stage = Stage.SELECT.value
+            selected = self.select_topk(pred_df)
+            self.write_log(
+                f"selected topk={len(selected) if selected is not None else 0} "
+                f"(status=ok, rows={self.last_n_pred})"
+            )
+
+            # Persist selections regardless of enable_trading — downstream UIs (Tab1
+            # "最新 TopK 信号" / Tab2 "历史回溯") depend on having the per-day
+            # selections.parquet on disk even in dry-run mode.
+            self.last_stage = Stage.SAVE.value
+            try:
+                self.persist_selections(selected)
+            except Exception as exc:
+                self.write_log(f"persist_selections failed: {type(exc).__name__}: {exc}")
+
+            if self.enable_trading:
+                self.last_stage = Stage.ORDER.value
+                self.write_log(f"generate_orders enabled, dispatching {len(selected)} orders")
+                self.generate_orders(selected)
+            else:
+                self.write_log("enable_trading=False, skip generate_orders (dry-run)")
+
+            self.last_stage = Stage.PUBLISH.value
             self._publish_metrics(metrics)
-            return
-
-        self.last_stage = Stage.SELECT.value
-        selected = self.select_topk(pred_df)
-
-        # Persist selections regardless of enable_trading — downstream UIs (Tab1
-        # "最新 TopK 信号" / Tab2 "历史回溯") depend on having the per-day
-        # selections.parquet on disk even in dry-run mode.
-        self.last_stage = Stage.SAVE.value
-        try:
-            self.persist_selections(selected)
-        except Exception as exc:
-            self.write_log(f"persist_selections failed: {type(exc).__name__}: {exc}")
-
-        if self.enable_trading:
-            self.last_stage = Stage.ORDER.value
-            self.generate_orders(selected)
-
-        self.last_stage = Stage.PUBLISH.value
-        self._publish_metrics(metrics)
-        self._emit_prediction(selected, metrics)
+            self._emit_prediction(selected, metrics)
+        finally:
+            # 任意路径退出后都让 UI variables 刷新, 避免面板停在初始值.
+            try:
+                self.signal_engine.put_strategy_event(self)
+            except Exception:
+                pass
 
     # -----------------------------------------------------------------
     # 默认实现 + 子类扩展点
