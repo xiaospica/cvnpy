@@ -7,6 +7,7 @@
 - **框架**: VeighNa (vn.py) 定制版
 - **语言**: Python 3.10+
 - **核心接口**: QMT (vnpy\_qmt)
+- **解释器**：F:\Program\_Home\vnpy\python.exe
 - **主要路径**:
   - `vnpy/`: 核心框架源码
   - `vnpy_qmt/`: QMT 柜台接口
