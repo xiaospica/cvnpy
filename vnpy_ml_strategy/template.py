@@ -1097,8 +1097,52 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 except Exception as exc:
                     self.write_log(f"[replay] day {day_iso} settle 失败: {exc}")
 
+            # 4. 写权益快照到 mlearnweb.db (ts=回放逻辑日 15:00)
+            # 否则前端权益曲线 X 轴只会反映 wall-clock 几分钟内的密集点
+            if gateway is not None:
+                self._persist_replay_equity_snapshot(day, gateway)
+
             self.replay_progress = f"{i+1}/{total}"
             self.replay_last_done = day_iso
+
+    def _persist_replay_equity_snapshot(self, day: date, gateway: Any) -> None:
+        """从 gateway 当前 cash + 持仓市值算出"按回放日"的权益值，写入 mlearnweb.db。
+
+        与 mlearnweb 端 _resolve_strategy_value 算法一致：
+            equity = cash + sum_over_positions(volume × cost_price + pnl)
+        """
+        try:
+            from datetime import datetime as _dt, time as _time
+            from .mlearnweb_writer import write_replay_equity_snapshot
+
+            counter = gateway.td.counter
+            cash = float(counter.capital - counter.frozen)
+            market_value = 0.0
+            n_positions = 0
+            for pos in counter.positions.values():
+                vol = float(getattr(pos, "volume", 0) or 0)
+                if vol <= 0:
+                    continue
+                price = float(getattr(pos, "price", 0) or 0)
+                pnl = float(getattr(pos, "pnl", 0) or 0)
+                market_value += vol * price + pnl
+                n_positions += 1
+            equity = cash + market_value
+
+            # ts: 当日 15:00（A 股收盘）
+            ts = _dt.combine(day, _time(hour=15, minute=0, second=0))
+            write_replay_equity_snapshot(
+                node_id="local",  # 与 mlearnweb vnpy_nodes.yaml 默认节点一致
+                engine="MlStrategy",
+                strategy_name=self.strategy_name,
+                ts=ts,
+                strategy_value=equity,
+                account_equity=equity,
+                source_label="replay_settle",
+                positions_count=n_positions,
+            )
+        except Exception as exc:
+            self.write_log(f"[replay] day {day} 权益快照写入失败: {exc}")
 
     def _refresh_market_data_for_day(
         self,
