@@ -397,42 +397,56 @@ class MLEngine(BaseEngine):
         Note: 批量模式不写 metrics.json（PSI/KS/IC 等留单日实时模式做）；
         每日 diagnostics.json 含 ``batch_mode=true`` 标记。
 
-        Phase 5.x 修复：与 ``run_inference`` 对齐，自动按 ``range_end`` 拼
-        ``{QS_DATA_ROOT}/snapshots/filtered/csi300_filtered_{range_end}.parquet``。
+        Phase 5.x 修复：与 ``run_inference`` 对齐，自动选**最新**可用 filter 快照
+        ``{QS_DATA_ROOT}/snapshots/filtered/csi300_filtered_*.parquet``。
         否则子进程会用 task.json 里固化的训练时 filter（如 csi300_custom_filtered.parquet
         只覆盖到训练截止日 2026-01-28），导致回放窗口超出训练时点的所有日期 status=empty。
 
-        批量模式只能用单一 filter（dataset 一次 build），所以选 range_end 那天的快照
-        （= 最新的 csi300 成分股 + 流动性过滤）—— 严格说对早期日期有轻度成分股泄漏，
-        但实操不影响（4 个月内 csi300 成分变动 < 10%；且模拟盘不是 qlib backtest 数学复刻）。
+        策略：选**最新（按文件名日期 max）**的 snapshot — 由于 _stage_filter 按
+        [T-lookback, T] window 回填（commit b859efe），最新 snapshot 总是含
+        完整 lookback window 的合规数据。
+          - 旧策略（按 range_end 选）：用户回放 range_end=04-29 时选 filter_20260429，
+            但该文件可能是 ml_data_build 回填修复**之前**写的旧追加式版本，
+            缺 04-23/24/27/28 → 这几天仍 status=empty
+          - 新策略（选最新）：选 filter_20260430（最近一次 cron 写的, 已回填）
         """
         import os as _os
+        import re as _re
         from pathlib import Path as _Path
 
         if self._predictor is None:
             raise RuntimeError("Predictor not set")
 
-        # Phase 5.x：与单日 run_inference 对齐，自动按 range_end 拼 filter 快照
+        # Phase 5.x：选最新可用 filter snapshot
         if filter_parquet_path is None:
             qs_data_root = _os.getenv("QS_DATA_ROOT")
             if qs_data_root:
-                candidate = (
-                    _Path(qs_data_root) / "snapshots" / "filtered"
-                    / f"csi300_filtered_{range_end.strftime('%Y%m%d')}.parquet"
-                )
-                if candidate.exists():
-                    filter_parquet_path = str(candidate)
-                    from loguru import logger
+                filter_dir = _Path(qs_data_root) / "snapshots" / "filtered"
+                pattern = _re.compile(r"^csi300_filtered_(\d{8})\.parquet$")
+                latest_path = None
+                latest_date_str = None
+                if filter_dir.exists():
+                    for entry in filter_dir.iterdir():
+                        m = pattern.match(entry.name)
+                        if not m:
+                            continue
+                        d_str = m.group(1)
+                        if latest_date_str is None or d_str > latest_date_str:
+                            latest_date_str = d_str
+                            latest_path = entry
+
+                from loguru import logger
+                if latest_path is not None:
+                    filter_parquet_path = str(latest_path)
                     logger.info(
-                        f"[MLEngine] batch 推理使用 filter 快照 {candidate.name} "
-                        f"(批量只能用单一 filter，选 range_end={range_end})"
+                        f"[MLEngine] batch 推理使用 filter 快照 {latest_path.name} "
+                        f"(选最新; range=[{range_start},{range_end}])"
                     )
                 else:
-                    from loguru import logger
                     logger.warning(
-                        f"[MLEngine] filter 快照不存在 {candidate}, "
+                        f"[MLEngine] {filter_dir} 无 csi300_filtered_*.parquet, "
                         "回放将用 bundle task.json 里固化的训练时 filter — "
-                        "若该 filter 不覆盖 range_end，超出范围的日子全 status=empty"
+                        "若该 filter 不覆盖 range_end, 超出范围的日子全 status=empty"
                     )
 
         return self._predictor.run_range(
