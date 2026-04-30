@@ -191,11 +191,17 @@ class TD(XtQuantTraderCallback):
             # 仅在状态刚刚变为 REJECTED 时打印日志，避免重复打印
             if not old_order or old_order.status != Status.REJECTED:
                 self.write_log(f'【拒单】 {order.status_msg}')
-            
+
             # 初始化或更新 extra 字典
             if not vn_order.extra:
                 vn_order.extra = {}
-            vn_order.extra["status_msg"] = order.status_msg
+            # XtOrder.status_msg 经常被 xtquant 截断（例：'[COUNTER][251005][证'），
+            # 而 on_order_error 已用 XtOrderError.error_msg（完整版）写入过 status_msg。
+            # 这里只在新值更长时才覆盖，避免短版本覆盖完整版。
+            new_msg = str(order.status_msg or "")
+            old_msg = str(vn_order.extra.get("status_msg") or "")
+            if len(new_msg) > len(old_msg):
+                vn_order.extra["status_msg"] = new_msg
 
         self.orders[vn_order.orderid] = vn_order
         if vn_order.orderid not in self.order_submit_time and vn_order.datetime:
@@ -275,6 +281,9 @@ class TD(XtQuantTraderCallback):
             print(f"on_stock_position 无法解析的代码： {position.stock_code}")
             return
         # TODO ETF相关字段处理
+        # frozen = volume - can_use_volume，覆盖 A 股 T+1 冻结、撤单未确认、风险锁定等所有"不可用"原因。
+        # 注：原实现未填 frozen 字段，导致策略侧把 T+1 当日买入的持仓误判为可卖，触发柜台 [251005] 可用数量不足。
+        frozen = max(int(position.volume) - int(position.can_use_volume), 0)
         position_ = PositionData(
             gateway_name=self.gateway.gateway_name,
             symbol=symbol,
@@ -282,6 +291,7 @@ class TD(XtQuantTraderCallback):
             direction=Direction.LONG,
             volume=position.volume,
             yd_volume=position.yesterday_volume,
+            frozen=frozen,
             price=position.open_price,
             pnl=position.market_value - position.volume * position.open_price
         )
@@ -328,6 +338,14 @@ class TD(XtQuantTraderCallback):
         old_order = self.orders.get(vn_oid)
         if old_order:
             old_order.status = Status.REJECTED
+            # 把完整的 error_msg 写入 extra.status_msg，供策略层 on_order 读取并展示。
+            # XtOrder.status_msg 经常被 xtquant 截断，而 XtOrderError.error_msg 是完整版。
+            if not old_order.extra:
+                old_order.extra = {}
+            if msg:
+                old_msg = str(old_order.extra.get("status_msg") or "")
+                if len(msg) > len(old_msg):
+                    old_order.extra["status_msg"] = msg
             self.gateway.on_order(old_order)
             self.order_submit_time.pop(vn_oid, None)
 
@@ -339,6 +357,13 @@ class TD(XtQuantTraderCallback):
                 old_order.status = Status.REJECTED
                 msg = str(response.error_msg or "").replace("\n", " ").replace("\r", " ").strip()
                 self.write_log(f'下单失败 {response.order_remark} 原因： {msg}')
+                # 同 on_order_error，把完整 error_msg 同步写入 extra.status_msg
+                if not old_order.extra:
+                    old_order.extra = {}
+                if msg:
+                    old_msg = str(old_order.extra.get("status_msg") or "")
+                    if len(msg) > len(old_msg):
+                        old_order.extra["status_msg"] = msg
                 self.gateway.on_order(old_order)
                 self.order_submit_time.pop(response.order_remark, None)
             else:
