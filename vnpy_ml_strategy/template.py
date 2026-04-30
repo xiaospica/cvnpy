@@ -637,12 +637,32 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         return positions
 
     def _get_reference_price(self, vt_symbol: str) -> Optional[float]:
-        """拿当日参考价（默认 pre_close / last_price）用于算买入手数。
+        """拿当日参考价（reference_kind=today_open 时为当日 open）用于算买入手数。
 
-        实盘：从 main_engine 拿当日 tick.last_price。
-        回放：md.get_quote(vt_symbol) 已被 _replay_loop 显式 refresh 到当日 pre_close。
+        关键：直接从 gateway.md.get_full_tick(vt_symbol) 读，**不**走 main_engine.get_tick。
+        因为 md.refresh_tick / set_synthetic_tick 只写 md._tick_cache，从不调
+        gateway.on_tick() 推到 vnpy OMS → main_engine.get_tick 在回放期间永远返 None。
+
+        与 Phase 5.1 撮合层 td._resolve_trade_price 走同一条 md 缓存路径，保证读价 +
+        撮合价口径完全一致。
+
+        实盘：vnpy 真实 gateway 会持续 push tick，main_engine 兜底也能命中；这里
+        优先级是 md._tick_cache → main_engine.get_tick (兜底)。
         """
         try:
+            gateway = self._get_own_gateway()
+            if gateway is not None:
+                md = getattr(gateway, "md", None)
+                if md is not None and hasattr(md, "get_full_tick"):
+                    tick = md.get_full_tick(vt_symbol)
+                    if tick is not None:
+                        last = float(getattr(tick, "last_price", 0) or 0)
+                        if last > 0:
+                            return last
+                        pre = float(getattr(tick, "pre_close", 0) or 0)
+                        if pre > 0:
+                            return pre
+            # 实盘兜底：md 缓存命中失败时尝试 main_engine OMS
             main_engine = getattr(self.signal_engine, "main_engine", None)
             if main_engine is None:
                 return None

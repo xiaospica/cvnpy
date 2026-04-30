@@ -345,12 +345,18 @@ def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
     strat.signal_engine.main_engine.get_all_accounts.return_value = [acc]
 
     # mock tick 价格（用于买入手数计算）
-    def fake_get_tick(vt):
-        tick = MagicMock()
+    # _get_reference_price 优先读 gateway.md.get_full_tick → 测试里 mock 这条路径
+    def fake_get_full_tick(vt):
+        tick = MagicMock(spec=["last_price", "pre_close"])  # 限定属性，避免 MagicMock 自动 float 化
         tick.last_price = 10.0
         tick.pre_close = 10.0
         return tick
-    strat.signal_engine.main_engine.get_tick.side_effect = fake_get_tick
+    fake_md = MagicMock()
+    fake_md.get_full_tick = fake_get_full_tick
+    fake_gw = MagicMock()
+    fake_gw.md = fake_md
+    fake_gw.gateway_name = strat.gateway
+    strat.signal_engine.main_engine.get_gateway = lambda name: fake_gw if name == strat.gateway else None
 
     sent = []
     def fake_send_order(**kwargs):
@@ -418,7 +424,13 @@ def test_rebalance_skips_buy_when_no_ref_price(tmp_path) -> None:
     acc.frozen = 0.0
     strat.signal_engine.main_engine.get_all_accounts.return_value = [acc]
 
-    # tick 返 None → 没参考价
+    # gateway.md.get_full_tick 返 None + main_engine.get_tick 返 None → 无参考价
+    fake_md = MagicMock()
+    fake_md.get_full_tick = lambda vt: None
+    fake_gw = MagicMock()
+    fake_gw.md = fake_md
+    fake_gw.gateway_name = strat.gateway
+    strat.signal_engine.main_engine.get_gateway = lambda name: fake_gw if name == strat.gateway else None
     strat.signal_engine.main_engine.get_tick.return_value = None
     sent = []
     strat.send_order = lambda **kw: sent.append(kw) or ["mock"]
@@ -430,6 +442,32 @@ def test_rebalance_skips_buy_when_no_ref_price(tmp_path) -> None:
     assert stats["buys_dispatched"] == 0
     assert stats["buys_skipped"] == 1
     assert len(sent) == 0
+
+
+def test_get_reference_price_reads_from_md_cache_not_oms(tmp_path) -> None:
+    """关键回归：_get_reference_price 优先读 gateway.md.get_full_tick 而非 main_engine.get_tick。
+
+    回放期间 md.refresh_tick 只写 _tick_cache 不调 gateway.on_tick → vnpy OMS 永远空。
+    若读 main_engine.get_tick 则永远返 None → "无参考价" → 0 买入（已发生过的 bug）。
+    """
+    bundle = _make_task_json(tmp_path, test_start="2026-01-01")
+    strat = _make_strategy(bundle)
+
+    # md 缓存有 tick (last_price=12.34)
+    md_tick = MagicMock(spec=["last_price", "pre_close"])
+    md_tick.last_price = 12.34
+    md_tick.pre_close = 11.50
+    fake_md = MagicMock()
+    fake_md.get_full_tick = lambda vt: md_tick if vt == "000001.SZSE" else None
+    fake_gw = MagicMock()
+    fake_gw.md = fake_md
+    fake_gw.gateway_name = strat.gateway
+    strat.signal_engine.main_engine.get_gateway = lambda name: fake_gw if name == strat.gateway else None
+
+    # main_engine.get_tick 返 None（模拟 OMS 没拿到 tick — 回放真实场景）
+    strat.signal_engine.main_engine.get_tick.return_value = None
+
+    assert strat._get_reference_price("000001.SZSE") == 12.34
 
 
 def test_refresh_market_data_for_day_includes_candidates(tmp_path) -> None:
