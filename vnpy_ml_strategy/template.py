@@ -411,7 +411,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             # selections.parquet on disk even in dry-run mode.
             self.last_stage = Stage.SAVE.value
             try:
-                self.persist_selections(selected)
+                self.persist_selections(selected, as_of_date=today)
             except Exception as exc:
                 self.write_log(f"persist_selections failed: {type(exc).__name__}: {exc}")
 
@@ -423,7 +423,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 self.write_log("enable_trading=False, skip generate_orders (dry-run)")
 
             self.last_stage = Stage.PUBLISH.value
-            self._publish_metrics(metrics)
+            self._publish_metrics(metrics, as_of_date=today)
             self._emit_prediction(selected, metrics)
         finally:
             # 任意路径退出后都让 UI variables 刷新, 避免面板停在初始值.
@@ -446,7 +446,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         slice_df = pred_df.xs(last_dt, level="datetime")
         return slice_df.sort_values("score", ascending=False).head(self.topk)
 
-    def persist_selections(self, selected: pd.DataFrame) -> None:
+    def persist_selections(self, selected: pd.DataFrame, as_of_date: Optional[date] = None) -> None:
         """Write selections.parquet to {output_root}/{name}/{yyyymmdd}/.
 
         Default impl writes canonical schema (trade_date, instrument, rank,
@@ -454,6 +454,9 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         override to customize (e.g. add sector weights, risk budgeting).
 
         Always runs — does not depend on ``enable_trading``.
+
+        Phase 4 回放支持：``as_of_date`` 给定时按该日期写入子目录与 trade_date 列；
+        默认 None → date.today()，兼容实盘 trigger_time 路径。
         """
         from .persistence.result_store import ResultStore
         from .persistence.schema import (
@@ -462,7 +465,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         )
         if selected is None or selected.empty:
             return
-        today = date.today()
+        today = as_of_date if as_of_date is not None else date.today()
         sel_df = selected.reset_index().copy()
         sel_df[COL_TRADE_DATE] = today.strftime("%Y-%m-%d")
         sel_df[COL_INSTRUMENT] = sel_df.get("instrument", sel_df.iloc[:, 0])
@@ -490,11 +493,12 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     # 事件发送
     # -----------------------------------------------------------------
 
-    def _publish_metrics(self, metrics: Dict[str, Any]) -> None:
+    def _publish_metrics(self, metrics: Dict[str, Any], as_of_date: Optional[date] = None) -> None:
+        """Phase 4 回放支持：as_of_date 给定时按该日期发指标，默认 today。"""
         self.signal_engine.publish_metrics(
             strategy_name=self.strategy_name,
             metrics=metrics,
-            trade_date=date.today(),
+            trade_date=as_of_date if as_of_date is not None else date.today(),
             output_root=self.output_root,
             status=self.last_status or "ok",
         )
