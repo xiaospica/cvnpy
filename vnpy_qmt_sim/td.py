@@ -219,6 +219,27 @@ class SimulationCounter:
         except Exception:
             return
 
+    def _resolve_trade_price(self, order: OrderData) -> float:
+        """决定 trade.price：限价单按 order.price；市价单从 md.tick.last_price 取（即当日参考价）。
+
+        前置条件：策略层在每个回放日开盘前调过 ``md.refresh_tick(vt, as_of_date=day)``
+        把 tick.last_price 刷成当日 open（reference_kind=today_open 时）。返 0
+        交给上层判断（理论上 refresh 后总有价；返 0 等于"撮合阻塞"，比之前硬编码 10.0
+        污染权益曲线安全）。
+        """
+        if order.price and order.price > 0:
+            return float(order.price)
+        try:
+            md = getattr(self.gateway, "md", None)
+            if md is None:
+                return 0.0
+            tick = md.get_full_tick(order.vt_symbol)
+            if tick and getattr(tick, "last_price", 0) and tick.last_price > 0:
+                return float(tick.last_price)
+        except Exception:
+            return 0.0
+        return 0.0
+
     def _reject_order(self, order: OrderData, status_msg: str) -> None:
         if order.direction == Direction.LONG:
             self.release_order_frozen_cash(order.orderid, push_event=False)
@@ -241,6 +262,12 @@ class SimulationCounter:
         if volume > remain:
             volume = remain
 
+        trade_price = self._resolve_trade_price(order)
+        if trade_price <= 0:
+            self.gateway.write_log(
+                f"_execute_trade: 无法解析成交价 {order.vt_orderid}，撮合阻塞"
+            )
+            return
         self.trade_count += 1
         trade = TradeData(
             symbol=order.symbol,
@@ -249,7 +276,7 @@ class SimulationCounter:
             tradeid=str(self.trade_count),
             direction=order.direction,
             offset=order.offset,
-            price=order.price if order.price > 0 else 10.0,
+            price=trade_price,
             volume=volume,
             datetime=datetime.now(),
             gateway_name=self.gateway.gateway_name,
@@ -381,7 +408,18 @@ class SimulationCounter:
             self.order_position_freeze[orderid] = (pos_key, float(order.volume))
 
         if order.direction == Direction.LONG:
-            estimate_price = self._get_effective_price(order.price)
+            estimate_price = self._resolve_trade_price(order)
+            if estimate_price <= 0:
+                # 没有 tick 信息无法估计冻结资金，按 0 处理直接拒单
+                msg = f"无法估计成交价：{order.vt_symbol}（tick 缺失）"
+                order.status = Status.REJECTED
+                self._set_order_status_msg(order, msg)
+                self._set_order_extra(order, {"status_msg": msg, "qmt_status": "ORDER_JUNK"})
+                self.order_reject_reason[orderid] = "no_tick_price"
+                self.order_submit_time.pop(orderid, None)
+                self._emit_order(order)
+                self.gateway.write_log(f"拒单：{msg}")
+                return order.vt_orderid
             estimate_amount = estimate_price * order.volume
             estimate_fee = self.calculate_fee(
                 trade_amount=estimate_amount,
@@ -506,6 +544,12 @@ class SimulationCounter:
                 if trade_volume == 0:
                     trade_volume = 1
 
+        trade_price = self._resolve_trade_price(order)
+        if trade_price <= 0:
+            self.gateway.write_log(
+                f"match_order: 无法解析成交价 {order.vt_orderid}，撮合阻塞"
+            )
+            return
         self.trade_count += 1
         trade = TradeData(
             symbol=order.symbol,
@@ -514,7 +558,7 @@ class SimulationCounter:
             tradeid=str(self.trade_count),
             direction=order.direction,
             offset=order.offset,
-            price=order.price if order.price > 0 else 10.0, # 市价单简单模拟价格
+            price=trade_price,
             volume=trade_volume,
             datetime=order.datetime,
             gateway_name=self.gateway.gateway_name
@@ -543,11 +587,6 @@ class SimulationCounter:
 
         self.update_position(trade)
         self.update_account(trade)
-
-    def _get_effective_price(self, price: float) -> float:
-        if price > 0:
-            return price
-        return 10.0
 
     def calculate_fee(self, trade_amount: float, direction: Direction) -> float:
         commission = max(trade_amount * self.commission_rate, self.min_commission)
@@ -692,7 +731,10 @@ class SimulationCounter:
             order = self.orders.get(trade.orderid)
             release_price = trade.price
             if order:
-                release_price = self._get_effective_price(order.price)
+                release_price = self._resolve_trade_price(order)
+                if release_price <= 0:
+                    # 兜底回 trade.price（撮合那一刻已用过的价）
+                    release_price = trade.price
 
             release_amount = release_price * trade.volume + self.calculate_fee(
                 trade_amount=release_price * trade.volume,

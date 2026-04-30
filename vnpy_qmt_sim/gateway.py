@@ -36,7 +36,10 @@ class QmtSimGateway(BaseGateway):
         "卖出持仓不足拒单": "是",
         "行情源": "merged_parquet",
         "merged_parquet_merged_root": r"D:\vnpy_data\snapshots\merged",
-        "merged_parquet_reference_kind": "prev_close",
+        # today_open: 撮合参考价 = 当日**原始**(未复权) open，对齐"次日 09:30 开盘成交"语义
+        # prev_close: 老语义，仅在 source 没有当日数据时退化使用
+        # 详见 plan 文档"决策 1"（原始价撮合 + 决策 2 的 pct_chg mark-to-market）
+        "merged_parquet_reference_kind": "today_open",
         "merged_parquet_fallback_days": 10,
         "merged_parquet_stale_warn_hours": 48,
         "启用持久化": "是",

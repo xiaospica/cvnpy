@@ -38,7 +38,7 @@ from datetime import date, datetime, timedelta
 import json
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -83,7 +83,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
         "topk",
         "n_drop",
-        "cash_per_order",
+        "risk_degree",         # 等权 cash 系数（qlib TopkDropoutStrategy 同源），默认 0.95
         "gateway",             # 如 "QMT" / "QMT_SIM"; 下单 + mixin 价格查询都用
         "output_root",         # D:/ml_output 根
         "lookback_days",
@@ -121,7 +121,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     buy_sell_time: str = "09:30"  # 实盘 T+1 开盘交易时间（cron 注册见后续实盘版本）
     topk: int = 7
     n_drop: int = 1
-    cash_per_order: float = 100000.0
+    risk_degree: float = 0.95
     gateway: str = ""
     output_root: str = "D:/ml_output"
     lookback_days: int = 60
@@ -520,7 +520,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
         语义：
             sells = 当前持仓 - target_topk     → 全卖（按 yd_volume，T+1 限制）
-            buys  = target_topk - 当前持仓     → 按 cash_per_order ÷ 当日 pre_close 算手数
+            buys  = target_topk - 当前持仓     → qlib 等权: floor(cash×risk_degree/n_buys/price/100)×100
             keeps = 交集                        → 不动
         """
         on_day = on_day or date.today()
@@ -572,34 +572,44 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 self.write_log(f"[rebalance] sell {vt} 失败: {type(exc).__name__}: {exc}")
                 stats["sells_skipped"] += 1
 
-        # 2. buys（后买）
+        # 2. buys（后买，qlib TopkDropoutStrategy 等权 + risk_degree）
+        # 严格语义：n_buys = 真正能下单的只数（过滤掉无价/无效的）
+        # 这与 qlib signal_strategy.py:266-286 的 len(buy) 一致
+        priced_buys: List[Tuple[str, float]] = []
         for vt in buys:
             ref_price = self._get_reference_price(vt)
             if ref_price is None or ref_price <= 0:
                 stats["buys_skipped"] += 1
                 self.write_log(f"[rebalance] skip buy {vt}: 无参考价")
                 continue
-            volume = self._compute_buy_volume(ref_price)
-            if volume <= 0:
-                stats["buys_skipped"] += 1
-                self.write_log(
-                    f"[rebalance] skip buy {vt}: cash_per_order={self.cash_per_order} "
-                    f"price={ref_price} → volume={volume}"
-                )
-                continue
-            try:
-                self.send_order(
-                    vt_symbol=vt,
-                    direction=Direction.LONG,
-                    offset=Offset.OPEN,
-                    price=0.0,
-                    volume=volume,
-                    order_type=OrderType.MARKET,
-                )
-                stats["buys_dispatched"] += 1
-            except Exception as exc:
-                self.write_log(f"[rebalance] buy {vt} 失败: {type(exc).__name__}: {exc}")
-                stats["buys_skipped"] += 1
+            priced_buys.append((vt, float(ref_price)))
+
+        n_buys = len(priced_buys)
+        if n_buys > 0:
+            # sells 已同步撮合（vnpy_qmt_sim 同步），cash 已包含卖出回款
+            current_cash = self._get_current_cash()
+            for vt, ref_price in priced_buys:
+                volume = self._calculate_buy_amount(ref_price, current_cash, n_buys)
+                if volume <= 0:
+                    stats["buys_skipped"] += 1
+                    self.write_log(
+                        f"[rebalance] skip buy {vt}: cash={current_cash:.2f} risk={self.risk_degree} "
+                        f"n_buys={n_buys} price={ref_price} → volume={volume}"
+                    )
+                    continue
+                try:
+                    self.send_order(
+                        vt_symbol=vt,
+                        direction=Direction.LONG,
+                        offset=Offset.OPEN,
+                        price=0.0,
+                        volume=volume,
+                        order_type=OrderType.MARKET,
+                    )
+                    stats["buys_dispatched"] += 1
+                except Exception as exc:
+                    self.write_log(f"[rebalance] buy {vt} 失败: {type(exc).__name__}: {exc}")
+                    stats["buys_skipped"] += 1
 
         self.write_log(
             f"[rebalance] done {stats['sells_dispatched']}+{stats['buys_dispatched']} sent "
@@ -648,13 +658,48 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             pass
         return None
 
-    def _compute_buy_volume(self, ref_price: float) -> int:
-        """按 cash_per_order ÷ 价格 算手数，向下取整 100 股（A 股最小买入单位）。"""
-        if ref_price <= 0:
+    def _calculate_buy_amount(
+        self,
+        ref_price: float,
+        current_cash: float,
+        n_buys: int,
+        trade_unit: int = 100,
+    ) -> int:
+        """qlib TopkDropoutStrategy 等权 + risk_degree 公式 (signal_strategy.py:266-286 同源):
+            value = cash × risk_degree / n_buys
+            amount = value / ref_price
+            return floor(amount / trade_unit) × trade_unit
+
+        ref_price 是 daily_merged 的**原始 open**（未复权），不是 hfq。
+        与决策 1"撮合用原始价"一致：资金占用 ≈ value，手数与 qlib backtest 不同
+        （hfq_open 长期累乘除权后可能差几倍），但起点 value₀ ≈ value，之后都按
+        pct_chg 累乘 → 权益曲线绝对水平基本一致（决策 2 的 pct_chg mark-to-market）。
+        """
+        if ref_price <= 0 or n_buys <= 0 or current_cash <= 0:
             return 0
-        raw = float(self.cash_per_order) / float(ref_price)
-        lots = int(raw // 100)
-        return max(0, lots * 100)
+        value = float(current_cash) * float(self.risk_degree) / float(n_buys)
+        amount = value / float(ref_price)
+        lots = int(amount // trade_unit)
+        return max(0, lots * trade_unit)
+
+    def _get_current_cash(self) -> float:
+        """从 main_engine 拿本策略 gateway 当前可用现金（balance - frozen）。
+
+        rebalance buys 阶段调用：sells 已被同步撮合（vnpy_qmt_sim 同步成交），
+        cash 已包含卖出回款。返 0 时上层会拒绝下单。
+        """
+        try:
+            main_engine = getattr(self.signal_engine, "main_engine", None)
+            if main_engine is None:
+                return 0.0
+            for acc in main_engine.get_all_accounts():
+                if getattr(acc, "gateway_name", "") == self.gateway:
+                    balance = float(getattr(acc, "balance", 0) or 0)
+                    frozen = float(getattr(acc, "frozen", 0) or 0)
+                    return max(0.0, balance - frozen)
+        except Exception:
+            return 0.0
+        return 0.0
 
     def _instrument_to_vt(self, instrument: str) -> Optional[str]:
         """tushare ts_code (000001.SZ) → vnpy vt_symbol (000001.SZSE). 子类可覆写。"""
@@ -953,11 +998,40 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         # 真实策略时序：T 日 20:00 推理 → T+1 日 09:30 开盘 rebalance → T+1 日收盘 settle
         # 回放映射：day[i-1] 推理产出的 topk = day[i] 的目标持仓
         #   for day in days:
-        #     1. 用 prev_day_topk 在 day 开盘做 rebalance（先卖后买，cash_per_order ÷ pre_close）
+        #     1. 用 prev_day_topk 在 day 开盘做 rebalance（先卖后买，按当日 open）
         #     2. 读 day 的 predictions.parquet → select_topk → 暂存为 day+1 的目标
         #     3. 显式 settle_end_of_day(day)：今日买入转 yd 给 day+1 卖出
         prev_day_topk: Optional[pd.DataFrame] = None
 
+        # Phase 4：禁用本 gateway 自动 settle（按真实自然日触发会污染回放状态）
+        # 回放期间由本循环显式 settle_end_of_day(day)。仅影响本 gateway 实例。
+        if gateway is not None and hasattr(gateway, "enable_auto_settle"):
+            try:
+                gateway.enable_auto_settle(False)
+                self.write_log("[replay] 已禁用本 gateway 自动 settle（按逻辑日显式结算）")
+            except Exception as exc:
+                self.write_log(f"[replay] 禁用 auto_settle 失败: {exc}")
+
+        try:
+            self._replay_loop_iter(days, total, prev_day_topk, gateway)
+        finally:
+            if gateway is not None and hasattr(gateway, "enable_auto_settle"):
+                try:
+                    gateway.enable_auto_settle(True)
+                    self.write_log("[replay] 已恢复本 gateway 自动 settle")
+                except Exception as exc:
+                    self.write_log(f"[replay] 恢复 auto_settle 失败: {exc}")
+
+    def _replay_loop_iter(
+        self,
+        days: List[date],
+        total: int,
+        prev_day_topk: Optional[pd.DataFrame],
+        gateway: Any,
+    ) -> None:
+        """从 _replay_loop_body 拆出来的逐日 apply 循环。
+        独立成函数以便上层用 try/finally 保护 gateway.enable_auto_settle 状态。
+        """
         for i, day in enumerate(days):
             day_str = day.strftime("%Y%m%d")
             day_iso = day.strftime("%Y-%m-%d")
@@ -965,7 +1039,13 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             # 1. 用上一交易日的 topk 在今日开盘 rebalance
             if prev_day_topk is not None and self.enable_trading:
                 try:
-                    self._refresh_market_data_for_day(day)
+                    candidate_vts: List[str] = []
+                    if not prev_day_topk.empty:
+                        for inst in prev_day_topk.index:
+                            vt = self._instrument_to_vt(str(inst))
+                            if vt:
+                                candidate_vts.append(vt)
+                    self._refresh_market_data_for_day(day, candidates=candidate_vts)
                     rebal_stats = self.rebalance_to_target(prev_day_topk, on_day=day)
                     self.write_log(
                         f"[replay] day {i+1}/{total} {day_iso} rebalance: "
@@ -997,11 +1077,20 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             self.replay_progress = f"{i+1}/{total}"
             self.replay_last_done = day_iso
 
-    def _refresh_market_data_for_day(self, day: date) -> None:
-        """让 gateway.md 用 day 的 pre_close 刷新所有当前持仓 + 候选股 tick，供 rebalance 拿参考价。
+    def _refresh_market_data_for_day(
+        self,
+        day: date,
+        candidates: Optional[Iterable[str]] = None,
+    ) -> None:
+        """让 gateway.md 用 day 的参考价（reference_kind=today_open 时为当日 open）
+        刷新所有**当前持仓 + 新候选股**的 tick，供 rebalance 拿参考价 / 撮合时取成交价。
 
         关键：批量回放期间 md 默认按 datetime.now() 取价，但回放是过去日期。
-        显式调 md.refresh_tick(vt, as_of_date=day) 把 tick 价更新为 day 的 pre_close。
+        显式调 md.refresh_tick(vt, as_of_date=day) 把 tick 价更新为 day 的参考价。
+
+        candidates 必须包含**新买入候选**的 vt_symbol（不在当前持仓里的）；
+        否则它们的 tick 还是 vnpy 启动时 set_synthetic_tick 兜底的值，
+        会污染 _get_reference_price 与 _resolve_trade_price 两条读价路径。
         """
         gateway = self._get_own_gateway()
         if gateway is None:
@@ -1009,11 +1098,9 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         md = getattr(gateway, "md", None)
         if md is None or not hasattr(md, "refresh_tick"):
             return
-        # 当前持仓 + prev topk 的所有 vt_symbol 都需要刷
-        symbols = set()
-        for vt in self._get_long_positions().keys():
-            symbols.add(vt)
-        # 刷一次足够 — rebalance 只读这些 vt 的 tick
+        symbols = set(self._get_long_positions().keys())
+        if candidates:
+            symbols.update(c for c in candidates if c)
         for vt in symbols:
             try:
                 md.refresh_tick(vt, as_of_date=day)

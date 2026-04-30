@@ -62,7 +62,8 @@ QMT_SIM_BASE_SETTING = {
     "卖出持仓不足拒单": "是",
     "行情源": "merged_parquet",
     "merged_parquet_merged_root": r"D:\vnpy_data\snapshots\merged",
-    "merged_parquet_reference_kind": "prev_close",
+    # today_open：撮合用当日**原始**(未复权) open（对齐"次日 09:30 开盘成交"语义）
+    "merged_parquet_reference_kind": "today_open",
     "merged_parquet_fallback_days": 10,
     "merged_parquet_stale_warn_hours": 48,
     "启用持久化": "是",
@@ -112,8 +113,11 @@ STRATEGY_BASE_SETTING = {
     "subprocess_timeout_s": 300,
     "baseline_path": "",
     "monitor_window_days": 30,
+    # qlib TopkDropoutStrategy 等权 cash 系数
+    # 公式：buy_amount = floor(cash × risk_degree / n_buys / open / 100) × 100
+    "risk_degree": 0.95,
     # **安全开关 — 默认干跑**
-    "enable_trading": False,
+    "enable_trading": True,
 }
 
 
@@ -133,7 +137,8 @@ STRATEGIES = [
             ),
             "topk": 7,
             "n_drop": 1,
-            "cash_per_order": 100_000,
+            # TODO delete below line
+            "replay_start_date": "2026-01-01",  # 显式跳过 qlib 数据未覆盖区间
         },
     },
     # 多策略沙盒示例（仅 QMT_SIM 模式下意义；记得同步打开上面 GATEWAYS 的对应行）：
@@ -143,7 +148,7 @@ STRATEGIES = [
     #     "gateway_name": "QMT_SIM_zz500",
     #     "setting_override": {
     #         "bundle_dir": os.getenv("BUNDLE_DIR_ZZ500", r"...zz500_bundle..."),
-    #         "topk": 5, "n_drop": 1, "cash_per_order": 200_000,
+    #         "topk": 5, "n_drop": 1,  # risk_degree 走 STRATEGY_BASE_SETTING 默认
     #     },
     # },
 ]

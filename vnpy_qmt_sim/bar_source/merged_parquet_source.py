@@ -50,7 +50,7 @@ class MergedParquetBarSource(SimBarSource):
     def __init__(
         self,
         merged_root: str = r"D:\vnpy_data\snapshots\merged",
-        reference_kind: str = "prev_close",
+        reference_kind: str = "today_open",
         fallback_days: int = 10,
         stale_warn_hours: int = 48,
         cache_max: int = 3,

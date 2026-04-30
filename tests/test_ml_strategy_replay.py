@@ -290,30 +290,42 @@ def test_instrument_to_vt_conversion(tmp_path) -> None:
     assert strat._instrument_to_vt("nodot") is None
 
 
-def test_compute_buy_volume_rounds_to_lots(tmp_path) -> None:
+def test_calculate_buy_amount_qlib_equiweight(tmp_path) -> None:
+    """qlib TopkDropoutStrategy 等权公式：floor(cash × risk / n_buys / price / 100) × 100."""
     bundle = _make_task_json(tmp_path, test_start="2026-01-01")
-    strat = _make_strategy(bundle, cash_per_order=100_000)
-    # price 11.0 → 9090.9 raw shares → 9000 (90 lots)
-    assert strat._compute_buy_volume(11.0) == 9000
-    # price 50.0 → 2000 raw → 2000 (20 lots)
-    assert strat._compute_buy_volume(50.0) == 2000
-    # price 1500.0 → 66.6 raw → 0 (cash_per_order 不够买 100 股)
-    assert strat._compute_buy_volume(1500.0) == 0
-    assert strat._compute_buy_volume(0) == 0
-    assert strat._compute_buy_volume(-10) == 0
+    strat = _make_strategy(bundle, risk_degree=0.95)
+
+    # cash=1_000_000, risk=0.95, n_buys=7, price=11.0
+    # value = 1_000_000 * 0.95 / 7 = 135_714.28...
+    # amount = 135_714.28 / 11.0 = 12_337.66...
+    # lots = 12_337 // 100 = 123 → 12_300
+    assert strat._calculate_buy_amount(11.0, 1_000_000.0, 7) == 12_300
+
+    # cash=500_000, risk=0.95, n_buys=5, price=50.0
+    # value = 500_000 * 0.95 / 5 = 95_000
+    # amount = 95_000 / 50.0 = 1900 → 1900
+    assert strat._calculate_buy_amount(50.0, 500_000.0, 5) == 1900
+
+    # cash 不够买 1 手
+    assert strat._calculate_buy_amount(1500.0, 100_000.0, 7) == 0
+    # 边界
+    assert strat._calculate_buy_amount(0, 1_000_000.0, 7) == 0
+    assert strat._calculate_buy_amount(11.0, 0, 7) == 0
+    assert strat._calculate_buy_amount(11.0, 1_000_000.0, 0) == 0
 
 
 def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
-    """关键：当前持仓 vs 目标 topk diff 正确产出 sells/buys/keeps。"""
+    """关键：当前持仓 vs 目标 topk diff 正确产出 sells/buys/keeps，
+    买入金额按 qlib 等权 risk_degree × cash / n_buys。"""
     import pandas as pd
     bundle = _make_task_json(tmp_path, test_start="2026-01-01")
-    strat = _make_strategy(bundle, cash_per_order=100_000)
+    strat = _make_strategy(bundle, risk_degree=0.95)
     strat.trading = True
 
     # mock 当前持仓: 000001.SZSE (yd=200), 600000.SSE (yd=300)
     pos_a = MagicMock()
     pos_a.gateway_name = strat.gateway
-    pos_a.direction = "多"  # Direction.LONG.value
+    pos_a.direction = "多"
     pos_a.volume = 200
     pos_a.yd_volume = 200
     pos_a.vt_symbol = "000001.SZSE"
@@ -325,6 +337,13 @@ def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
     pos_b.vt_symbol = "600000.SSE"
     strat.signal_engine.main_engine.get_all_positions.return_value = [pos_a, pos_b]
 
+    # mock account: cash 1_000_000
+    acc = MagicMock()
+    acc.gateway_name = strat.gateway
+    acc.balance = 1_000_000.0
+    acc.frozen = 0.0
+    strat.signal_engine.main_engine.get_all_accounts.return_value = [acc]
+
     # mock tick 价格（用于买入手数计算）
     def fake_get_tick(vt):
         tick = MagicMock()
@@ -333,7 +352,6 @@ def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
         return tick
     strat.signal_engine.main_engine.get_tick.side_effect = fake_get_tick
 
-    # mock send_order 记录调用
     sent = []
     def fake_send_order(**kwargs):
         sent.append(kwargs)
@@ -341,7 +359,7 @@ def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
     strat.send_order = fake_send_order
 
     # 目标 topk: 000001.SZ (=current), 000002.SZ (new)
-    # → sells: 600000.SSE; buys: 000002.SZSE; keeps: 000001.SZSE
+    # → sells: 600000.SSE; buys: 000002.SZSE (n_buys=1); keeps: 000001.SZSE
     target = pd.DataFrame(
         {"score": [0.9, 0.8]},
         index=pd.Index(["000001.SZ", "000002.SZ"], name="instrument"),
@@ -351,16 +369,15 @@ def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
 
     assert stats["sells_dispatched"] == 1
     assert stats["buys_dispatched"] == 1
-    # 验证 sell 是 600000.SSE
     sells = [s for s in sent if s["direction"].value == "空"]
     assert len(sells) == 1
     assert sells[0]["vt_symbol"] == "600000.SSE"
-    assert sells[0]["volume"] == 300  # full yd_volume
-    # 验证 buy 是 000002.SZSE，volume = floor(100000/10/100)*100 = 10000
+    assert sells[0]["volume"] == 300
+    # buy 000002.SZSE: floor(1_000_000 * 0.95 / 1 / 10.0 / 100) * 100 = floor(950) * 100 = 95_000
     buys = [s for s in sent if s["direction"].value == "多"]
     assert len(buys) == 1
     assert buys[0]["vt_symbol"] == "000002.SZSE"
-    assert buys[0]["volume"] == 10000
+    assert buys[0]["volume"] == 95_000
 
 
 def test_rebalance_skips_sell_when_yd_volume_zero(tmp_path) -> None:
@@ -392,9 +409,14 @@ def test_rebalance_skips_buy_when_no_ref_price(tmp_path) -> None:
     """无参考价（tick 缺失）时跳过买入，不影响其他股票。"""
     import pandas as pd
     bundle = _make_task_json(tmp_path, test_start="2026-01-01")
-    strat = _make_strategy(bundle, cash_per_order=100_000)
+    strat = _make_strategy(bundle, risk_degree=0.95)
     strat.trading = True
     strat.signal_engine.main_engine.get_all_positions.return_value = []
+    acc = MagicMock()
+    acc.gateway_name = strat.gateway
+    acc.balance = 1_000_000.0
+    acc.frozen = 0.0
+    strat.signal_engine.main_engine.get_all_accounts.return_value = [acc]
 
     # tick 返 None → 没参考价
     strat.signal_engine.main_engine.get_tick.return_value = None
@@ -408,3 +430,84 @@ def test_rebalance_skips_buy_when_no_ref_price(tmp_path) -> None:
     assert stats["buys_dispatched"] == 0
     assert stats["buys_skipped"] == 1
     assert len(sent) == 0
+
+
+def test_refresh_market_data_for_day_includes_candidates(tmp_path) -> None:
+    """_refresh_market_data_for_day 必须刷新候选股 tick，否则新候选 tick.last_price 还是初始值。"""
+    bundle = _make_task_json(tmp_path, test_start="2026-01-01")
+    strat = _make_strategy(bundle)
+    strat.signal_engine.main_engine.get_all_positions.return_value = []  # 无持仓
+
+    # mock gateway.md.refresh_tick 记录被刷的 vt_symbols
+    refreshed: list[tuple[str, date]] = []
+    fake_md = MagicMock()
+    fake_md.refresh_tick = lambda vt, as_of_date=None: refreshed.append((vt, as_of_date))
+    fake_gw = MagicMock()
+    fake_gw.md = fake_md
+    fake_gw.gateway_name = strat.gateway
+    strat.signal_engine.main_engine.get_gateway = lambda name: fake_gw if name == strat.gateway else None
+
+    day = date(2026, 1, 5)
+    strat._refresh_market_data_for_day(day, candidates=["000002.SZSE", "600519.SSE"])
+
+    refreshed_vts = {r[0] for r in refreshed}
+    assert "000002.SZSE" in refreshed_vts
+    assert "600519.SSE" in refreshed_vts
+    # 全部用 day 作 as_of_date
+    for _, as_of in refreshed:
+        assert as_of == day
+
+
+# ---- Phase 5: 撮合层取 tick 价 ---------------------------------------
+
+
+def test_market_order_uses_tick_price_not_hardcoded() -> None:
+    """vnpy_qmt_sim 撮合 market 单时 trade.price = tick.last_price，不再是 10.0。"""
+    from vnpy.event import EventEngine
+    from vnpy.trader.constant import Direction, Offset, OrderType, Status
+    from vnpy.trader.object import OrderData, OrderRequest
+    from vnpy_qmt_sim import QmtSimGateway
+
+    ee = EventEngine()
+    ee.start()
+    try:
+        gw = QmtSimGateway(ee, "QMT_SIM_TEST_TRADE_PRICE")
+        # 注入一个 tick.last_price = 25.5（不是 10.0）
+        from vnpy.trader.object import TickData
+        from vnpy.trader.constant import Exchange
+        from datetime import datetime
+        gw.md._tick_cache["000001.SZSE"] = TickData(
+            symbol="000001",
+            exchange=Exchange.SZSE,
+            datetime=datetime.now(),
+            name="平安银行",
+            last_price=25.5,
+            limit_up=28.05,
+            limit_down=22.95,
+            gateway_name=gw.gateway_name,
+        )
+
+        # 模拟一个市价 LONG 订单走 _execute_trade 路径
+        order = OrderData(
+            symbol="000001",
+            exchange=Exchange.SZSE,
+            orderid="1",
+            type=OrderType.MARKET,
+            direction=Direction.LONG,
+            offset=Offset.OPEN,
+            price=0.0,  # MARKET 单 price=0
+            volume=100,
+            traded=0,
+            status=Status.NOTTRADED,
+            datetime=datetime.now(),
+            gateway_name=gw.gateway_name,
+        )
+        gw.td.counter.orders["1"] = order
+        gw.td.counter._execute_trade(order, 100)
+
+        # 应该有一笔成交，价格 = 25.5（不是 10.0）
+        trades = list(gw.td.counter.trades.values())
+        assert len(trades) == 1
+        assert trades[0].price == 25.5
+    finally:
+        ee.stop()
