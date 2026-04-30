@@ -466,54 +466,76 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
         return super().process_signal(signal)
 
     def _build_signals_for_suite(self, suite: str, run_id: str) -> list[dict]:
+        """
+        构建测试用例信号序列。
+
+        重要顺序约束：
+        1. force_sell_no_position 必须在所有 buy 用例之前（账户清仓后持仓=0），否则积累的持仓
+           会让卖单成交，无法验证"无持仓→[251005]拒单"语义。
+        2. buy_smoke 用 pct*2 双倍仓位建立底仓；后续 sell_smoke 只卖一份，留一份给 sell_passive，
+           确保 sell_passive 时账户里至少有 buy_smoke 留下的可卖部分（不依赖 buy_passive 是否成交）。
+        3. reject_up / invalid_volume 不影响持仓（前者本应被拒，模拟柜台下即使成交持仓累积也无害；
+           后者 1 股拒单），放在序列后段。
+        """
         sym = self.test_symbol
         pct = float(self.test_pct)
 
         smoke = [
             # 用例目的：验证信号写库->策略轮询->下单的最短链路（冒烟）。
-            # 触发原理：普通 buy 信号，不注入特殊 case，网关按默认逻辑处理，这里使用aggressive定价更容易成交。
-            # 预期现象：日志出现“收到信号/Send new order/下单成功”，并能看到 order/trade/position 更新。
+            # 触发原理：普通 buy 信号，不注入特殊 case，网关按默认逻辑处理，使用aggressive定价更容易成交。
+            # 预期现象：日志出现"收到信号/Send new order/下单成功"，并能看到 order/trade/position 更新。
             {"code": sym, "pct": pct, "type": "buy_smoke aggressive", "price": 6.500, "label": f"buy_smoke_{run_id}"},
 
             # 用例目的：验证卖出链路（含 Offset=CLOSE 方向解析、持仓不足拦截等基础行为）。
-            # 触发原理：普通 sell 信号，若无持仓则会被策略侧拦截（用于确认策略的保护逻辑存在），这里使用aggressive定价更容易成交。
-            # 预期现象：若无持仓，日志会提示“未找到持仓”；若有持仓，能正常下发卖单并成交。
+            # 触发原理：普通 sell 信号，使用aggressive定价更容易成交。
+            # 预期现象：T+0 标的下，buy_smoke 成交后形成可卖持仓，sell_smoke 正常下卖并成交。
             {"code": sym, "pct": pct, "type": "sell_smoke aggressive", "price": 6.500, "label": f"sell_smoke_{run_id}"},
         ]
 
         basic = [
-            # 用例目的：验证被动盘口价下单（更贴近实盘）。
-            # 触发原理：type 中包含 passive，测试策略会返回买一/卖一作为委托价。
-            # 预期现象：订单更容易成交或快速进入 NOTTRADED/ALLTRADED，日志可见定价输出。
+            # 用例 1（必须最前）：验证"卖出无持仓 -> 柜台拒单（持仓不足）"。
+            # 触发原理：force_sell_no_position 绕过策略侧持仓校验直接下 100 股卖单到柜台。
+            # 前置约束：账户当前必须无该标的可卖持仓（一键清仓后 + 在所有 buy 用例之前才能保证）。
+            # 预期现象：柜台返回 [251005] 证券可用数量不足，[REJECT] 日志出现完整 error_msg。
+            {"code": sym, "pct": pct, "type": "sell force_sell_no_position", "price": 6.500, "label": f"sell_force_no_pos_{run_id}"},
+
+            # 用例 2：建立双倍底仓 (pct*2)，给 sell_smoke 卖一份后还能给 sell_passive 留一份可卖。
+            # 触发原理：aggressive 定价（用卖一价）快速成交。
+            # 预期现象：ALLTRADED，账户持仓 ≈ 2*pct 仓位价值。
+            {"code": sym, "pct": pct * 2, "type": "buy_smoke_double aggressive", "price": 6.500, "label": f"buy_smoke_double_{run_id}"},
+
+            # 用例 3：卖出一份（用一份额）。
+            # 触发原理：aggressive 定价快速成交。
+            # 预期现象：ALLTRADED，账户保留 ≈ pct 仓位的可卖部分。
+            {"code": sym, "pct": pct, "type": "sell_smoke aggressive", "price": 6.500, "label": f"sell_smoke_{run_id}"},
+
+            # 用例 4：验证被动盘口价买入（passive 排队）。
+            # 触发原理：type 中包含 passive，测试策略返回买一作为委托价（容易 NOTTRADED）。
+            # 预期现象：进入 NOTTRADED，可能触发网关超时撤单 + 策略层撤单重挂。
             {"code": sym, "pct": pct, "type": "buy passive", "price": 6.500, "label": f"buy_passive_{run_id}"},
 
-            # 用例目的：验证卖出被动价下单路径。
-            # 触发原理：type 中包含 passive，卖单使用卖一价格。
-            # 预期现象：若有持仓则成交/撤单等回报正常；无持仓则被策略侧拦截（保护行为）。
+            # 用例 5：验证被动盘口价卖出（passive 排队）。
+            # 触发原理：type 中包含 passive，卖单使用卖一价。
+            # 前置约束：依赖用例 2/3 留下的可卖底仓（不依赖用例 4 是否成交）。
+            # 预期现象：进入 NOTTRADED → 可能撤单重挂 → ALLTRADED。
             {"code": sym, "pct": pct, "type": "sell passive", "price": 6.500, "label": f"sell_passive_{run_id}"},
 
-            # 用例目的：验证“价格越界导致拒单（模拟涨停上方报价）”的处理。
-            # 触发原理：type 中包含 reject_up，测试策略会把价格设置到涨停价之上（若 tick 有 limit_up）。
-            # 预期现象：网关返回 REJECTED；策略侧不应进入资金不足的延时重挂分支。
+            # 用例 6：验证"价格越界导致拒单（模拟涨停上方报价）"。
+            # 触发原理：type 中包含 reject_up，价格 = round_to(limit_up * 1.05, pricetick)。
+            # 预期现象：实盘严格柜台返回 REJECTED；模拟柜台（QMT_SIM/QMT 模拟账户）可能不校验越界
+            #           而按盘口价撮合成交，此情形下视为"该用例在当前柜台下不必现"，不视为失败。
             {"code": sym, "pct": pct, "type": "buy reject_up", "price": 6.500, "label": f"buy_reject_up_{run_id}"},
 
-            # 用例目的：验证“长时间不成交 -> 超时撤单 -> 自动重挂”的关键实盘链路。
-            # 触发原理：type 中包含 no_fill_60s，策略会把该 token 作为 case 标签注入 OrderRequest.reference；
-            #          注意：实盘中无法直接模拟 no_fill_60s，因为实盘订单是否成交取决于市场盘口，无法强制不成交，实盘中主要依赖挂单价格偏离盘口来增加不成交概率。
-            #          QMT_SIM 模拟网关根据 case 保持 NOTTRADED，直到超时撤单触发 CANCELLED，策略侧触发撤单重挂。
-            # 预期现象：出现“订单超时自动撤单”->“触发撤单重挂”->“重挂已提交”。
+            # 用例 7：验证"长时间不成交 -> 超时撤单 -> 自动重挂"的关键实盘链路。
+            # 触发原理：type 中包含 no_fill_60s 标签注入 OrderRequest.reference；passive 定价偏离盘口加大不成交概率。
+            # 预期现象：NOTTRADED → 网关超时撤单 → 策略撤单重挂 → 新订单 ALLTRADED。
             {"code": sym, "pct": pct, "type": "buy no_fill_60s passive", "price": 6.500, "label": f"buy_no_fill_60s_{run_id}"},
 
-            # 用例目的：验证“非法委托数量”导致柜台拒单。
-            # 触发原理：type 中包含 invalid_volume，策略强制下发非100整数倍（例如1股）订单。
-            # 预期现象：柜台或网关返回 REJECTED（如“最高委托数量合法性校验失败”）。
+            # 用例 8：验证"非法委托数量"导致柜台拒单。
+            # 触发原理：测试策略绕过 MySQLSignalStrategyPlus.send_order 的"数量修正/拦截"，
+            #           直接通过 SignalTemplatePlus.send_order 把 1 股下到柜台。
+            # 预期现象：柜台返回 [120155]/[120158] 类拒单，[REJECT] 日志出现完整 error_msg。
             {"code": sym, "pct": pct, "type": "buy invalid_volume", "price": 6.500, "label": f"buy_invalid_volume_{run_id}"},
-
-            # 用例目的：验证“卖出无持仓 -> 网关拒单（持仓不足）”的异常路径与策略处理。
-            # 触发原理：type 中包含 force_sell_no_position，测试策略绕过父类持仓校验，强制下发卖单；
-            #          注意：实盘中如果在策略层被拦截，就不会下发到网关，这里通过强制下发来测试网关的拒单行为。
-            # 预期现象：日志出现“REJECTED 持仓不足”，且策略不应进入资金不足的延时重挂分支。
-            {"code": sym, "pct": pct, "type": "sell force_sell_no_position", "price": 6.500, "label": f"sell_force_no_pos_{run_id}"},
         ]
 
         full = [
@@ -560,8 +582,11 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
             return basic
         if suite == "full":
             if self.engine_type == EngineType.LIVE.value:
-                return smoke + basic
+                # 实盘 full 沿用 basic 序列（自包含 8 条；不再拼接 smoke 避免 sell_smoke 卖光持仓
+                # 让后续 sell_passive / force_sell_no_pos 时序错乱）
+                return basic
             return full
+        # "all" 或其他
         if self.engine_type == EngineType.LIVE.value:
-            return smoke + basic
-        return smoke + basic + full
+            return basic
+        return basic + full
