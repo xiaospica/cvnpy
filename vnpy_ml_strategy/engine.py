@@ -375,6 +375,42 @@ class MLEngine(BaseEngine):
             timeout_s=timeout_s,
         )
 
+    def run_inference_range(
+        self,
+        bundle_dir: str,
+        range_start: date,
+        range_end: date,
+        lookback_days: int,
+        strategy_name: str,
+        inference_python: str,
+        output_root: str,
+        provider_uri: str,
+        baseline_path: Optional[str] = None,
+        timeout_s: int = 3600,
+    ) -> Dict[str, Any]:
+        """Phase 4 加速回放：批量推理一次产出多日 predictions + diagnostics。
+
+        预期加速 ~10-20x：spawn 一个子进程而非每日一个，省掉 N 次 qlib 加载。
+        子进程按 ``{output_root}/{strategy_name}/{yyyymmdd}/`` 写每日子目录。
+
+        Note: 批量模式不写 metrics.json（PSI/KS/IC 等留单日实时模式做）；
+        每日 diagnostics.json 含 ``batch_mode=true`` 标记。
+        """
+        if self._predictor is None:
+            raise RuntimeError("Predictor not set")
+        return self._predictor.run_range(
+            bundle_dir=bundle_dir,
+            range_start=range_start,
+            range_end=range_end,
+            lookback_days=lookback_days,
+            strategy_name=strategy_name,
+            inference_python=inference_python,
+            output_root=output_root,
+            provider_uri=provider_uri,
+            baseline_path=baseline_path,
+            timeout_s=timeout_s,
+        )
+
     # ------------------------------------------------------------------
     # Bundle 校验 (Phase 2.2)
     # ------------------------------------------------------------------

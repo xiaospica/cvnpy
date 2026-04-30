@@ -173,3 +173,111 @@ class QlibPredictor:
             "metrics": metrics,
             "diagnostics": diag,
         }
+
+    def run_range(
+        self,
+        bundle_dir: str,
+        range_start,
+        range_end,
+        lookback_days: int,
+        strategy_name: str,
+        inference_python: str,
+        output_root: str,
+        provider_uri: str,
+        baseline_path: Optional[str] = None,
+        timeout_s: int = 3600,
+        filter_parquet_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Phase 4 加速回放：批量推理子进程，一次性产出多日 predictions + diagnostics。
+
+        Parameters
+        ----------
+        range_start, range_end : datetime.date | str
+            回放起止日（包含两端）
+        output_root : str
+            子进程会按 ``{output_root}/{strategy_name}/{yyyymmdd}/`` 建子目录写文件
+        timeout_s : int
+            默认 3600s（1 小时）。回放 80 个交易日典型耗时 ~10 分钟，给余量
+
+        Returns
+        -------
+        dict: {n_days_total, n_days_with_data, exit_code, stderr_tail, returncode}
+        """
+        from datetime import date as _date
+        if isinstance(range_start, _date):
+            range_start_str = range_start.strftime("%Y-%m-%d")
+        else:
+            range_start_str = str(range_start)
+        if isinstance(range_end, _date):
+            range_end_str = range_end.strftime("%Y-%m-%d")
+        else:
+            range_end_str = str(range_end)
+
+        # batch 模式 out-dir 是 strategy 父目录（子进程内部按日建子目录）
+        strategy_out_root = Path(output_root) / strategy_name
+        strategy_out_root.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            inference_python,
+            "-m", "qlib_strategy_core.cli.run_inference",
+            "--bundle-dir", str(bundle_dir),
+            "--live-end-range", f"{range_start_str},{range_end_str}",
+            "--lookback", str(lookback_days),
+            "--out-dir", str(strategy_out_root),
+            "--strategy", strategy_name,
+            "--provider-uri", provider_uri,
+        ]
+        if baseline_path:
+            cmd += ["--baseline", str(baseline_path)]
+        if filter_parquet_path:
+            cmd += ["--filter-parquet", str(filter_parquet_path)]
+        if self.install_legacy_path:
+            cmd += ["--install-legacy-path"]
+
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(self.core_path) + (os.pathsep + existing if existing else "")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+
+        try:
+            result = subprocess.run(
+                cmd,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise InferenceTimeout(
+                f"batch inference subprocess exceeded {timeout_s}s for "
+                f"strategy={strategy_name} range=[{range_start_str},{range_end_str}]"
+            ) from exc
+
+        # 统计本轮写入了多少日子目录（ok / empty）
+        n_days_total = 0
+        n_days_with_data = 0
+        for entry in strategy_out_root.iterdir():
+            if not entry.is_dir() or len(entry.name) != 8 or not entry.name.isdigit():
+                continue
+            diag_path = entry / "diagnostics.json"
+            if not diag_path.exists():
+                continue
+            try:
+                diag = json.loads(diag_path.read_text(encoding="utf-8"))
+                if not diag.get("batch_mode"):
+                    # 单日模式遗留，不计入本次 batch 统计
+                    continue
+                n_days_total += 1
+                if diag.get("status") == "ok":
+                    n_days_with_data += 1
+            except Exception:
+                continue
+
+        return {
+            "n_days_total": n_days_total,
+            "n_days_with_data": n_days_with_data,
+            "returncode": result.returncode,
+            "stderr_tail": (result.stderr or "")[-2000:],
+        }

@@ -157,26 +157,55 @@ def test_replay_explicit_start_inside_test_passes(tmp_path) -> None:
 # ---- _replay_loop_body 续跑幂等 ---------------------------------------
 
 
-def test_replay_skips_days_with_completed_diagnostics(tmp_path) -> None:
-    """已存在 output_root/{name}/{day_str}/diagnostics.json 且 status=ok → 跳过推理。"""
+def test_replay_skips_batch_predict_when_diagnostics_complete(tmp_path) -> None:
+    """Phase A 续跑：所有交易日已有 batch_mode diagnostics → 跳过批量推理（不调 run_inference_range）。"""
     bundle = _make_task_json(tmp_path, test_start="2026-01-01")
     strat = _make_strategy(bundle)
 
-    # 制造一个 "已完成" 的 diagnostics.json
-    out_dir = Path(strat.output_root) / strat.strategy_name / "20260102"
-    out_dir.mkdir(parents=True)
-    (out_dir / "diagnostics.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    # 制造 4 天（02 03 04 05）的 batch_mode diagnostics + predictions（覆盖整窗口）
+    import pandas as pd
+    for day_str in ("20260102", "20260103", "20260104", "20260105"):
+        out_dir = Path(strat.output_root) / strat.strategy_name / day_str
+        out_dir.mkdir(parents=True)
+        (out_dir / "diagnostics.json").write_text(
+            json.dumps({"status": "ok", "batch_mode": True, "rows": 300}),
+            encoding="utf-8",
+        )
+        idx = pd.MultiIndex.from_tuples(
+            [(pd.Timestamp(f"2026-01-{day_str[-2:]}"), "000001.SZ")],
+            names=["datetime", "instrument"],
+        )
+        pd.DataFrame({"score": [1.0]}, index=idx).to_parquet(out_dir / "predictions.parquet")
 
-    # 直接调 _replay_loop_body 跑两天，第一天有 diagnostics 应跳过推理
+    fake_gateway = MagicMock()
+    # Mock 掉 generate_orders 让它不抛 NotImplementedError
+    strat.generate_orders = MagicMock()
+    strat._replay_loop_body(date(2026, 1, 2), date(2026, 1, 5), fake_gateway)
+
+    # 跳过批量推理：run_inference_range 不应被调
+    strat.signal_engine.run_inference_range.assert_not_called()
+    # settle 仍按交易日调（fake _is_trade_day 总返 True，2026-01-02..05 = 4 天）
+    assert fake_gateway.td.counter.settle_end_of_day.call_count == 4
+
+
+def test_replay_calls_batch_predict_when_diagnostics_missing(tmp_path) -> None:
+    """新部署：缺 diagnostics → 批量推理触发一次 run_inference_range。"""
+    bundle = _make_task_json(tmp_path, test_start="2026-01-01")
+    strat = _make_strategy(bundle)
+    # 模拟批量推理写出 diagnostics 但不写 predictions（空场景）
+    strat.signal_engine.run_inference_range.return_value = {
+        "n_days_total": 2, "n_days_with_data": 0, "returncode": 0, "stderr_tail": "",
+    }
+
     fake_gateway = MagicMock()
     strat._replay_loop_body(date(2026, 1, 2), date(2026, 1, 3), fake_gateway)
 
-    # 1-2 应跳过，1-3 应触发推理
-    assert strat.signal_engine.run_pipeline_now.call_count == 1
-    call_args = strat.signal_engine.run_pipeline_now.call_args
-    assert call_args.kwargs.get("as_of_date") == date(2026, 1, 3)
-
-    # settle 都调（不论是否跳过推理）
+    # 批量推理被调一次
+    strat.signal_engine.run_inference_range.assert_called_once()
+    call_kwargs = strat.signal_engine.run_inference_range.call_args.kwargs
+    assert call_kwargs["range_start"] == date(2026, 1, 2)
+    assert call_kwargs["range_end"] == date(2026, 1, 3)
+    # settle 仍按日调
     assert fake_gateway.td.counter.settle_end_of_day.call_count == 2
 
 
