@@ -386,6 +386,7 @@ class MLEngine(BaseEngine):
         output_root: str,
         provider_uri: str,
         baseline_path: Optional[str] = None,
+        filter_parquet_path: Optional[str] = None,
         timeout_s: int = 3600,
     ) -> Dict[str, Any]:
         """Phase 4 加速回放：批量推理一次产出多日 predictions + diagnostics。
@@ -395,9 +396,45 @@ class MLEngine(BaseEngine):
 
         Note: 批量模式不写 metrics.json（PSI/KS/IC 等留单日实时模式做）；
         每日 diagnostics.json 含 ``batch_mode=true`` 标记。
+
+        Phase 5.x 修复：与 ``run_inference`` 对齐，自动按 ``range_end`` 拼
+        ``{QS_DATA_ROOT}/snapshots/filtered/csi300_filtered_{range_end}.parquet``。
+        否则子进程会用 task.json 里固化的训练时 filter（如 csi300_custom_filtered.parquet
+        只覆盖到训练截止日 2026-01-28），导致回放窗口超出训练时点的所有日期 status=empty。
+
+        批量模式只能用单一 filter（dataset 一次 build），所以选 range_end 那天的快照
+        （= 最新的 csi300 成分股 + 流动性过滤）—— 严格说对早期日期有轻度成分股泄漏，
+        但实操不影响（4 个月内 csi300 成分变动 < 10%；且模拟盘不是 qlib backtest 数学复刻）。
         """
+        import os as _os
+        from pathlib import Path as _Path
+
         if self._predictor is None:
             raise RuntimeError("Predictor not set")
+
+        # Phase 5.x：与单日 run_inference 对齐，自动按 range_end 拼 filter 快照
+        if filter_parquet_path is None:
+            qs_data_root = _os.getenv("QS_DATA_ROOT")
+            if qs_data_root:
+                candidate = (
+                    _Path(qs_data_root) / "snapshots" / "filtered"
+                    / f"csi300_filtered_{range_end.strftime('%Y%m%d')}.parquet"
+                )
+                if candidate.exists():
+                    filter_parquet_path = str(candidate)
+                    from loguru import logger
+                    logger.info(
+                        f"[MLEngine] batch 推理使用 filter 快照 {candidate.name} "
+                        f"(批量只能用单一 filter，选 range_end={range_end})"
+                    )
+                else:
+                    from loguru import logger
+                    logger.warning(
+                        f"[MLEngine] filter 快照不存在 {candidate}, "
+                        "回放将用 bundle task.json 里固化的训练时 filter — "
+                        "若该 filter 不覆盖 range_end，超出范围的日子全 status=empty"
+                    )
+
         return self._predictor.run_range(
             bundle_dir=bundle_dir,
             range_start=range_start,
@@ -408,6 +445,7 @@ class MLEngine(BaseEngine):
             output_root=output_root,
             provider_uri=provider_uri,
             baseline_path=baseline_path,
+            filter_parquet_path=filter_parquet_path,
             timeout_s=timeout_s,
         )
 

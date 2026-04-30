@@ -98,7 +98,11 @@ else:
 
 
 # ─── ML 策略基础参数（所有策略共用） ───────────────────────────────────
-QS_DATA_ROOT = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
+# QS_DATA_ROOT 同时 setenv：MLEngine.run_inference{,_range} 用 os.getenv 自动按
+# live_end 拼 snapshots/filtered/csi300_filtered_{date}.parquet 覆盖 task.json
+# 训练时点固化的 filter（否则回放到训练截止日之后全部 status=empty）。
+os.environ.setdefault("QS_DATA_ROOT", r"D:/vnpy_data")
+QS_DATA_ROOT = os.environ["QS_DATA_ROOT"]
 VNPY_MODEL_ROOT = os.getenv("VNPY_MODEL_ROOT", r"D:/vnpy_data/models")
 
 STRATEGY_BASE_SETTING = {
