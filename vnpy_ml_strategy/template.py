@@ -742,11 +742,22 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 self.write_log(f"[replay] day {i+1}/{total} {day_iso}: skip (existing diagnostics)")
             else:
                 self.write_log(f"[replay] day {i+1}/{total} {day_iso}: pipeline start")
-                ok = self.signal_engine.run_pipeline_now(self.strategy_name, as_of_date=day)
-                if not ok:
-                    self.write_log(f"[replay] day {i+1}/{total} {day_iso}: pipeline failed (continuing)")
-                else:
+                self.signal_engine.run_pipeline_now(self.strategy_name, as_of_date=day)
+                # run_pipeline_now 的布尔返回值不可信（scheduler.wrapped + run_daily_pipeline
+                # 都吞了异常），改为读 self.last_status 与 diagnostics.json 真实判定
+                actual_status, actual_error = self._check_replay_day_outcome(day_str)
+                if actual_status in ("ok", "completed"):
                     self.write_log(f"[replay] day {i+1}/{total} {day_iso}: pipeline ok")
+                elif actual_status == "empty":
+                    # qlib bin 数据范围未覆盖该日期 / 该日非交易日 — 不算失败，继续推进
+                    self.write_log(
+                        f"[replay] day {i+1}/{total} {day_iso}: empty (qlib 数据未覆盖此日期)"
+                    )
+                else:
+                    self.write_log(
+                        f"[replay] day {i+1}/{total} {day_iso}: pipeline FAILED "
+                        f"status={actual_status!r} error={actual_error!r} (continuing)"
+                    )
 
             # 显式 settle_end_of_day(逻辑日)：替代被禁用的 gateway 自动 settle
             if gateway is not None:
@@ -767,3 +778,20 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             return main_engine.get_gateway(self.gateway)
         except Exception:
             return None
+
+    def _check_replay_day_outcome(self, day_str: str) -> Tuple[str, str]:
+        """读 diagnostics.json 真实判定回放当日推理是否成功。
+
+        返回 (status, error_message)。优先 diagnostics.json，缺失则退化到 self.last_*。
+        """
+        diag_path = Path(self.output_root) / self.strategy_name / day_str / "diagnostics.json"
+        if diag_path.exists():
+            try:
+                diag = json.loads(diag_path.read_text(encoding="utf-8"))
+                return (
+                    str(diag.get("status", "")),
+                    str(diag.get("error_message") or diag.get("error", "")),
+                )
+            except Exception as exc:
+                return ("read_diag_failed", str(exc))
+        return (str(self.last_status or ""), str(self.last_error or ""))

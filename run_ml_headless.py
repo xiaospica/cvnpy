@@ -151,6 +151,12 @@ STRATEGIES = [
 
 TRIGGER_ON_STARTUP = True
 ENABLE_WEBTRADER = True
+# 是否额外派生一个 uvicorn 子进程跑 vnpy_webtrader.web:app on 8001
+# - 8001 = HTTP REST 入口（mlearnweb 通过 vnpy_nodes.yaml 配置的 base_url 拉数据）
+# - 与 web_engine.start_server(tcp://2014, tcp://4102) 不同：那个是 RPC，不能给 mlearnweb 用
+# 默认 True：开箱即用让 mlearnweb 能直接看到节点和策略
+SPAWN_WEBTRADER_HTTP = True
+WEBTRADER_HTTP_PORT = 8001
 
 
 # ─── 主函数 ────────────────────────────────────────────────────────────
@@ -226,10 +232,37 @@ def main() -> int:
     ml_engine.init_engine()
     print(f"[headless] MLEngine registered: {ml_engine.get_all_strategy_class_names()}")
 
+    webtrader_http_proc = None
     if ENABLE_WEBTRADER:
         web_engine = main_engine.get_engine(WEB_APP_NAME)
         web_engine.start_server("tcp://127.0.0.1:2014", "tcp://127.0.0.1:4102")
         print("[headless] webtrader RPC server started on tcp://127.0.0.1:2014 / 4102")
+
+        # 派生 uvicorn 跑 webtrader HTTP REST server (mlearnweb 通过它拉数据)
+        # 不嵌入主进程：vnpy_webtrader.web:app 是独立 ASGI app，需要自己的事件循环
+        if SPAWN_WEBTRADER_HTTP:
+            import subprocess
+            webtrader_http_proc = subprocess.Popen(
+                [
+                    sys.executable, "-u", "-m", "uvicorn",
+                    "vnpy_webtrader.web:app",
+                    "--host", "127.0.0.1",
+                    "--port", str(WEBTRADER_HTTP_PORT),
+                ],
+                cwd=str(_HERE),
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+            print(
+                f"[headless] webtrader HTTP server (uvicorn) spawned pid={webtrader_http_proc.pid} "
+                f"on http://127.0.0.1:{WEBTRADER_HTTP_PORT} "
+                f"— mlearnweb 通过此端点拉数据"
+            )
+            time.sleep(2)  # 给 uvicorn 启动时间
+            if webtrader_http_proc.poll() is not None:
+                print(
+                    f"[headless] WARN: webtrader HTTP uvicorn 提前退出 "
+                    f"(rc={webtrader_http_proc.returncode}), mlearnweb 可能连不上"
+                )
 
     # 校验：每个策略的 gateway_name 必须在 GATEWAYS 中
     valid_gw_names = {gw["name"] for gw in GATEWAYS}
@@ -293,6 +326,17 @@ def main() -> int:
         for name in started:
             print(f"[headless] stop_strategy({name})...")
             ml_engine.stop_strategy(name)
+        if webtrader_http_proc is not None and webtrader_http_proc.poll() is None:
+            print("[headless] terminating webtrader HTTP uvicorn...")
+            try:
+                webtrader_http_proc.terminate()
+                webtrader_http_proc.wait(timeout=5)
+            except Exception as exc:
+                print(f"[headless] webtrader HTTP terminate failed: {exc}")
+                try:
+                    webtrader_http_proc.kill()
+                except Exception:
+                    pass
         print("[headless] main_engine.close()...")
         main_engine.close()
 
