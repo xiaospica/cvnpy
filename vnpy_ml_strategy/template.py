@@ -627,7 +627,10 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             for pos in main_engine.get_all_positions():
                 if getattr(pos, "gateway_name", "") != self.gateway:
                     continue
-                if str(getattr(pos, "direction", "")) != Direction.LONG.value:
+                # 注意：vnpy Direction 是 Enum；用 enum 直接比较或比较 .value，不能用 str(enum)
+                # （str(Direction.LONG) = "Direction.LONG" ≠ "多" = Direction.LONG.value）
+                pos_dir = getattr(pos, "direction", None)
+                if pos_dir != Direction.LONG and getattr(pos_dir, "value", None) != Direction.LONG.value:
                     continue
                 if float(getattr(pos, "volume", 0) or 0) <= 0:
                     continue

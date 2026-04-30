@@ -61,6 +61,41 @@ def test_default_account_id_falls_back_to_gateway_name(tmp_path: Path) -> None:
         ee.stop()
 
 
+def test_connect_pushes_account_with_setting_capital(tmp_path: Path) -> None:
+    """关键回归：connect() 推到 vnpy OMS 的 AccountData.balance 必须 = setting["模拟资金"]。
+
+    旧 bug：counter.capital 默认值 10M → 先构造 AccountData(balance=10M) → 再用 setting 改 capital
+    → on_account 推送的是 stale 10M → 策略层 main_engine.get_all_accounts 读到 10M
+    → _calculate_buy_amount 算出 10x 应有手数 → 真正下单时撮合层用真实价反查现金不足拒单。
+
+    fix: connect 顺序改成"先 capital ← setting，再构造并推送 AccountData"。
+    """
+    ee = EventEngine()
+    ee.start()
+    received_accounts: list = []
+
+    def capture_on_account(acc):
+        received_accounts.append(acc)
+
+    try:
+        gw = QmtSimGateway(ee, "QMT_SIM_X")
+        original_on_account = gw.on_account
+        gw.on_account = lambda acc: (capture_on_account(acc), original_on_account(acc))[1]
+        gw.connect(_gateway_setting(tmp_path, capital=1_000_000.0))
+
+        # 至少有一次 on_account，且最后一次 balance 必须 = 1_000_000
+        assert received_accounts, "connect 没有推送 AccountData 到 OMS"
+        last_acc = received_accounts[-1]
+        assert last_acc.balance == 1_000_000.0, (
+            f"AccountData.balance ({last_acc.balance}) ≠ setting capital (1_000_000) — "
+            "顺序 bug 复发"
+        )
+        # counter 自身的 capital 也必须正确
+        assert gw.td.counter.capital == 1_000_000.0
+    finally:
+        ee.stop()
+
+
 def test_two_gateways_have_independent_capital_and_positions(tmp_path: Path) -> None:
     """两个 gateway 各自下单 → 资金/持仓互不影响。"""
     ee = EventEngine()

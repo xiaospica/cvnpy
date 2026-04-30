@@ -762,22 +762,23 @@ class QmtSimTd:
 
     def connect(self, setting: dict):
         acc_id = setting.get("账户", "test_id")
+        # 关键顺序：先把 capital / partial_rate 等从 setting 装入 counter，再构造
+        # AccountData 推到 OMS。否则 AccountData.balance = counter.capital(默认 10M) 错过
+        # setting 的"模拟资金" → vnpy OMS 一直读到 stale 10M（_get_current_cash 误读）。
+        self.counter.capital = setting.get("模拟资金", 10000000.0)
+        self.counter.partial_rate = setting.get("部分成交率", 0.0)
+        self.counter.reject_rate = setting.get("拒单率", 0.0)
+
         account = AccountData(
             accountid=acc_id,
             balance=self.counter.capital,
             frozen=self.counter.frozen,
             gateway_name=self.gateway_name
         )
-        self.counter.accounts[acc_id] = account
-        self.counter.capital = setting.get("模拟资金", 10000000.0)
-        self.counter.partial_rate = setting.get("部分成交率", 0.0)
-        self.counter.reject_rate = setting.get("拒单率", 0.0)
-        
-        self.gateway.write_log("模拟交易接口连接成功")
-        
-        # 推送初始账户
         self.counter.accountid = account.accountid
-        self.counter.accounts[account.accountid] = account
+        self.counter.accounts[acc_id] = account
+
+        self.gateway.write_log("模拟交易接口连接成功")
         self.gateway.on_account(account)
 
     def send_order(self, req: OrderRequest) -> str:

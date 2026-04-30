@@ -323,15 +323,17 @@ def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
     strat.trading = True
 
     # mock 当前持仓: 000001.SZSE (yd=200), 600000.SSE (yd=300)
+    # 注意 direction 用真实 Direction.LONG enum（vnpy gateway 推送的就是 enum 类型）
+    from vnpy.trader.constant import Direction as _Dir
     pos_a = MagicMock()
     pos_a.gateway_name = strat.gateway
-    pos_a.direction = "多"
+    pos_a.direction = _Dir.LONG
     pos_a.volume = 200
     pos_a.yd_volume = 200
     pos_a.vt_symbol = "000001.SZSE"
     pos_b = MagicMock()
     pos_b.gateway_name = strat.gateway
-    pos_b.direction = "多"
+    pos_b.direction = _Dir.LONG
     pos_b.volume = 300
     pos_b.yd_volume = 300
     pos_b.vt_symbol = "600000.SSE"
@@ -389,13 +391,14 @@ def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
 def test_rebalance_skips_sell_when_yd_volume_zero(tmp_path) -> None:
     """T+1 限制：yd_volume=0（当日新买）时跳过卖出。"""
     import pandas as pd
+    from vnpy.trader.constant import Direction as _Dir
     bundle = _make_task_json(tmp_path, test_start="2026-01-01")
     strat = _make_strategy(bundle)
     strat.trading = True
 
     pos = MagicMock()
     pos.gateway_name = strat.gateway
-    pos.direction = "多"
+    pos.direction = _Dir.LONG
     pos.volume = 200
     pos.yd_volume = 0  # 当日新买
     pos.vt_symbol = "000001.SZSE"
@@ -442,6 +445,31 @@ def test_rebalance_skips_buy_when_no_ref_price(tmp_path) -> None:
     assert stats["buys_dispatched"] == 0
     assert stats["buys_skipped"] == 1
     assert len(sent) == 0
+
+
+def test_get_long_positions_recognizes_direction_enum(tmp_path) -> None:
+    """关键回归：_get_long_positions 必须正确识别 Direction.LONG 枚举（vnpy gateway 推 enum）。
+
+    旧 bug：用 str(pos.direction) != Direction.LONG.value 比较 →
+    str(Direction.LONG) = "Direction.LONG" 永远 ≠ "多" → 全部 continue → 空 dict。
+    现场症状：rebalance 每天报 current=0，无论实际有多少持仓。
+    """
+    from vnpy.trader.constant import Direction as _Dir
+    bundle = _make_task_json(tmp_path, test_start="2026-01-01")
+    strat = _make_strategy(bundle)
+
+    pos = MagicMock()
+    pos.gateway_name = strat.gateway
+    pos.direction = _Dir.LONG  # 真实 enum，不是 string
+    pos.volume = 100
+    pos.yd_volume = 100
+    pos.vt_symbol = "000001.SZSE"
+    strat.signal_engine.main_engine.get_all_positions.return_value = [pos]
+
+    result = strat._get_long_positions()
+    assert "000001.SZSE" in result, (
+        "_get_long_positions 应识别 Direction.LONG enum；旧 bug 用 str(enum) 比较 .value 永远不匹配"
+    )
 
 
 def test_get_reference_price_reads_from_md_cache_not_oms(tmp_path) -> None:
