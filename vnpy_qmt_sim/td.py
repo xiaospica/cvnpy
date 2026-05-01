@@ -53,6 +53,11 @@ class SimulationCounter:
         self.reject_rate = 0.0  # 拒单率
         self.partial_rate = 0.0 # 部分成交率
         self.latency = 0 # 模拟延迟(ms)
+
+        # 回放支持：策略层在 _replay_loop_iter 每天循环开头设此为逻辑日 datetime,
+        # 循环结尾设 None。trade.datetime / order.datetime 用此值代替 datetime.now()，
+        # 让前端"按日期"展示交易记录与回放真实时序对齐。
+        self._replay_now: Optional[datetime] = None
         
         # 超时配置
         self.order_timeout = 30  # 订单超时秒数
@@ -278,7 +283,7 @@ class SimulationCounter:
             offset=order.offset,
             price=trade_price,
             volume=volume,
-            datetime=datetime.now(),
+            datetime=self._replay_now or datetime.now(),
             gateway_name=self.gateway.gateway_name,
         )
         self.trades[trade.tradeid] = trade
@@ -560,7 +565,7 @@ class SimulationCounter:
             offset=order.offset,
             price=trade_price,
             volume=trade_volume,
-            datetime=order.datetime,
+            datetime=self._replay_now or order.datetime,
             gateway_name=self.gateway.gateway_name
         )
         self.trades[trade.tradeid] = trade
