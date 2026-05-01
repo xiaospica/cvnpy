@@ -314,44 +314,46 @@ def test_calculate_buy_amount_qlib_equiweight(tmp_path) -> None:
     assert strat._calculate_buy_amount(11.0, 1_000_000.0, 0) == 0
 
 
-def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
-    """关键：当前持仓 vs 目标 topk diff 正确产出 sells/buys/keeps，
-    买入金额按 qlib 等权 risk_degree × cash / n_buys。"""
+def test_rebalance_uses_qlib_topk_dropout(tmp_path) -> None:
+    """Phase 6 sanity: rebalance_to_target 用 topk_dropout_decision 算法决策。
+
+    持仓 [A, B, C] vs pred top-3 [A, B, D]; n_drop=1 → 卖 C 买 D（不全卖）。
+    详细分支等价见 test_topk_dropout_decision.py。
+    """
     import pandas as pd
+    from vnpy.trader.constant import Direction as _Dir
     bundle = _make_task_json(tmp_path, test_start="2026-01-01")
     strat = _make_strategy(bundle, risk_degree=0.95)
+    strat.topk = 3
+    strat.n_drop = 1
     strat.trading = True
 
-    # mock 当前持仓: 000001.SZSE (yd=200), 600000.SSE (yd=300)
-    # 注意 direction 用真实 Direction.LONG enum（vnpy gateway 推送的就是 enum 类型）
-    from vnpy.trader.constant import Direction as _Dir
-    pos_a = MagicMock()
-    pos_a.gateway_name = strat.gateway
-    pos_a.direction = _Dir.LONG
-    pos_a.volume = 200
-    pos_a.yd_volume = 200
-    pos_a.vt_symbol = "000001.SZSE"
-    pos_b = MagicMock()
-    pos_b.gateway_name = strat.gateway
-    pos_b.direction = _Dir.LONG
-    pos_b.volume = 300
-    pos_b.yd_volume = 300
-    pos_b.vt_symbol = "600000.SSE"
-    strat.signal_engine.main_engine.get_all_positions.return_value = [pos_a, pos_b]
+    # 当前持仓 A, B, C (ts → vt: A.SZ → A.SZSE, etc.)
+    positions = []
+    for code in ["000001.SZ", "000002.SZ", "000003.SZ"]:
+        vt = code[:-3] + ".SZSE"
+        pos = MagicMock()
+        pos.gateway_name = strat.gateway
+        pos.direction = _Dir.LONG
+        pos.volume = 100
+        pos.yd_volume = 100
+        pos.vt_symbol = vt
+        positions.append(pos)
+    strat.signal_engine.main_engine.get_all_positions.return_value = positions
 
-    # mock account: cash 1_000_000
     acc = MagicMock()
     acc.gateway_name = strat.gateway
     acc.balance = 1_000_000.0
     acc.frozen = 0.0
     strat.signal_engine.main_engine.get_all_accounts.return_value = [acc]
 
-    # mock tick 价格（用于买入手数计算）
-    # _get_reference_price 优先读 gateway.md.get_full_tick → 测试里 mock 这条路径
+    # md.get_full_tick: 所有股票都可交易，价格 10.0
     def fake_get_full_tick(vt):
-        tick = MagicMock(spec=["last_price", "pre_close"])  # 限定属性，避免 MagicMock 自动 float 化
+        tick = MagicMock(spec=["last_price", "pre_close", "limit_up", "limit_down"])
         tick.last_price = 10.0
         tick.pre_close = 10.0
+        tick.limit_up = 11.0
+        tick.limit_down = 9.0
         return tick
     fake_md = MagicMock()
     fake_md.get_full_tick = fake_get_full_tick
@@ -361,90 +363,87 @@ def test_rebalance_diff_sells_buys_keeps(tmp_path) -> None:
     strat.signal_engine.main_engine.get_gateway = lambda name: fake_gw if name == strat.gateway else None
 
     sent = []
-    def fake_send_order(**kwargs):
-        sent.append(kwargs)
-        return ["mock_orderid"]
-    strat.send_order = fake_send_order
+    strat.send_order = lambda **kw: sent.append(kw) or ["mock"]
 
-    # 目标 topk: 000001.SZ (=current), 000002.SZ (new)
-    # → sells: 600000.SSE; buys: 000002.SZSE (n_buys=1); keeps: 000001.SZSE
-    target = pd.DataFrame(
-        {"score": [0.9, 0.8]},
-        index=pd.Index(["000001.SZ", "000002.SZ"], name="instrument"),
-    )
+    # 全量 pred_score: A(0.9) > B(0.7) > D(0.5) > C(0.3) > E(0.1)
+    pred_score = pd.Series({
+        "000001.SZ": 0.9,  # A — 持仓
+        "000002.SZ": 0.7,  # B — 持仓
+        "000004.SZ": 0.5,  # D — 新候选
+        "000003.SZ": 0.3,  # C — 持仓
+        "000005.SZ": 0.1,  # E
+    })
+    stats = strat.rebalance_to_target(pred_score, on_day=date(2026, 1, 5))
 
-    stats = strat.rebalance_to_target(target, on_day=date(2026, 1, 5))
-
-    assert stats["sells_dispatched"] == 1
-    assert stats["buys_dispatched"] == 1
+    # qlib TopkDropoutStrategy n_drop=1 应该卖 C 买 D
     sells = [s for s in sent if s["direction"].value == "空"]
-    assert len(sells) == 1
-    assert sells[0]["vt_symbol"] == "600000.SSE"
-    assert sells[0]["volume"] == 300
-    # buy 000002.SZSE: floor(1_000_000 * 0.95 / 1 / 10.0 / 100) * 100 = floor(950) * 100 = 95_000
     buys = [s for s in sent if s["direction"].value == "多"]
-    assert len(buys) == 1
-    assert buys[0]["vt_symbol"] == "000002.SZSE"
-    assert buys[0]["volume"] == 95_000
+    assert len(sells) == 1, f"应卖 1 只 (C)；实际 sent: {sent}"
+    assert sells[0]["vt_symbol"] == "000003.SZSE"  # C
+    assert len(buys) == 1, f"应买 1 只 (D)；实际 sent: {sent}"
+    assert buys[0]["vt_symbol"] == "000004.SZSE"  # D
 
 
-def test_rebalance_skips_sell_when_yd_volume_zero(tmp_path) -> None:
-    """T+1 限制：yd_volume=0（当日新买）时跳过卖出。"""
+def test_rebalance_empty_pred_skips(tmp_path) -> None:
+    """空 pred_score → 不调仓"""
     import pandas as pd
-    from vnpy.trader.constant import Direction as _Dir
     bundle = _make_task_json(tmp_path, test_start="2026-01-01")
     strat = _make_strategy(bundle)
     strat.trading = True
-
-    pos = MagicMock()
-    pos.gateway_name = strat.gateway
-    pos.direction = _Dir.LONG
-    pos.volume = 200
-    pos.yd_volume = 0  # 当日新买
-    pos.vt_symbol = "000001.SZSE"
-    strat.signal_engine.main_engine.get_all_positions.return_value = [pos]
-    strat.signal_engine.main_engine.get_tick.return_value = None
+    strat.signal_engine.main_engine.get_all_positions.return_value = []
     sent = []
     strat.send_order = lambda **kw: sent.append(kw) or ["mock"]
-
-    # 空 target → 应该 sell 持仓，但 yd=0 跳过
-    stats = strat.rebalance_to_target(pd.DataFrame(), on_day=date(2026, 1, 5))
+    stats = strat.rebalance_to_target(pd.Series(dtype=float), on_day=date(2026, 1, 5))
     assert stats["sells_dispatched"] == 0
-    assert stats["sells_skipped"] == 1
+    assert stats["buys_dispatched"] == 0
     assert len(sent) == 0
 
 
-def test_rebalance_skips_buy_when_no_ref_price(tmp_path) -> None:
-    """无参考价（tick 缺失）时跳过买入，不影响其他股票。"""
+def test_rebalance_first_day_no_holdings(tmp_path) -> None:
+    """空仓首日 → 按 pred top-k 全买入"""
     import pandas as pd
     bundle = _make_task_json(tmp_path, test_start="2026-01-01")
     strat = _make_strategy(bundle, risk_degree=0.95)
+    strat.topk = 3
+    strat.n_drop = 1
     strat.trading = True
     strat.signal_engine.main_engine.get_all_positions.return_value = []
+
     acc = MagicMock()
     acc.gateway_name = strat.gateway
     acc.balance = 1_000_000.0
     acc.frozen = 0.0
     strat.signal_engine.main_engine.get_all_accounts.return_value = [acc]
 
-    # gateway.md.get_full_tick 返 None + main_engine.get_tick 返 None → 无参考价
+    def fake_get_full_tick(vt):
+        tick = MagicMock(spec=["last_price", "pre_close", "limit_up", "limit_down"])
+        tick.last_price = 10.0
+        tick.pre_close = 10.0
+        tick.limit_up = 11.0
+        tick.limit_down = 9.0
+        return tick
     fake_md = MagicMock()
-    fake_md.get_full_tick = lambda vt: None
+    fake_md.get_full_tick = fake_get_full_tick
     fake_gw = MagicMock()
     fake_gw.md = fake_md
     fake_gw.gateway_name = strat.gateway
     strat.signal_engine.main_engine.get_gateway = lambda name: fake_gw if name == strat.gateway else None
-    strat.signal_engine.main_engine.get_tick.return_value = None
+
     sent = []
     strat.send_order = lambda **kw: sent.append(kw) or ["mock"]
 
-    target = pd.DataFrame(
-        {"score": [0.9]}, index=pd.Index(["000001.SZ"], name="instrument"),
-    )
-    stats = strat.rebalance_to_target(target, on_day=date(2026, 1, 5))
-    assert stats["buys_dispatched"] == 0
-    assert stats["buys_skipped"] == 1
-    assert len(sent) == 0
+    pred_score = pd.Series({
+        "000001.SZ": 0.9, "000002.SZ": 0.8, "000003.SZ": 0.7,
+        "000004.SZ": 0.6, "000005.SZ": 0.5,
+    })
+    stats = strat.rebalance_to_target(pred_score, on_day=date(2026, 1, 5))
+    # qlib 算法首日: last=[], today=top(n_drop+topk-len(last)=4)=[A,B,C,D]
+    # comb sort = ABCDE, 末 1 = [E] (E 不在 last → sell=空)
+    # buy = today[: 0+3-0=3] = [A, B, C]
+    buys = [s for s in sent if s["direction"].value == "多"]
+    assert len(buys) == 3
+    bought = sorted(b["vt_symbol"] for b in buys)
+    assert bought == ["000001.SZSE", "000002.SZSE", "000003.SZSE"]
 
 
 def test_get_long_positions_recognizes_direction_enum(tmp_path) -> None:

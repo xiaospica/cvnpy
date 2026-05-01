@@ -53,23 +53,22 @@ class QlibMLStrategy(MLStrategyTemplate):
     # 下单 — A 股 T+1 + 涨跌停 + ST 过滤
     # ------------------------------------------------------------------
 
-    def generate_orders(self, selected: pd.DataFrame) -> None:
-        """把 selected 转换为 rebalance 调仓动作（先卖后买）。
+    def generate_orders(self, pred_score: pd.Series, selected: pd.DataFrame) -> None:
+        """Phase 6: 把全量 pred_score 交给 qlib TopkDropoutStrategy 算法决策。
 
         策略真实时序（实盘）：T 日 21:00 推理 → T+1 日 09:30 开盘 rebalance。
-        本方法是实时模式下 ``run_daily_pipeline`` 末尾的入口，只是简单委托给父类
-        ``rebalance_to_target`` 做 diff 调仓 — 当前持仓与新 topk 比较，先卖后买。
+        本方法是实时模式下 ``run_daily_pipeline`` 末尾的入口，委托给父类
+        ``rebalance_to_target(pred_score)`` 走 qlib TopkDropoutStrategy 等价算法。
 
-        回放模式不走本方法，由 ``_replay_loop_body`` 直接在次日开盘调
-        ``rebalance_to_target(prev_day_topk, on_day=current_day)``。
+        回放模式不走本方法，由 ``_replay_loop_iter`` 直接调
+        ``rebalance_to_target(prev_day_pred_score, on_day=current_day)``。
 
-        子类如果有更复杂的过滤逻辑（ST/停牌/涨跌停 hard skip）可以覆写
-        ``rebalance_to_target`` 而非 ``generate_orders``。
+        ``selected`` 参数保留用于子类做日志 / 自定义；算法决策只用 pred_score 全量。
         """
         if not self.enable_trading:
             self.write_log("generate_orders: enable_trading=False, skipping (dry-run)")
             return
-        self.rebalance_to_target(selected, on_day=date.today())
+        self.rebalance_to_target(pred_score, on_day=date.today())
 
     # ------------------------------------------------------------------
     # Helpers

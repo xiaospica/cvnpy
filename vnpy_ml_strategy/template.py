@@ -421,8 +421,17 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
             if self.enable_trading:
                 self.last_stage = Stage.ORDER.value
-                self.write_log(f"generate_orders enabled, dispatching {len(selected)} orders")
-                self.generate_orders(selected)
+                # Phase 6: 提取全量 pred_score (Series) 传给 generate_orders，
+                # 让子类调 rebalance_to_target 走 qlib 算法
+                try:
+                    last_dt = pred_df.index.get_level_values("datetime").max()
+                    today_pred = pred_df.xs(last_dt, level="datetime")
+                    pred_score = today_pred.iloc[:, 0] if isinstance(today_pred, pd.DataFrame) else today_pred
+                except Exception as exc:
+                    self.write_log(f"提取 pred_score 失败: {exc}")
+                    pred_score = pd.Series(dtype=float)
+                self.write_log(f"generate_orders enabled, pred_n={len(pred_score)}, dispatching")
+                self.generate_orders(pred_score, selected)
             else:
                 self.write_log("enable_trading=False, skip generate_orders (dry-run)")
 
@@ -489,8 +498,19 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         store = ResultStore(self.output_root)
         store.write_selections(self.strategy_name, today, sel_df)
 
-    def generate_orders(self, selected: pd.DataFrame) -> None:
-        """子类实现. 内部调 self.send_order(...). 仅在 enable_trading=True 时被调用."""
+    def generate_orders(self, pred_score: pd.Series, selected: pd.DataFrame) -> None:
+        """子类实现. 内部调 self.send_order(...). 仅在 enable_trading=True 时被调用.
+
+        Phase 6: 签名加 pred_score (Series, 全量) 作为第一参数 — qlib TopkDropoutStrategy
+        算法需要全量候选池才能正确决策。子类典型实现：
+
+            def generate_orders(self, pred_score, selected):
+                if not self.enable_trading:
+                    return
+                self.rebalance_to_target(pred_score, on_day=date.today())
+
+        ``selected`` 仍然传入用于子类做日志 / persistence，但 rebalance 内部不再使用它。
+        """
         raise NotImplementedError("subclass should implement generate_orders")
 
     # -----------------------------------------------------------------
@@ -501,60 +521,113 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
     def rebalance_to_target(
         self,
-        target_topk: pd.DataFrame,
+        pred_score: pd.Series,
         on_day: Optional[date] = None,
     ) -> Dict[str, Any]:
-        """根据目标 topk + 当前持仓做 diff，先卖后买。
+        """用 qlib TopkDropoutStrategy 算法决定 sells/buys，再走 vnpy 撮合。
+
+        Phase 6 改造：决策算法从手写 strict diff 换成
+        :func:`vnpy_ml_strategy.topk_dropout_decision.topk_dropout_decision`，
+        与 qlib ``TopkDropoutStrategy.generate_trade_decision`` 算法等价。
 
         Parameters
         ----------
-        target_topk : DataFrame
-            索引含 ``instrument`` (如 "000001.SZ") 的目标持仓表。空 DataFrame 表示
-            清空所有持仓（全部 sell）。
-        on_day : datetime.date, optional
-            执行交易的逻辑日。回放传当日；实时不传走 today。用于查询当日参考价。
+        pred_score : pd.Series
+            **全量** 当日预测分数, index = instrument (ts_code 格式如 "000001.SZ"),
+            value = score。**不是** select_topk 后的 head(topk) — 算法需要看
+            完整候选池才能正确选 today 候选 (`top of ~last`).
+        on_day : date, optional
+            执行交易的逻辑日。回放传当日；实时不传走 today。
 
         Returns
         -------
         dict: {sells_dispatched, buys_dispatched, sells_skipped, buys_skipped}
-
-        语义：
-            sells = 当前持仓 - target_topk     → 全卖（按 yd_volume，T+1 限制）
-            buys  = target_topk - 当前持仓     → qlib 等权: floor(cash×risk_degree/n_buys/price/100)×100
-            keeps = 交集                        → 不动
         """
+        from .topk_dropout_decision import topk_dropout_decision
+
         on_day = on_day or date.today()
         stats = {"sells_dispatched": 0, "buys_dispatched": 0, "sells_skipped": 0, "buys_skipped": 0}
 
-        if target_topk is None:
-            target_topk = pd.DataFrame()
-        # vt_symbol 集合
-        target_set = set()
-        for inst in (target_topk.index if not target_topk.empty else []):
-            vt = self._instrument_to_vt(str(inst))
+        # 边界：无预测 → 不调仓
+        if pred_score is None or len(pred_score) == 0:
+            self.write_log(f"[rebalance] on_day={on_day} pred_score 为空，跳过")
+            return stats
+
+        # 当前持仓 (vt_symbol → PositionData)
+        positions = self._get_long_positions()
+
+        # vt_symbol ↔ ts_code 双向映射（算法用 ts_code，撮合用 vt_symbol）
+        ts_to_vt: Dict[str, str] = {}
+        current_holdings_ts: List[str] = []
+        for vt in positions.keys():
+            ts = self._vt_to_instrument(vt)
+            if ts:
+                ts_to_vt[ts] = vt
+                current_holdings_ts.append(ts)
+
+        # is_tradable callback：md.tick.last_price 与 limit_up/limit_down 比较
+        gateway = self._get_own_gateway()
+        md = getattr(gateway, "md", None) if gateway is not None else None
+
+        def is_tradable(ts_code: str, direction: Optional[str]) -> bool:
+            vt = self._instrument_to_vt(ts_code)
+            if vt is None or md is None:
+                return False
+            tick = md.get_full_tick(vt)
+            if tick is None:
+                return False
+            last = float(getattr(tick, "last_price", 0) or 0)
+            if last <= 0:
+                return False
+            limit_up = float(getattr(tick, "limit_up", 0) or 0)
+            limit_down = float(getattr(tick, "limit_down", 0) or 0)
+            # 1e-4 容差防浮点等于
+            at_up = limit_up > 0 and last >= limit_up - 1e-4
+            at_down = limit_down > 0 and last <= limit_down + 1e-4
+            if direction is None:
+                return not (at_up or at_down)
+            if direction == "BUY":
+                return not at_up  # 涨停不能买
+            if direction == "SELL":
+                return not at_down  # 跌停不能卖
+            return True
+
+        # 调 qlib 算法决策（与训练时回测算法等价）
+        sell_ts, buy_ts = topk_dropout_decision(
+            pred_score=pred_score,
+            current_holdings=current_holdings_ts,
+            topk=self.topk,
+            n_drop=self.n_drop,
+            method_buy="top",
+            method_sell="bottom",
+            only_tradable=True,
+            forbid_all_trade_at_limit=True,  # 与 qlib 默认一致
+            hold_thresh=1,  # A 股 T+1 天然满足
+            is_tradable=is_tradable,
+        )
+
+        # ts_code 转 vt_symbol
+        sell_vts = [ts_to_vt[ts] for ts in sell_ts if ts in ts_to_vt]
+        buy_vts = []
+        for ts in buy_ts:
+            vt = self._instrument_to_vt(ts)
             if vt:
-                target_set.add(vt)
-
-        positions = self._get_long_positions()  # dict: vt_symbol → PositionData
-        current_set = set(positions.keys())
-
-        sells = current_set - target_set
-        buys = target_set - current_set
+                buy_vts.append(vt)
 
         self.write_log(
-            f"[rebalance] on_day={on_day} target={len(target_set)} current={len(current_set)} "
-            f"→ sells={len(sells)} buys={len(buys)} keeps={len(current_set & target_set)}"
+            f"[rebalance] on_day={on_day} pred_n={len(pred_score)} "
+            f"current={len(current_holdings_ts)} → sells={len(sell_vts)} buys={len(buy_vts)} "
+            f"(qlib TopkDropout: topk={self.topk} n_drop={self.n_drop})"
         )
 
         # 1. sells（先卖释放资金）
-        for vt in sells:
+        for vt in sell_vts:
             pos = positions.get(vt)
             if pos is None:
                 stats["sells_skipped"] += 1
                 continue
             sell_volume = float(getattr(pos, "yd_volume", 0) or 0)
             if sell_volume <= 0:
-                # 当日新买，T+1 不可卖（或没 yd 仓位）
                 stats["sells_skipped"] += 1
                 self.write_log(f"[rebalance] skip sell {vt}: yd_volume=0 (T+1 限制)")
                 continue
@@ -572,11 +645,11 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 self.write_log(f"[rebalance] sell {vt} 失败: {type(exc).__name__}: {exc}")
                 stats["sells_skipped"] += 1
 
-        # 2. buys（后买，qlib TopkDropoutStrategy 等权 + risk_degree）
-        # 严格语义：n_buys = 真正能下单的只数（过滤掉无价/无效的）
-        # 这与 qlib signal_strategy.py:266-286 的 len(buy) 一致
+        # 2. buys（后买，qlib 等权 + risk_degree 公式）
+        # n_buys = 算法选出的 buy list 长度（不是过滤后的）— 与 qlib value =
+        # cash * risk / len(buy) 的分母一致
         priced_buys: List[Tuple[str, float]] = []
-        for vt in buys:
+        for vt in buy_vts:
             ref_price = self._get_reference_price(vt)
             if ref_price is None or ref_price <= 0:
                 stats["buys_skipped"] += 1
@@ -584,17 +657,18 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 continue
             priced_buys.append((vt, float(ref_price)))
 
-        n_buys = len(priced_buys)
-        if n_buys > 0:
-            # sells 已同步撮合（vnpy_qmt_sim 同步），cash 已包含卖出回款
+        # qlib 公式 value = cash × risk_degree / len(buy)，buy 是算法输出长度
+        # 不是 priced_buys 长度（避免分母被无价的剔除而失真）
+        n_buys_qlib = len(buy_vts)
+        if n_buys_qlib > 0 and priced_buys:
             current_cash = self._get_current_cash()
             for vt, ref_price in priced_buys:
-                volume = self._calculate_buy_amount(ref_price, current_cash, n_buys)
+                volume = self._calculate_buy_amount(ref_price, current_cash, n_buys_qlib)
                 if volume <= 0:
                     stats["buys_skipped"] += 1
                     self.write_log(
                         f"[rebalance] skip buy {vt}: cash={current_cash:.2f} risk={self.risk_degree} "
-                        f"n_buys={n_buys} price={ref_price} → volume={volume}"
+                        f"n_buys={n_buys_qlib} price={ref_price} → volume={volume}"
                     )
                     continue
                 try:
@@ -738,6 +812,16 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         if "." in instrument:
             return instrument
         return None
+
+    def _vt_to_instrument(self, vt: str) -> Optional[str]:
+        """vnpy vt_symbol (000001.SZSE) → tushare ts_code (000001.SZ)。"""
+        if not vt or "." not in vt:
+            return None
+        sym, ex = vt.rsplit(".", 1)
+        suffix = {"SSE": "SH", "SZSE": "SZ", "BSE": "BJ"}.get(ex.upper())
+        if suffix is None:
+            return None
+        return f"{sym}.{suffix}"
 
     # -----------------------------------------------------------------
     # 事件发送
@@ -1019,12 +1103,12 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
         # Phase B: 逐日推进
         # 真实策略时序：T 日 20:00 推理 → T+1 日 09:30 开盘 rebalance → T+1 日收盘 settle
-        # 回放映射：day[i-1] 推理产出的 topk = day[i] 的目标持仓
+        # 回放映射：day[i-1] 推理产出的 pred_score = day[i] 的决策依据
         #   for day in days:
-        #     1. 用 prev_day_topk 在 day 开盘做 rebalance（先卖后买，按当日 open）
-        #     2. 读 day 的 predictions.parquet → select_topk → 暂存为 day+1 的目标
+        #     1. 用 prev_day_pred_score 在 day 开盘走 qlib 算法决策 → rebalance
+        #     2. 读 day 的 predictions.parquet → 暂存全量 pred_score 为 day+1 决策依据
         #     3. 显式 settle_end_of_day(day)：今日买入转 yd 给 day+1 卖出
-        prev_day_topk: Optional[pd.DataFrame] = None
+        prev_day_pred_score: Optional[pd.Series] = None
 
         # Phase 4：禁用本 gateway 自动 settle（按真实自然日触发会污染回放状态）
         # 回放期间由本循环显式 settle_end_of_day(day)。仅影响本 gateway 实例。
@@ -1036,7 +1120,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 self.write_log(f"[replay] 禁用 auto_settle 失败: {exc}")
 
         try:
-            self._replay_loop_iter(days, total, prev_day_topk, gateway)
+            self._replay_loop_iter(days, total, prev_day_pred_score, gateway)
         finally:
             if gateway is not None and hasattr(gateway, "enable_auto_settle"):
                 try:
@@ -1055,11 +1139,15 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         self,
         days: List[date],
         total: int,
-        prev_day_topk: Optional[pd.DataFrame],
+        prev_day_pred_score: Optional[pd.Series],
         gateway: Any,
     ) -> None:
         """从 _replay_loop_body 拆出来的逐日 apply 循环。
         独立成函数以便上层用 try/finally 保护 gateway.enable_auto_settle 状态。
+
+        Phase 6: 暂存对象从 prev_day_topk (head DataFrame) 改为 prev_day_pred_score
+        (Series, 全量) — qlib TopkDropoutStrategy 算法需要看完整 pred_score 才能正确
+        选 today 候选池。
         """
         for i, day in enumerate(days):
             day_str = day.strftime("%Y%m%d")
@@ -1067,7 +1155,6 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
             # 设回放逻辑日：让 vnpy_qmt_sim 撮合产生的 trade.datetime / order.datetime
             # 都用回放日（如 2026-01-06 09:30），而不是 wall-clock now（5.1 19:40）。
-            # 否则前端"交易记录"日期全是策略启动时刻，与回放真实时序对不上。
             if gateway is not None:
                 from datetime import datetime as _dt, time as _time
                 try:
@@ -1075,17 +1162,19 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 except Exception:
                     pass
 
-            # 1. 用上一交易日的 topk 在今日开盘 rebalance
-            if prev_day_topk is not None and self.enable_trading:
+            # 1. 用上一交易日的 pred_score 在今日开盘 rebalance（qlib 算法）
+            if prev_day_pred_score is not None and self.enable_trading:
                 try:
+                    # 候选股 vt 集合（用于刷新行情）：取 pred_score 中 score 排名前 topk 的
+                    # 加上当前持仓（覆盖算法可能 sell/buy 的所有股）
+                    top_candidates = prev_day_pred_score.sort_values(ascending=False).head(self.topk).index
                     candidate_vts: List[str] = []
-                    if not prev_day_topk.empty:
-                        for inst in prev_day_topk.index:
-                            vt = self._instrument_to_vt(str(inst))
-                            if vt:
-                                candidate_vts.append(vt)
+                    for inst in top_candidates:
+                        vt = self._instrument_to_vt(str(inst))
+                        if vt:
+                            candidate_vts.append(vt)
                     self._refresh_market_data_for_day(day, candidates=candidate_vts)
-                    rebal_stats = self.rebalance_to_target(prev_day_topk, on_day=day)
+                    rebal_stats = self.rebalance_to_target(prev_day_pred_score, on_day=day)
                     self.write_log(
                         f"[replay] day {i+1}/{total} {day_iso} rebalance: "
                         f"sells={rebal_stats['sells_dispatched']} buys={rebal_stats['buys_dispatched']}"
@@ -1095,11 +1184,11 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                         f"[replay] day {day_iso} rebalance 异常 {type(exc).__name__}: {exc}"
                     )
 
-            # 2. 读今日推理结果 → 选 topk → 暂存为下一交易日目标 + 写 selections.parquet
+            # 2. 读今日推理结果 → 选 topk persist → 暂存全量 pred_score 给 day+1 决策
             try:
-                today_topk = self._replay_apply_day(day, i + 1, total)
-                if today_topk is not None and not today_topk.empty:
-                    prev_day_topk = today_topk
+                today_pred_score = self._replay_apply_day(day, i + 1, total)
+                if today_pred_score is not None and not today_pred_score.empty:
+                    prev_day_pred_score = today_pred_score
             except Exception as exc:
                 self.write_log(
                     f"[replay] day {i+1}/{total} {day_iso}: apply 异常 "
@@ -1223,14 +1312,14 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 return True
         return False
 
-    def _replay_apply_day(self, day: date, day_idx: int, total: int) -> Optional[pd.DataFrame]:
-        """逐日 apply：读已写的 predictions.parquet → select_topk → persist_selections。
+    def _replay_apply_day(self, day: date, day_idx: int, total: int) -> Optional[pd.Series]:
+        """逐日 apply：读已写的 predictions.parquet → select_topk persist → 返回全量 pred_score。
 
-        返回当日 topk DataFrame（供下一交易日 rebalance 用）。empty / 无数据返回 None。
+        Phase 6: 返回值从 selected (head topk DataFrame) 改为全量 pred_score (Series),
+        供下一交易日 qlib TopkDropoutStrategy 算法决策用（算法需要看完整候选池）。
+        topk persist (selections.parquet) 仍然写，用于前端 LatestTopkCard 展示。
 
-        注意：本方法**不再直接调 generate_orders**。下单由 _replay_loop_body 在
-        次日开始时调 rebalance_to_target(prev_day_topk, on_day=current_day) 完成，
-        符合"T 日推理 → T+1 日开盘交易"的真实策略时序。
+        empty / 无数据返回 None。
         """
         day_str = day.strftime("%Y%m%d")
         day_iso = day.strftime("%Y-%m-%d")
@@ -1286,7 +1375,20 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         self.last_n_pred = int(diag.get("rows", 0))
         self.last_model_run_id = diag.get("model_run_id", "") or ""
 
-        return selected
+        # 返回全量 pred_score (Series): 取 pred_df 当日的 score 列，
+        # index = instrument (ts_code), value = score
+        try:
+            last_dt = pred_df.index.get_level_values("datetime").max()
+            today_pred = pred_df.xs(last_dt, level="datetime")
+            # pred_df 通常只有 1 列 score
+            if isinstance(today_pred, pd.DataFrame):
+                pred_score = today_pred.iloc[:, 0]
+            else:
+                pred_score = today_pred
+            return pred_score
+        except Exception as exc:
+            self.write_log(f"[replay] day {day_iso} 提取 pred_score 失败: {exc}")
+            return None
 
     def _persist_replay_ml_snapshot(
         self,
