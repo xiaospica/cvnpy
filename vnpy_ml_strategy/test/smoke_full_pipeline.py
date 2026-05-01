@@ -86,55 +86,67 @@ sys.path.insert(0, str(ROOT / "vendor" / "qlib_strategy_core"))
 sys.path.insert(0, r"F:\Quant\code\qlib_strategy_dev")
 
 
-# --- 配置 ---------------------------------------------------------------
+# =====================================================================
+# 配置区 — 按用途分组, 维护时只需改对应小节
+# =====================================================================
 
-TRIGGER_INGEST_ON_STARTUP: bool = True   # False → 只跑 vnpy 不拉数 (快速 iter)
-TRIGGER_PIPELINE_ON_STARTUP: bool = True # False → 只拉数不推理
-SPAWN_MLEARNWEB: bool = True              # False → 不启 mlearnweb live_main
-# LIVE_DATE 默认 today, 但若非交易日会自动往前找最近交易日 (见 _resolve_live_date).
-# 也可通过 env LIVE_DATE=YYYY-MM-DD 手动指定.
+# --- 1) 运行开关 ----------------------------------------------------
+# 控制本次跑哪些 Phase, 用于快速 iter (如只跑 vnpy 不拉数, 或不启 mlearnweb)
+TRIGGER_INGEST_ON_STARTUP: bool = True    # False → 只跑 vnpy 不拉数
+TRIGGER_PIPELINE_ON_STARTUP: bool = True  # False → 只拉数不推理
+SPAWN_MLEARNWEB: bool = True              # False → 不启 mlearnweb live_main 子进程
+
+# --- 2) 时间窗口 ----------------------------------------------------
+# LIVE_DATE 默认 today, 但若非交易日 / 当前 < 20:00 (tushare 当日 bar 未落)
+# 会自动回退到最近"已收盘"交易日 (_resolve_live_date). env LIVE_DATE=YYYY-MM-DD 手动覆盖.
 LIVE_DATE: date = date.today()
-
-# ========== 多日模拟 (问题 3 修复) ==========
-# 0 = 只跑 LIVE_DATE 一天 (原行为, 单日冒烟)
-# N > 0 = 从 LIVE_DATE 往前回溯 N 个自然日, 只保留交易日, 逐日跑完整 ingest+pipeline.
-#         每日结果独立落在 {OUT_ROOT}/{STRATEGY}/{yyyymmdd}/, 前端 rolling 曲线会看到 N+1 个点.
-# 也可通过 env SIMULATE_ROLLING_DAYS=N 覆盖.
+# tushare 当日 daily bar 通常 20:00 后落盘; _resolve_live_date 用此小时阈值
+# 决定 today 是否可用, 否则回退 today-1.
+TUSHARE_DAILY_READY_HOUR: int = 20
+# 多日模拟 (rolling simulation):
+#   0       → 只跑 LIVE_DATE 一天 (默认, 单日冒烟)
+#   N (>0)  → 从 LIVE_DATE 往前回溯 N 个自然日, 仅保留交易日, 逐日独立跑 ingest+pipeline.
+#             每日结果独立落在 {OUT_ROOT}/{STRATEGY}/{yyyymmdd}/, 前端 rolling 曲线
+#             才会看到 N+1 个点. env SIMULATE_ROLLING_DAYS=N 覆盖.
 SIMULATE_ROLLING_DAYS: int = int(os.getenv("SIMULATE_ROLLING_DAYS", "0"))
-# 多日模式下, 每跑完一天等 mlearnweb ml_snapshot_loop tick 一次 (60s+余量),
-# 让当日 metrics UPSERT 进 SQLite. 0 = 不等 (快但 SQLite 只会留最后一天).
+# 多日模式下, 每跑完一天等 mlearnweb ml_snapshot_loop tick 一次 (60s + 余量),
+# 让当日 metrics UPSERT 进 SQLite. 0 = 不等 (快, 但 SQLite 只会留最后一天).
 ROLLING_PER_DAY_WAIT_S: int = int(os.getenv("ROLLING_PER_DAY_WAIT_S", "70"))
 
-# ========== Phase 2/4 心跳 (问题 1 修复) ==========
-# 后台 ingest 线程每隔 N 秒打心跳, 让用户感知进度
+# --- 3) 心跳 / 超时 -------------------------------------------------
+# Phase 2 后台 ingest 线程每隔 N 秒打心跳, 让用户感知进度 (避免主线程卡 ~100s+ 静默)
 INGEST_HEARTBEAT_S: float = 10.0
 # Phase 4 pipeline subprocess 轮询 diagnostics.json 时每隔 N 秒打心跳
 PIPELINE_HEARTBEAT_S: float = 30.0
+# Phase 4 pipeline subprocess 轮询 diagnostics.json 的最长等待秒数
 PIPELINE_TIMEOUT_S: int = 300
 
-# 多日模式下 date.today() 的动态 holder (monkey-patch 通过它读)
-_SMOKE_DATE_HOLDER: Dict[str, Optional[date]] = {"value": None}
-
-BUNDLE_DIR = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964"
-OUT_ROOT = r"D:/ml_output/smoke_full_pipeline"
-STRATEGY_NAME = "jq41_csi300_2026"
-
-# Phase 4 v2: QS_DATA_ROOT 驱动所有路径, 实盘/训练解耦
-QS_DATA_ROOT = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
-
-PROVIDER_URI = f"{QS_DATA_ROOT}/qlib_data_bin"
-MERGED_PARQUET = f"{QS_DATA_ROOT}/stock_data/daily_merged_all_new.parquet"
-FILTERED_PARQUET = f"{QS_DATA_ROOT}/csi300_custom_filtered.parquet"
-BY_STOCK_DIR = f"{QS_DATA_ROOT}/stock_data/by_stock"
-SNAPSHOT_DIR = f"{QS_DATA_ROOT}/snapshots"
-JQ_INDEX_CSV_PATHS_JSON = os.getenv(
+# --- 4) 数据路径 (QS_DATA_ROOT 派生, 实盘/训练解耦) ----------------
+QS_DATA_ROOT: str = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
+PROVIDER_URI: str = f"{QS_DATA_ROOT}/qlib_data_bin"
+MERGED_PARQUET: str = f"{QS_DATA_ROOT}/stock_data/daily_merged_all_new.parquet"
+FILTERED_PARQUET: str = f"{QS_DATA_ROOT}/csi300_custom_filtered.parquet"
+BY_STOCK_DIR: str = f"{QS_DATA_ROOT}/stock_data/by_stock"
+SNAPSHOT_DIR: str = f"{QS_DATA_ROOT}/snapshots"
+JQ_INDEX_CSV_PATHS_JSON: str = os.getenv(
     "ML_JQ_INDEX_CSV_PATHS",
     json.dumps({"csi300": f"{QS_DATA_ROOT}/jq_index/hs300_*.csv"}),
 )
 
-MLEARNWEB_BACKEND = r"F:/Quant/code/qlib_strategy_dev/mlearnweb/backend"
-MLEARNWEB_DB = Path(MLEARNWEB_BACKEND) / "mlearnweb.db"
-PY311 = r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe"
+# --- 5) 策略 / 模型 / 输出 ------------------------------------------
+BUNDLE_DIR: str = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964"
+OUT_ROOT: str = r"D:/ml_output/smoke_full_pipeline"
+STRATEGY_NAME: str = "jq41_csi300_2026"
+
+# --- 6) 外部服务进程 / 解释器 ---------------------------------------
+MLEARNWEB_BACKEND: str = r"F:/Quant/code/qlib_strategy_dev/mlearnweb/backend"
+MLEARNWEB_DB: Path = Path(MLEARNWEB_BACKEND) / "mlearnweb.db"
+# 研究机 Python 3.11 (qlib + mlearnweb live_main 用), 与 vnpy 主进程解释器解耦
+PY311: str = r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe"
+
+# --- 7) 内部状态 (运行时 mutate, 非配置) ----------------------------
+# 多日模式下 date.today() 的动态 holder, monkey-patch 通过它读当前模拟日期
+_SMOKE_DATE_HOLDER: Dict[str, Optional[date]] = {"value": None}
 
 
 # --- 工具 ---------------------------------------------------------------
@@ -152,9 +164,6 @@ def _load_tushare_token() -> str:
     if not token:
         raise RuntimeError(f"api.json 里找不到 tushare token: {data.keys()}")
     return token
-
-
-TUSHARE_DAILY_READY_HOUR: int = 20
 
 
 def _resolve_live_date(downloader) -> date:
