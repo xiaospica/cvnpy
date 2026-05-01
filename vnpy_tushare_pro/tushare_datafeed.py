@@ -192,6 +192,9 @@ class TushareDatafeedPro(BaseDatafeed):
           ML_QLIB_DIR
           ML_SNAPSHOT_DIR
           ML_JQ_INDEX_CSV_PATHS      聚宽 CSV 路径 JSON 字符串, 默认从 QS_DATA_ROOT/jq_index/
+          ML_INGEST_LOOKBACK_DAYS    snapshot 窗口自然日数 (默认 120, ≈80 交易日 cover Alpha158
+                                     60 滚动窗口的当日推理). 回放需要更长历史时改大 (250 ≈ 165
+                                     交易日, 可 cover ~3 个月前的回放推理).
         """
         if os.getenv("ML_DAILY_INGEST_ENABLED", "0") != "1":
             return None
@@ -233,7 +236,7 @@ class TushareDatafeedPro(BaseDatafeed):
                 qlib_dir=_env_or_default("ML_QLIB_DIR", "qlib_data_bin"),
                 snapshot_dir=_env_or_default("ML_SNAPSHOT_DIR", "snapshots"),
                 index_code="000300.SH",
-                lookback_days=120,
+                lookback_days=int(os.getenv("ML_INGEST_LOOKBACK_DAYS", "120")),
                 # event_callback 由 TushareProEngine 在 engine.init_engine 里注入
             )
         except Exception as exc:

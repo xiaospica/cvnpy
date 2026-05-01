@@ -483,7 +483,10 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         sel_df[COL_TRADE_DATE] = today.strftime("%Y-%m-%d")
         sel_df[COL_INSTRUMENT] = sel_df.get("instrument", sel_df.iloc[:, 0])
         sel_df[COL_RANK] = range(1, len(sel_df) + 1)
-        sel_df[COL_WEIGHT] = 1.0 / len(sel_df)
+        # qlib TopkDropoutStrategy 的目标权重 = risk_degree / topk
+        # (公式: buy_amount = floor(cash × risk_degree / n_buys / open / 100) × 100)
+        # 之前 1.0/len(sel_df) 漏乘 risk_degree，前端显示 14.29% 误导用户以为满仓
+        sel_df[COL_WEIGHT] = float(self.risk_degree) / len(sel_df)
         sel_df[COL_TARGET_PRICE] = float("nan")
         sel_df[COL_SIDE] = "long"
         sel_df[COL_MODEL_RUN_ID] = self.last_model_run_id
