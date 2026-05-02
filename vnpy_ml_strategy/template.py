@@ -1027,7 +1027,20 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             )
 
     def _run_replay_loop(self, start: date, end: date) -> None:
-        """后台线程跑回放循环。详见 plan 文档 Phase 4 边界控制。"""
+        """后台线程跑回放循环。详见 plan 文档 Phase 4 边界控制。
+
+        关键修复 (holdings diverge 根因): 必须确保 trade_calendar 已注入,
+        否则 _is_trade_day fallback 周一到周五 → 春节/国庆/五一等节假日被
+        误判为交易日 → 回放跑无效 rebalance → 持仓与 qlib backtest diverge。
+        """
+        # 注入 qlib 日历 (用 strategy.provider_uri, 与 inference 同源)
+        ensure_cal = getattr(self.signal_engine, "ensure_trade_calendar", None)
+        if callable(ensure_cal):
+            try:
+                ensure_cal(self.provider_uri)
+            except Exception as exc:
+                self.write_log(f"[replay] 注入 trade_calendar 失败 (将 fallback 周一到周五, 节假日会误判): {exc}")
+
         scheduler = getattr(self.signal_engine, "scheduler", None)
         gateway = self._get_own_gateway()
 
