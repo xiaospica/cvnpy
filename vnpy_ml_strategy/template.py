@@ -787,11 +787,33 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
         rebalance buys 阶段调用：sells 已被同步撮合（vnpy_qmt_sim 同步成交），
         cash 已包含卖出回款。返 0 时上层会拒绝下单。
+
+        优先级：
+          1. vnpy_qmt_sim 直读 counter.capital — sim 设计为"send_order 同步成交"
+             ([td.py:500-501] match_order 同步在 send_order 内执行 + 同步更新
+             counter.capital)，但 _emit_account → EventEngine → OmsEngine 链路
+             引入异步 1-tick 延迟。rebalance 主线程 sells 完后立即调本函数时,
+             OmsEngine.accounts 仍是旧值 → 算出的 cash 缺 sell 回款 → buy 投入
+             偏小。直读 counter 绕过这条 event 链，拿到真实同步 cash。
+          2. fallback OmsEngine event 路径 — 实盘 gateway (QMT/miniqmt) 没有
+             counter 字段，自动走这里。实盘 sell 撮合本来就异步（订单到券商等
+             回报），OmsEngine 异步更新是符合实盘真实语义的，无需特殊处理。
         """
         try:
             main_engine = getattr(self.signal_engine, "main_engine", None)
             if main_engine is None:
                 return 0.0
+            # Fast path: vnpy_qmt_sim counter 同步直读
+            try:
+                gateway = main_engine.get_gateway(self.gateway)
+            except Exception:
+                gateway = None
+            counter = getattr(getattr(gateway, "td", None), "counter", None) if gateway else None
+            if counter is not None and hasattr(counter, "capital"):
+                cap = float(getattr(counter, "capital", 0) or 0)
+                frz = float(getattr(counter, "frozen", 0) or 0)
+                return max(0.0, cap - frz)
+            # Fallback: OmsEngine event-based 路径（实盘）
             for acc in main_engine.get_all_accounts():
                 if getattr(acc, "gateway_name", "") == self.gateway:
                     balance = float(getattr(acc, "balance", 0) or 0)

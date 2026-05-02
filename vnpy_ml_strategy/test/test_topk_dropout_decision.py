@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]  # vnpy_strategy_dev (本文件在 vnpy_ml_strategy/test/)
 sys.path.insert(0, str(ROOT))
 
 from vnpy_ml_strategy.topk_dropout_decision import topk_dropout_decision  # noqa: E402
