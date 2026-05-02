@@ -252,6 +252,28 @@ def get_all_positions(access: bool = Depends(get_access)) -> List[dict]:
     return [to_dict(p) for p in positions]
 
 
+@app.get("/api/v1/position/history/{strategy_name}/{yyyymmdd}")
+def get_strategy_positions_history(
+    strategy_name: str,
+    yyyymmdd: str,
+    gateway_name: str = "",
+    access: bool = Depends(get_access),
+) -> List[dict]:
+    """重建指定策略在 yyyymmdd 日 EOD 的持仓快照（含 amount/cost/市值/占比）。
+
+    跨机部署支持 — 同机直读 sim db 的方案已在 mlearnweb 端落地，但跨机时
+    mlearnweb 看不到 vnpy 节点本地的 sim_*.db。本端点在 vnpy 节点端实现，
+    mlearnweb 通过 fanout 调用。
+
+    数据源: vnpy_qmt_sim 节点本地 sim_<gateway_name>.db 中 sim_trades +
+    daily_merged_all_new.parquet 的 pct_chg 累乘。
+
+    返回字段: vt_symbol / name / volume / cost_price / market_value / weight。
+    """
+    from vnpy_qmt_sim.history_positions import build_positions_on_date
+    return build_positions_on_date(strategy_name, yyyymmdd, gateway_name=gateway_name)
+
+
 @app.get("/api/v1/account")
 def get_all_accounts(access: bool = Depends(get_access)) -> List[dict]:
     accounts: List[AccountData] = get_rpc_client().get_all_accounts()

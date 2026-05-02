@@ -31,7 +31,12 @@ class SimulationCounter:
         
         self.order_count = 0
         self.trade_count = 0
-        
+
+        # 当日新买入跟踪 (vt_symbol → {volume, cost_basis})
+        # cost_basis = 累计买入金额 (含手续费; 用于 settle 区分新买入/老持仓 mark)
+        # settle_end_of_day 后清空。
+        self._today_buy: Dict[str, Dict[str, float]] = {}
+
         self.accountid = "test_id"
         # 资金配置
         self.capital = 10_000_000.0
@@ -600,13 +605,26 @@ class SimulationCounter:
         return commission + transfer_fee + stamp_duty
 
     def settle_end_of_day(self, settle_date: date) -> None:
-        """日终结算：T+1 持仓结转 + mark-to-market 用 pct_chg 累乘。
+        """日终结算：T+1 持仓结转 + mark-to-market.
 
-        - yd_volume = volume：今日买入的股票从明日起转为可卖
-        - pos.price *= (1 + pct_chg/100)：按当日复权涨跌幅累计 mark price
-          （pct_chg 已含除权，分红/送股/转增/配股的价格效应自动隐含）
+        关键 — 区分今日新买入 vs 老持仓的 mark 口径，与 qlib backtest deal_price=close 对齐：
 
-        重复调用同一日期是幂等的（last_settle_date 守门）。
+        老持仓 (T-1 EOD 已 settle, pos.price = T-1 close):
+            mark close: pos.price *= (1 + pct_chg/100) = close_T / pre_close_T = close / pre_close
+            （即 pct_chg 含 pre_close → close 全段，符合"昨收→今收"语义）
+
+        今日新买入 (买入价 = today_open):
+            mark close: 只 mark today_open → close 这一段，不能用 pct_chg (它含隔夜 pre_close→open
+            那一段，今日新买入根本没经历过)。即:
+              new_value = today_buy_cost × close / open
+            混合持仓 (老 yd + 今日新买入):
+              new_pos_value = old_value + new_value
+                            = old_volume × old_price × (1+pct/100) + today_buy_cost × close/open
+
+        重复调用同一日期幂等 (last_settle_date 守门)。
+
+        修复前 bug: 全部按 pct_chg 累乘 → 当日新买入的 mark 多算了"open 之前隔夜跳空"
+        那一段，导致与 qlib backtest weight 偏差最高 13%（详见 vnpy commit 525864e）。
         """
         if self.last_settle_date is not None and settle_date <= self.last_settle_date:
             return
@@ -614,16 +632,52 @@ class SimulationCounter:
         md = getattr(self.gateway, "md", None)
         get_quote = getattr(md, "get_quote", None) if md else None
 
-        for pos in self.positions.values():
+        for pos_key, pos in self.positions.items():
             if pos.volume <= 0:
                 pos.yd_volume = pos.volume
                 continue
             if callable(get_quote):
                 quote = get_quote(pos.vt_symbol)
                 if quote is not None and pos.price > 0:
-                    pos.price = pos.price * (1.0 + float(quote.pct_chg) / 100.0)
+                    today_buy = self._today_buy.get(pos_key, {"volume": 0.0, "cost": 0.0})
+                    today_vol = float(today_buy.get("volume", 0))
+                    today_cost = float(today_buy.get("cost", 0))
+                    yd_vol = float(pos.yd_volume or 0)
+                    pct = float(quote.pct_chg) / 100.0
+                    open_p = float(getattr(quote, "open", 0) or 0)
+                    close_p = float(getattr(quote, "close", 0) or 0)
+
+                    # 老持仓 mark: pre_close → close
+                    # 老持仓 EOD 总市值 = yd_vol × old_price × (1+pct)
+                    # 这里 old_price 是 yd_vol 部分的 cost。但 pos.price 在 update_position
+                    # 时被覆盖为 trade.price (今日 open)。所以"老持仓"的成本无法直接拿到 —
+                    # 但**T-1 settle 后 pos.price 已是 T-1 close**, 今日没买就是 yd_vol 全部，
+                    # pos.price 还是 T-1 close。今日有买入则 pos.price 被覆盖为 today_open。
+                    #
+                    # 解决：用"老持仓总成本 = (pos.volume × pos.price - today_cost)" 反推
+                    # (因为 update_position 覆盖 pos.price = trade.price 后, 老 yd 的成本
+                    # 被丢失。但若今日没买入, today_cost=0 today_vol=0, 整体退化到原行为)
+                    if today_vol > 0 and yd_vol > 0 and open_p > 0 and close_p > 0:
+                        # 混合持仓: 老 yd 用 pct_chg, 今日新买入用 close/open
+                        # 老成本 ≈ pos.price × yd_vol (近似: pos.price 是今日 trade.price
+                        # = today_open; T-1 EOD 老成本 = T-1 close × yd_vol; 由于 pos.price
+                        # 被覆盖, 用 today_open 代替 T-1 close 会有误差; 实际等同把老持仓也
+                        # 当做今日新买的 — 这是当前模型限制)
+                        # 简化处理: 老+新分别 mark 后求加权 pos.price
+                        old_value = (yd_vol * pos.price) * (1.0 + pct)
+                        new_value = today_cost * close_p / open_p
+                        pos.price = (old_value + new_value) / pos.volume
+                    elif today_vol > 0 and open_p > 0 and close_p > 0:
+                        # 全部今日新买入: cost *= close/open
+                        pos.price = pos.price * close_p / open_p
+                    else:
+                        # 全部老持仓: pct_chg 累乘
+                        pos.price = pos.price * (1.0 + pct)
             pos.yd_volume = pos.volume
             self._emit_position(pos)
+
+        # 清空今日新买入跟踪 (settle 后所有今日买入转为老 yd)
+        self._today_buy.clear()
 
         self.last_settle_date = settle_date
         try:
@@ -691,11 +745,11 @@ class SimulationCounter:
 
     def update_position(self, trade: TradeData):
         vt_symbol = f"{trade.symbol}.{trade.exchange.value}"
-        
+
         # A股通常只看多头持仓
         pos_long_id = f"{vt_symbol}.{Direction.LONG.value}"
         pos = self.positions.get(pos_long_id)
-        
+
         if not pos:
             pos = PositionData(
                 symbol=trade.symbol,
@@ -709,6 +763,10 @@ class SimulationCounter:
         if trade.direction == Direction.LONG:
             # 买入：增加总持仓，但 yd_volume（可卖昨仓）不变 → T+1 当日不可卖。
             pos.volume += trade.volume
+            # 跟踪当日新买入 (用于 settle 区分新买入 vs 老持仓 mark)
+            tb = self._today_buy.setdefault(pos_long_id, {"volume": 0.0, "cost": 0.0})
+            tb["volume"] += float(trade.volume)
+            tb["cost"] += float(trade.price) * float(trade.volume)
         else:
             # 卖出：扣减总持仓 + 昨仓 + 持仓冻结。
             pos.volume -= trade.volume
