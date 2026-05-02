@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import pickle
 import sqlite3
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pandas as pd
+
+_ROOT = Path(__file__).resolve().parents[2]  # vnpy_strategy_dev
+sys.path.insert(0, str(_ROOT / "vendor" / "qlib_strategy_core"))  # qlib (unpickle Position)
 
 QLIB_BT = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
 VNPY_DB = Path(r"F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300.db")

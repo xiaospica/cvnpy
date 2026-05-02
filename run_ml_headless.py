@@ -137,12 +137,12 @@ STRATEGIES = [
         "setting_override": {
             "bundle_dir": os.getenv(
                 "BUNDLE_DIR",
-                r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab2711178313491f9900b5695b47fa98",
+                r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964",
             ),
             "topk": 7,
             "n_drop": 1,
             # TODO delete below line
-            "replay_start_date": "2026-01-01",  # 显式跳过 qlib 数据未覆盖区间
+            "replay_start_date": "2026-01-27",  # 显式跳过 qlib 数据未覆盖区间
         },
     },
     # 多策略沙盒示例（仅 QMT_SIM 模式下意义；记得同步打开上面 GATEWAYS 的对应行）：

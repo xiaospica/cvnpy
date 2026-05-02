@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import pickle
 import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import pandas as pd
+
+_ROOT = Path(__file__).resolve().parents[2]  # vnpy_strategy_dev
+sys.path.insert(0, str(_ROOT / "vendor" / "qlib_strategy_core"))  # qlib (unpickle report)
 
 QLIB_BT_REPORT = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest/report_normal_1day.pkl")
 MLEARNWEB_DB = Path(r"f:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db")

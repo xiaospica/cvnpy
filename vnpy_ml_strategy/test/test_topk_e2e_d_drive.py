@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Set, Tuple
 import pandas as pd
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]  # vnpy_strategy_dev (本文件在 vnpy_ml_strategy/test/)
 sys.path.insert(0, str(ROOT))
 
 QLIB_BT_DIR = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")

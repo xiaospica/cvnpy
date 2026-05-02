@@ -21,7 +21,9 @@ from typing import Any, Dict, List, Set, Tuple
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_ROOT = Path(__file__).resolve().parents[2]  # vnpy_strategy_dev
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "vendor" / "qlib_strategy_core"))  # qlib (unpickle Position)
 
 QLIB_BT_DIR = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
 VNPY_SIM_DB = Path(r"F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300.db")
