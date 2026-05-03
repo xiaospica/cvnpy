@@ -964,6 +964,30 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         else:
             end = date.today() - timedelta(days=1)
 
+        # 自动 cap 到 qlib calendar 末尾日 — 否则 today-1 默认值在 ingest
+        # 滞后时会触发 StaleCalendarError (workday > calendar max_known).
+        # 显式 replay_end_date 也会被 cap, 防止用户配错把超出数据范围的天传进去.
+        try:
+            from .utils.trade_calendar import make_calendar
+            cal = make_calendar(self.provider_uri)
+            max_known_str = getattr(cal, "_max_known", None)
+            if max_known_str is None:
+                # WeekdayFallbackCalendar 没有 _max_known 也别强制加载
+                load = getattr(cal, "_load", None)
+                if callable(load):
+                    load()
+                    max_known_str = getattr(cal, "_max_known", None)
+            if max_known_str:
+                cal_end = datetime.strptime(max_known_str, "%Y-%m-%d").date()
+                if end > cal_end:
+                    self.write_log(
+                        f"[replay] end={end} 超过 qlib calendar 末尾 {cal_end}, "
+                        f"自动 cap 到 {cal_end} (避免 StaleCalendarError)"
+                    )
+                    end = cal_end
+        except Exception as exc:
+            self.write_log(f"[replay] cap end 到 calendar 末尾失败 (continuing): {exc}")
+
         if start > end:
             # 已经追上实时（如新部署的 bundle 即时启动），无需回放
             return None
