@@ -390,12 +390,16 @@ class MLEngine(BaseEngine):
         filter_parquet_path: Optional[str] = None,
         timeout_s: int = 180,
     ) -> Dict[str, Any]:
-        """委托给 QlibPredictor. Phase 4 v2 支持 filter_parquet_path 透传.
+        """委托给 QlibPredictor. Phase 2: 按 bundle 自带的 filter_config.filter_id 派生
+        snapshot 路径 ``snapshots/filtered/{filter_id}_{YYYYMMDD}.parquet``.
 
-        Phase 4 v2: ``filter_parquet_path`` 若 None, 会尝试从 env ``QS_DATA_ROOT``
-        自动拼 ``{QS_DATA_ROOT}/snapshots/filtered/csi300_filtered_{YYYYMMDD}.parquet``,
-        保证实盘推理按 live_end 定位到冻结的当日过滤快照(金融实盘可复现硬要求).
+        ``filter_parquet_path`` 若 None: 从 ModelRegistry 拿 bundle 的 filter_id (强制),
+        拼 ``{QS_DATA_ROOT}/snapshots/filtered/{filter_id}_{live_end}.parquet``.
+        快照不存在 → warn 但不阻塞 (handler 走 task.json 默认 = 训练时 filter).
         显式传入的 filter_parquet_path 优先.
+
+        Phase 2 前是硬编码 ``csi300_filtered_{YYYYMMDD}.parquet`` (单 universe). 现按
+        bundle 声明的 filter_id 派生, 多 universe 共存不冲突.
         """
         import os as _os
         from pathlib import Path as _Path
@@ -403,13 +407,14 @@ class MLEngine(BaseEngine):
         if self._predictor is None:
             raise RuntimeError("Predictor not set")
 
-        # Phase 4 v2: 自动按 live_end 拼 filter 快照路径
+        # Phase 2: 按 bundle 的 filter_id 派生 snapshot 路径
         if filter_parquet_path is None:
             qs_data_root = _os.getenv("QS_DATA_ROOT")
             if qs_data_root:
+                filter_id = self._resolve_filter_id(bundle_dir)
                 candidate = (
                     _Path(qs_data_root) / "snapshots" / "filtered"
-                    / f"csi300_filtered_{live_end.strftime('%Y%m%d')}.parquet"
+                    / f"{filter_id}_{live_end.strftime('%Y%m%d')}.parquet"
                 )
                 if candidate.exists():
                     filter_parquet_path = str(candidate)
@@ -456,18 +461,13 @@ class MLEngine(BaseEngine):
         Note: 批量模式不写 metrics.json（PSI/KS/IC 等留单日实时模式做）；
         每日 diagnostics.json 含 ``batch_mode=true`` 标记。
 
-        Phase 5.x 修复：与 ``run_inference`` 对齐，自动选**最新**可用 filter 快照
-        ``{QS_DATA_ROOT}/snapshots/filtered/csi300_filtered_*.parquet``。
-        否则子进程会用 task.json 里固化的训练时 filter（如 csi300_custom_filtered.parquet
-        只覆盖到训练截止日 2026-01-28），导致回放窗口超出训练时点的所有日期 status=empty。
+        Phase 2: 与 ``run_inference`` 对齐, 按 bundle 的 filter_id 派生 snapshot
+        模式 ``{QS_DATA_ROOT}/snapshots/filtered/{filter_id}_*.parquet``,
+        选**最新**(按文件名日期 max). 由于 _stage_filter 按 [T-lookback, T]
+        window 回填, 最新 snapshot 总是含完整 lookback window 的合规数据.
 
-        策略：选**最新（按文件名日期 max）**的 snapshot — 由于 _stage_filter 按
-        [T-lookback, T] window 回填（commit b859efe），最新 snapshot 总是含
-        完整 lookback window 的合规数据。
-          - 旧策略（按 range_end 选）：用户回放 range_end=04-29 时选 filter_20260429，
-            但该文件可能是 ml_data_build 回填修复**之前**写的旧追加式版本，
-            缺 04-23/24/27/28 → 这几天仍 status=empty
-          - 新策略（选最新）：选 filter_20260430（最近一次 cron 写的, 已回填）
+        Phase 2 前硬编码 ``csi300_filtered_*.parquet`` (单 universe). 现支持多
+        universe 共存(每个 bundle 自己的 filter_id 各取各的 snapshot).
         """
         import os as _os
         import re as _re
@@ -476,12 +476,15 @@ class MLEngine(BaseEngine):
         if self._predictor is None:
             raise RuntimeError("Predictor not set")
 
-        # Phase 5.x：选最新可用 filter snapshot
+        # Phase 2: 按 bundle 的 filter_id 派生 snapshot 模式 + 选最新
         if filter_parquet_path is None:
             qs_data_root = _os.getenv("QS_DATA_ROOT")
             if qs_data_root:
+                filter_id = self._resolve_filter_id(bundle_dir)
                 filter_dir = _Path(qs_data_root) / "snapshots" / "filtered"
-                pattern = _re.compile(r"^csi300_filtered_(\d{8})\.parquet$")
+                # filter_id 可能含数字 (如 "min_90_days"), 文件名结构 = {filter_id}_{8位日期}.parquet
+                # 用 re.escape + \d{8} 严格匹配本 filter_id 的 snapshot
+                pattern = _re.compile(rf"^{_re.escape(filter_id)}_(\d{{8}})\.parquet$")
                 latest_path = None
                 latest_date_str = None
                 if filter_dir.exists():
@@ -503,7 +506,7 @@ class MLEngine(BaseEngine):
                     )
                 else:
                     logger.warning(
-                        f"[MLEngine] {filter_dir} 无 csi300_filtered_*.parquet, "
+                        f"[MLEngine] {filter_dir} 无 {filter_id}_*.parquet, "
                         "回放将用 bundle task.json 里固化的训练时 filter — "
                         "若该 filter 不覆盖 range_end, 超出范围的日子全 status=empty"
                     )
@@ -527,10 +530,54 @@ class MLEngine(BaseEngine):
     # ------------------------------------------------------------------
 
     def validate_bundle(self, bundle_dir: str) -> Dict[str, Any]:
-        """校验 bundle 目录 + 记入 ModelRegistry. 返回 manifest dict."""
+        """校验 bundle 目录 + 记入 ModelRegistry. 返回 manifest dict.
+
+        Phase 2: ModelRegistry.register 还会强制读 filter_config.json + 校验
+        filter_id ↔ filter_chain 一致; 失败 raise (老 bundle 缺 filter_config.json
+        提示 backfill_filter_config.py).
+        """
         if not bundle_dir:
             raise ValueError("bundle_dir is empty")
         return self._model_registry.register(bundle_dir)
+
+    def _resolve_filter_id(self, bundle_dir: str) -> str:
+        """从 ModelRegistry 缓存拿 filter_id; 缺失 raise.
+
+        run_inference / run_inference_range 用本方法派生 snapshot 路径.
+        """
+        cfg = self._model_registry.get_filter_config(bundle_dir)
+        if not cfg:
+            raise RuntimeError(
+                f"bundle {bundle_dir} 未注册到 ModelRegistry 或缺 filter_config; "
+                "策略 on_init 应已调 validate_bundle, 检查启动顺序"
+            )
+        return cfg["filter_id"]
+
+    def list_active_filter_configs(self) -> Dict[str, Dict[str, Any]]:
+        """收集本 engine 当前所有策略 bundle 的 filter_config, 按 filter_id 去重.
+
+        Phase 2 task 14: DailyIngestPipeline 启动期用本方法拿到所有需要产 snapshot
+        的 filter_chain 集合. 同 filter_id 的多策略合并 (共享一份 snapshot, 节约 ingest).
+
+        Returns
+        -------
+        Dict[filter_id, filter_config_dict]
+            每个 entry 等同 ``ModelRegistry.get_filter_config`` 返回的 dict 内容.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        for strategy_name, strat in self.strategies.items():
+            bundle_dir = getattr(strat, "bundle_dir", "") or ""
+            if not bundle_dir:
+                continue
+            cfg = self._model_registry.get_filter_config(bundle_dir)
+            if not cfg:
+                continue
+            fid = cfg.get("filter_id")
+            if not fid:
+                continue
+            # 同 filter_id 多策略 → 只留一份 (后注册的覆盖, 一致性已在 register 校过)
+            out[fid] = cfg
+        return out
 
     def get_manifest(self, bundle_dir: str) -> Optional[Dict[str, Any]]:
         return self._model_registry.get(bundle_dir)
