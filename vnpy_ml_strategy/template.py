@@ -117,8 +117,11 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     # Parameter defaults
     bundle_dir: str = ""
     inference_python: str = r"E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.exe"
-    trigger_time: str = "21:00"  # 20:00 拉数后 1h, live_end=today 数据已齐
-    buy_sell_time: str = "09:30"  # 实盘 T+1 开盘交易时间（cron 注册见后续实盘版本）
+    trigger_time: str = "21:00"   # 20:00 拉数后 1h, live_end=today 数据已齐 → 推理 + persist
+    buy_sell_time: str = "09:26"  # 实盘 T+1 开盘交易时间 — 09:25 集合竞价开盘价后立即下单,
+                                   # 提高 09:30 撮合概率. on_init 注册第二个 cron 调
+                                   # run_open_rebalance: 读 T 日 pred (昨晚 21:00 已 persist)
+                                   # + 当前开盘价 → rebalance + send_order.
     topk: int = 7
     n_drop: int = 1
     risk_degree: float = 0.95
@@ -419,21 +422,18 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             except Exception as exc:
                 self.write_log(f"persist_selections failed: {type(exc).__name__}: {exc}")
 
-            if self.enable_trading:
-                self.last_stage = Stage.ORDER.value
-                # Phase 6: 提取全量 pred_score (Series) 传给 generate_orders，
-                # 让子类调 rebalance_to_target 走 qlib 算法
-                try:
-                    last_dt = pred_df.index.get_level_values("datetime").max()
-                    today_pred = pred_df.xs(last_dt, level="datetime")
-                    pred_score = today_pred.iloc[:, 0] if isinstance(today_pred, pd.DataFrame) else today_pred
-                except Exception as exc:
-                    self.write_log(f"提取 pred_score 失败: {exc}")
-                    pred_score = pd.Series(dtype=float)
-                self.write_log(f"generate_orders enabled, pred_n={len(pred_score)}, dispatching")
-                self.generate_orders(pred_score, selected, on_day=today)
-            else:
-                self.write_log("enable_trading=False, skip generate_orders (dry-run)")
+            # 双 cron 架构 (实盘 best practice): 21:00 trigger_time cron 只做推理 + persist,
+            # 不在此发单. 因为 21:00 市场已休市, 用收盘后 stale tick 算的 volume 与次日开盘价
+            # 偏差大, 且发单后等次日 09:30 撮合, 全程没在 09:26 用真实开盘价校准. 改为:
+            #   - 21:00 cron (本方法): 推理 + persist selections.parquet → 信号已落盘
+            #   - 09:26 cron (run_open_rebalance): 读昨日 persist 的 pred + 当前开盘价 →
+            #                                       rebalance + send_order → 09:30 撮合
+            # 这样 09:26 用真实开盘价算 volume, 撮合精度高, 与 batch replay 语义一致
+            # (replay Day=T 的 rebalance 也是用 prev_day_pred + Day T 开盘价).
+            #
+            # 前期版本 21:00 也调 generate_orders 是错的 production 设计 (commit e96972c
+            # 的 Bug 1 fix 仅修了透传 on_day, 没修语义); 现彻底删掉.
+            self.write_log("21:00 cron 完成推理 + persist; 等 09:26 cron 触发 rebalance")
 
             self.last_stage = Stage.PUBLISH.value
             self._publish_metrics(metrics, as_of_date=today)
@@ -451,6 +451,105 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
     def _is_trade_day(self, d: date) -> bool:
         return self.signal_engine.is_trade_day(d)
+
+    # -----------------------------------------------------------------
+    # buy_sell_time cron 入口 (实盘 09:26 — 双 cron 架构)
+    # -----------------------------------------------------------------
+
+    def run_open_rebalance(self, as_of_date: Optional[date] = None) -> None:
+        """09:26 cron 入口: 读上一交易日 21:00 cron persist 的 pred + 当前开盘价 → rebalance.
+
+        实盘双 cron 架构的"执行"半边. 与 ``run_daily_pipeline`` (推理半边) 协作:
+
+          T-1 21:00 cron → run_daily_pipeline → 推理 + persist predictions.parquet
+          T   09:26 cron → run_open_rebalance  → 读 T-1 pred + T 开盘价 → rebalance + send_order
+          T   09:30 撮合
+          T   EOD settle (gateway auto via natural day rollover)
+          T   21:00 cron → run_daily_pipeline → 推理 + persist (循环)
+
+        与 ``_replay_loop_iter`` 的等价性:
+          replay[Day=T] 用 prev_day_pred (T-1 pred 在内存) + on_day=T 撮合
+          live[T 09:26]  用 prev_day_pred (T-1 pred 从 disk 读) + on_day=T 撮合
+        两者输入一致 → sim_trades byte-equal.
+
+        ``as_of_date`` 给定时为逻辑日, 默认 None → date.today() (实盘 cron 路径).
+        smoke fast-forward 时 as_of_date=回放日.
+        """
+        try:
+            today = as_of_date if as_of_date is not None else date.today()
+            self.last_run_date = str(today)
+            self.last_stage = ""
+            self.last_error = ""
+
+            if not self._is_trade_day(today):
+                self.write_log(f"[open_rebalance] non-trading day {today}, skip")
+                return
+
+            if not self.enable_trading:
+                self.write_log("[open_rebalance] enable_trading=False, skip (dry-run)")
+                return
+
+            # 1. 解析"上一交易日" — 用 qlib calendar (provider_uri) 跳过周末/节假日
+            from .utils.trade_calendar import make_calendar
+            cal = make_calendar(self.provider_uri)
+            prev_day = cal.prev_trade_day(today)
+            if prev_day is None:
+                self.write_log(f"[open_rebalance] {today}: 找不到上一交易日 (calendar 起点)")
+                return
+
+            # 2. 读 prev_day 的 predictions.parquet (= T-1 21:00 cron persist 的)
+            prev_day_str = prev_day.strftime("%Y%m%d")
+            prev_pred_path = (
+                Path(self.output_root) / self.strategy_name / prev_day_str / "predictions.parquet"
+            )
+            if not prev_pred_path.exists():
+                self.write_log(
+                    f"[open_rebalance] {today}: 上日 {prev_day} pred 缺失 ({prev_pred_path}); "
+                    f"昨晚 21:00 cron 是否成功跑过?"
+                )
+                return
+
+            try:
+                pred_df = pd.read_parquet(prev_pred_path)
+            except Exception as exc:
+                self.write_log(f"[open_rebalance] 读 prev pred 失败: {exc}")
+                return
+
+            # 3. 提取 prev_day pred_score
+            try:
+                last_dt = pred_df.index.get_level_values("datetime").max()
+                pred_score = pred_df.xs(last_dt, level="datetime")
+                if isinstance(pred_score, pd.DataFrame):
+                    pred_score = pred_score.iloc[:, 0]
+            except Exception as exc:
+                self.write_log(f"[open_rebalance] 提取 pred_score 失败: {exc}")
+                return
+
+            if pred_score is None or pred_score.empty:
+                self.write_log(f"[open_rebalance] prev_day {prev_day} pred 为空")
+                return
+
+            # 4. 刷新今日开盘价 tick (refresh_tick(vt, as_of_date=today))
+            #    以"当前持仓 + prev pred top-k 候选"为目标 — 覆盖 sells/buys 全集
+            top_candidates = pred_score.sort_values(ascending=False).head(self.topk).index
+            candidate_vts: List[str] = []
+            for inst in top_candidates:
+                vt = self._instrument_to_vt(str(inst))
+                if vt:
+                    candidate_vts.append(vt)
+            self._refresh_market_data_for_day(today, candidates=candidate_vts)
+
+            # 5. rebalance — 用 prev_day pred (= T-1 21:00 推理结果) + 今日开盘价
+            self.last_stage = Stage.ORDER.value
+            self.write_log(
+                f"[open_rebalance] {today}: 用 prev_day={prev_day} pred (n={len(pred_score)}) rebalance"
+            )
+            self.rebalance_to_target(pred_score, on_day=today)
+        finally:
+            try:
+                self.signal_engine.put_strategy_event(self)
+            except Exception:
+                pass
 
     def select_topk(self, pred_df: pd.DataFrame) -> pd.DataFrame:
         if pred_df is None or pred_df.empty:
@@ -908,15 +1007,30 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     # -----------------------------------------------------------------
 
     def on_init(self) -> None:
-        """策略初始化 — 注册每日任务, 校验 bundle 完整性."""
-        self.signal_engine.register_daily_job(
+        """策略初始化 — 注册双 cron + 校验 bundle 完整性.
+
+        实盘双 cron 设计 (commit 后续):
+          - {strategy_name}_predict   @ trigger_time   (默认 21:00) → run_daily_pipeline (推理 + persist)
+          - {strategy_name}_rebalance @ buy_sell_time  (默认 09:26) → run_open_rebalance (rebalance + send_order)
+
+        历史 job 命名约定 ``strategy_name`` 沿用为 _predict 后缀 (向后兼容
+        ``run_pipeline_now`` 的入口语义).
+        """
+        self.signal_engine.register_predict_job(
             strategy_name=self.strategy_name,
             trigger_time=self.trigger_time,
             callback=self.run_daily_pipeline,
         )
+        self.signal_engine.register_rebalance_job(
+            strategy_name=self.strategy_name,
+            buy_sell_time=self.buy_sell_time,
+            callback=self.run_open_rebalance,
+        )
         self.signal_engine.validate_bundle(self.bundle_dir)
         self.inited = True
-        self.write_log("on_init completed")
+        self.write_log(
+            f"on_init completed; cron 已注册: predict@{self.trigger_time} + rebalance@{self.buy_sell_time}"
+        )
 
     def on_start(self) -> None:
         self.trading = True
@@ -930,7 +1044,9 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
     def on_stop(self) -> None:
         self.trading = False
-        self.signal_engine.unregister_daily_job(strategy_name=self.strategy_name)
+        # 双 cron 都要 unregister
+        self.signal_engine.unregister_daily_job(strategy_name=self.strategy_name + "_predict")
+        self.signal_engine.unregister_daily_job(strategy_name=self.strategy_name + "_rebalance")
         self.write_log("on_stop")
 
     # -----------------------------------------------------------------
@@ -1078,13 +1194,19 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         scheduler = getattr(self.signal_engine, "scheduler", None)
         gateway = self._get_own_gateway()
 
-        # 1. 暂停本策略 APScheduler cron（仅按 strategy_name 隔离，不影响其他策略）
+        # 1. 暂停本策略两个 APScheduler cron (按 strategy_name 隔离, 不影响其他策略)
+        # 双 cron 架构: predict (21:00) + rebalance (09:26) 都需要暂停, 防回放期间
+        # 真实 cron 与回放并发触发推理 / rebalance.
+        paused_jobs: List[str] = []
         if scheduler is not None:
-            try:
-                scheduler.pause_job(self.strategy_name)
-                self.write_log(f"[replay] 暂停 cron job ({self.strategy_name})")
-            except Exception as exc:
-                self.write_log(f"[replay] pause_job 失败 (continuing): {exc}")
+            for suffix in ("_predict", "_rebalance"):
+                job_name = self.strategy_name + suffix
+                try:
+                    scheduler.pause_job(job_name)
+                    paused_jobs.append(job_name)
+                except Exception as exc:
+                    self.write_log(f"[replay] pause_job({job_name}) 失败 (continuing): {exc}")
+            self.write_log(f"[replay] 暂停 cron jobs {paused_jobs}")
 
         # 2. 禁用本 gateway 自动 settle（仅按 gateway 实例隔离）
         if gateway is not None:
@@ -1109,13 +1231,15 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                     gateway.enable_auto_settle(True)
                 except Exception:
                     pass
-            # 5. 恢复本策略 cron
+            # 5. 恢复本策略两个 cron
             if scheduler is not None:
-                try:
-                    scheduler.resume_job(self.strategy_name)
-                    self.write_log(f"[replay] 恢复 cron job ({self.strategy_name})")
-                except Exception as exc:
-                    self.write_log(f"[replay] resume_job 失败: {exc}")
+                for job_name in paused_jobs:
+                    try:
+                        scheduler.resume_job(job_name)
+                    except Exception as exc:
+                        self.write_log(f"[replay] resume_job({job_name}) 失败: {exc}")
+                if paused_jobs:
+                    self.write_log(f"[replay] 恢复 cron jobs {paused_jobs}")
 
     def _replay_loop_body(self, start: date, end: date, gateway: Any) -> None:
         """Phase 4 加速回放主循环。

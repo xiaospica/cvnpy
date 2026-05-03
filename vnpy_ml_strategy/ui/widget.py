@@ -317,10 +317,13 @@ class MLStrategyPanel(QtWidgets.QFrame):
             return
 
         text = (
-            "即将在 APS 后台线程立即跑一次 run_daily_pipeline.\n"
+            "即将在 APS 后台线程立即跑一次 run_daily_pipeline (= 21:00 cron 路径).\n"
             "过程包含:\n"
             "  1. subprocess 推理 (~60-120s)\n"
-            "  2. 若 enable_trading=True 会真实下单\n"
+            "  2. persist selections.parquet (信号落盘)\n"
+            "\n"
+            "注意: 双 cron 架构下,本按钮不下单. 下单走 09:26 cron (buy_sell_time)\n"
+            "      读昨日 pred + 当前开盘价 → rebalance + send_order.\n"
             "\n"
             "确认触发? "
         )

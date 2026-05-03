@@ -568,7 +568,42 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 _log(f"  WARN: trade_calendar.refresh() failed: {exc}")
 
-            # Phase 5.3 — 多策略串行 single-day pipeline
+            # Phase 5.3 — 模拟 09:26 cron (buy_sell_time): 多策略串行 rebalance
+            # 双 cron 架构:
+            #   - 09:26 cron: run_open_rebalance(strat) → 读昨日 pred + 刷今日 tick + rebalance + send_order
+            #   - 09:30 撮合 (vnpy_qmt_sim 同步)
+            #   - settle EOD (smoke 显式调, 生产由 gateway timer 跨自然日触发)
+            #   - 21:00 cron: run_pipeline_now(strat, as_of_date=day) → 推理 + persist
+            # 这样与 batch replay [Day=T] iter 语义等价 (用 prev_day_pred 撮合).
+            _log(f"  [09:26 cron] 多策略 rebalance (用上日 21:00 persist 的 pred)")
+            for strat_name, _gw in started:
+                try:
+                    ok = ml_engine.run_open_rebalance_now(strat_name, as_of_date=day)
+                    if not ok:
+                        _log(f"  WARN: run_open_rebalance_now({strat_name}) 返 False")
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"  FAIL: 09:26 rebalance[{strat_name}] 异常: {type(exc).__name__}: {exc}")
+                    _teardown_uvicorn(webtrader_uv, "webtrader")
+                    _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
+                    main_engine.close()
+                    return 3
+
+            # Phase 5.4 — 09:30 撮合后 EOD settle (T+1 持仓结转 + mark-to-market)
+            # 生产环境 gateway timer 按自然日 wall-clock 跨切自动 settle, smoke
+            # fast-forward wall-clock 不跨日, auto-settle 不触发, 显式调.
+            for strat_name, gw_name in started:
+                gw = main_engine.get_gateway(gw_name)
+                counter = getattr(getattr(gw, "td", None), "counter", None)
+                if counter is None or not hasattr(counter, "settle_end_of_day"):
+                    continue
+                try:
+                    counter.settle_end_of_day(day)
+                    _log(f"  [{gw_name}] settle_end_of_day({day}) ok")
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"  WARN: {gw_name} settle({day}) 异常: {type(exc).__name__}: {exc}")
+
+            # Phase 5.5 — 模拟 21:00 cron (trigger_time): 多策略串行 推理 + persist
+            _log(f"  [21:00 cron] 多策略 推理 + persist selections.parquet (无下单)")
             for strat_name, _gw in started:
                 try:
                     status, elapsed = wait_pipeline_with_heartbeat(
@@ -587,32 +622,13 @@ def main() -> int:
                 if status == "ok":
                     _log(f"  pipeline[{strat_name}] done status=ok elapsed={elapsed:.1f}s")
                 elif status in ("empty", "non_trading"):
-                    _log(
-                        f"  pipeline[{strat_name}] status={status} elapsed={elapsed:.1f}s "
-                        f"(允许, 但跳过该日产物断言)"
-                    )
+                    _log(f"  pipeline[{strat_name}] status={status} elapsed={elapsed:.1f}s (允许)")
                 else:
                     _log(f"  FAIL: pipeline[{strat_name}] status={status} elapsed={elapsed:.1f}s")
                     _teardown_uvicorn(webtrader_uv, "webtrader")
                     _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
                     main_engine.close()
                     return 3
-
-            # Phase 5.3 — 实时段每日尾 settle (T+1 持仓结转 + mark-to-market)
-            # 关键: 生产环境 gateway.process_timer_event 按自然日 wall-clock 触发
-            # auto-settle, 但 smoke fast-forward 多日的 wall-clock 没跨日, auto-settle
-            # 不会触发. 不显式 settle → 当日新买入 yd_volume 永远 0 → 次日 sell 被
-            # T+1 拒单. 显式 settle 让 yd_volume = volume + 标 mark-to-market.
-            for strat_name, gw_name in started:
-                gw = main_engine.get_gateway(gw_name)
-                counter = getattr(getattr(gw, "td", None), "counter", None)
-                if counter is None or not hasattr(counter, "settle_end_of_day"):
-                    continue
-                try:
-                    counter.settle_end_of_day(day)
-                    _log(f"  [{gw_name}] settle_end_of_day({day}) ok")
-                except Exception as exc:  # noqa: BLE001
-                    _log(f"  WARN: {gw_name} settle({day}) 异常: {type(exc).__name__}: {exc}")
 
             # Phase 5.4 — 实时段每日尾 sleep
             if not is_last and SMOKE_LIVE_SECONDS_PER_DAY > 0:

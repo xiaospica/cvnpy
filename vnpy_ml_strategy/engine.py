@@ -237,11 +237,14 @@ class MLEngine(BaseEngine):
             self.stop_strategy(name)
 
     def run_pipeline_now(self, strategy_name: str, as_of_date=None) -> bool:
-        """UI 手动触发一次日频 pipeline (立即在 APS 后台线程跑).
+        """UI 手动触发一次日频 pipeline (= 模拟 trigger_time 21:00 cron 触发).
+
+        双 cron 架构: 此方法触发 ``{strategy_name}_predict`` job, 即推理 + persist
+        selections.parquet, 不下单. 下单由 ``run_open_rebalance_now`` 在 buy_sell_time
+        cron 触发.
 
         ``scheduler.run_job_now`` 同步阻塞直到 job 完成 (subprocess 推理 ~60-90s).
-        run_daily_pipeline 内部已用 try/finally 保证发 put_strategy_event,
-        这里再显式 put 一次作为双保险 (若 template 是旧版则保兜底).
+        run_daily_pipeline 内部已用 try/finally 保证发 put_strategy_event.
 
         Phase 4 回放支持
         ----------------
@@ -255,11 +258,33 @@ class MLEngine(BaseEngine):
             kwargs = {}
             if as_of_date is not None:
                 kwargs["as_of_date"] = as_of_date
-            self.scheduler.run_job_now(strategy_name, **kwargs)
+            self.scheduler.run_job_now(strategy_name + "_predict", **kwargs)
             self.put_strategy_event(self.strategies[strategy_name])
             return True
         except Exception as exc:
             print(f"[MLEngine] run_pipeline_now({strategy_name}) failed: {exc}")
+            return False
+
+    def run_open_rebalance_now(self, strategy_name: str, as_of_date=None) -> bool:
+        """UI / smoke 手动触发一次 09:26 rebalance (= 模拟 buy_sell_time cron 触发).
+
+        触发 ``{strategy_name}_rebalance`` job → run_open_rebalance(as_of_date):
+        读 prev_day 的 predictions.parquet + 刷 today 开盘价 → rebalance + send_order.
+
+        smoke fast-forward 时按日序调用模拟实盘 09:26 cron 行为, 与 batch replay 的
+        Day=T iteration 语义等价 (都用 prev_day_pred + Day T 撮合).
+        """
+        if strategy_name not in self.strategies:
+            return False
+        try:
+            kwargs = {}
+            if as_of_date is not None:
+                kwargs["as_of_date"] = as_of_date
+            self.scheduler.run_job_now(strategy_name + "_rebalance", **kwargs)
+            self.put_strategy_event(self.strategies[strategy_name])
+            return True
+        except Exception as exc:
+            print(f"[MLEngine] run_open_rebalance_now({strategy_name}) failed: {exc}")
             return False
 
     def put_strategy_event(self, strategy) -> None:
@@ -277,21 +302,55 @@ class MLEngine(BaseEngine):
         }
         self.put_event(EVENT_ML_STRATEGY, payload)
 
+    def register_predict_job(
+        self,
+        strategy_name: str,
+        trigger_time: str,
+        callback: Callable[[], None],
+    ) -> None:
+        """注册 trigger_time cron (默认 21:00) → 推理 + persist selections.parquet.
+
+        job id = ``{strategy_name}_predict``. ``run_pipeline_now`` 走此 job.
+        """
+        self.scheduler.register_daily_job(
+            name=strategy_name + "_predict",
+            time_str=trigger_time,
+            job_func=callback,
+        )
+
+    def register_rebalance_job(
+        self,
+        strategy_name: str,
+        buy_sell_time: str,
+        callback: Callable[[], None],
+    ) -> None:
+        """注册 buy_sell_time cron (默认 09:26) → rebalance + send_order.
+
+        job id = ``{strategy_name}_rebalance``. ``run_open_rebalance_now`` 走此 job.
+        实盘 best practice: 09:26 集合竞价开盘价已可读, 此时下单 09:30 撮合概率最高.
+        """
+        self.scheduler.register_daily_job(
+            name=strategy_name + "_rebalance",
+            time_str=buy_sell_time,
+            job_func=callback,
+        )
+
+    # 兼容旧 API: 保留 register_daily_job (默认作为 predict job 注册)
+    # 新代码请用 register_predict_job / register_rebalance_job
     def register_daily_job(
         self,
         strategy_name: str,
         trigger_time: str,
         callback: Callable[[], None],
     ) -> None:
-        """委托给 DailyTimeTaskScheduler."""
-        self.scheduler.register_daily_job(
-            name=strategy_name,
-            time_str=trigger_time,
-            job_func=callback,
-        )
+        """[Deprecated] 旧 API. 新代码用 register_predict_job + register_rebalance_job."""
+        self.register_predict_job(strategy_name, trigger_time, callback)
 
     def unregister_daily_job(self, strategy_name: str) -> None:
-        # scheduler 暂无 unregister_daily_job, 用内部 APS remove 接口
+        """注销 cron job. 双 cron 架构下需各自调一次:
+            unregister_daily_job(name + "_predict")
+            unregister_daily_job(name + "_rebalance")
+        """
         try:
             self.scheduler.scheduler.remove_job(strategy_name)
         except Exception:
