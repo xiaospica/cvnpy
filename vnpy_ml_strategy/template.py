@@ -431,7 +431,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                     self.write_log(f"提取 pred_score 失败: {exc}")
                     pred_score = pd.Series(dtype=float)
                 self.write_log(f"generate_orders enabled, pred_n={len(pred_score)}, dispatching")
-                self.generate_orders(pred_score, selected)
+                self.generate_orders(pred_score, selected, on_day=today)
             else:
                 self.write_log("enable_trading=False, skip generate_orders (dry-run)")
 
@@ -501,16 +501,26 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         store = ResultStore(self.output_root)
         store.write_selections(self.strategy_name, today, sel_df)
 
-    def generate_orders(self, pred_score: pd.Series, selected: pd.DataFrame) -> None:
+    def generate_orders(
+        self,
+        pred_score: pd.Series,
+        selected: pd.DataFrame,
+        on_day: Optional[date] = None,
+    ) -> None:
         """子类实现. 内部调 self.send_order(...). 仅在 enable_trading=True 时被调用.
+
+        ``on_day`` 给定时为 pipeline 的逻辑日 (= run_daily_pipeline 的 ``today``,
+        即 ``as_of_date or date.today()``). 子类必须把它透传给 ``rebalance_to_target``
+        和参考价查询, 否则 smoke / 历史回放场景下 on_day 会错用 wall-clock today,
+        log 显示乱日期 + 撮合可能取错日的参考价.
 
         Phase 6: 签名加 pred_score (Series, 全量) 作为第一参数 — qlib TopkDropoutStrategy
         算法需要全量候选池才能正确决策。子类典型实现：
 
-            def generate_orders(self, pred_score, selected):
+            def generate_orders(self, pred_score, selected, on_day=None):
                 if not self.enable_trading:
                     return
-                self.rebalance_to_target(pred_score, on_day=date.today())
+                self.rebalance_to_target(pred_score, on_day=on_day or date.today())
 
         ``selected`` 仍然传入用于子类做日志 / persistence，但 rebalance 内部不再使用它。
         """

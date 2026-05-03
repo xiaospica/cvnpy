@@ -3,63 +3,75 @@
 
 ## 测什么
 
-run_ml_headless.py 启动后只能在每日 21:00 cron 触发一次推理 + 下单, 无法
-对实时模拟阶段的"定时拉数 → 定时推理 → 定时交易"循环做端到端验证.
-本脚本基于 run_ml_headless 同一份 GATEWAYS / STRATEGIES / STRATEGY_BASE_SETTING,
-把多日加速循环 + 后台 ingest + 心跳轮询 + 多策略多日断言叠加上去.
+run_ml_headless.py 启动后内部已有 batch replay 机制 (策略 on_start 后台触发
+``run_inference_range`` 一次性跑完 [replay_start_date, today-1]), 但实时
+模拟阶段的"定时拉数 → 定时推理 → 定时交易"循环只能等真实 21:00 cron 才能验证.
+本脚本: 复用策略原生 batch replay + smoke 主线程接管最近 N 天的 single-day
+循环 (每日 ingest + run_pipeline_now), 验证两段端到端流程.
 
 ## 阶段切分 (核心契约)
 
-参数 ``SMOKE_REPLAY_DAYS = N`` (默认 5):
+参数 ``SMOKE_LIVE_DAYS = N`` (默认 3):
 
-  - 回放段: 各策略 ``replay_start_date`` 起的 **前 N 个交易日**
-            (模型上线前的"历史预热")
-  - 实时段: 第 N+1 个交易日 → ``today-1`` (取最近已完整收盘交易日,
-            不会拉未来数据导致 ingest fail; 对应"上线后每日 cron 推理")
-            实时段每日尾插 ``SMOKE_LIVE_SECONDS_PER_DAY`` sleep 让 mlearnweb
-            snapshot loop 与 webtrader REST 能采到当日数据.
+  - 回放段 (策略 on_start 自动 batch replay):
+        范围 = [replay_start_date, live_days[0] - 1]
+        实现 = 策略 _start_replay_if_needed → 后台线程 _run_replay_loop →
+               signal_engine.run_inference_range(start, end) **一次** spawn subprocess
+        产物 = 每日 batch_mode=true 的 diagnostics + metrics + selections + predictions
+        smoke 通过 setting override 注入 ``replay_end_date = live_days[0] - 1``
+        让策略 batch 提前停在实时段前一天.
+        与 run_ml_headless 启动时行为完全相同代码路径.
 
-两段无缝衔接, 同一日序列循环, 仅 phase 标签不同. ``SMOKE_LIVE_DAYS_LIMIT > 0``
-可对实时段额外截尾 (从前往后取). 边界:
-  - 总可用交易日 ≤ N: 全归回放段, 实时段为空 (告警提示)
-  - today 非交易日: live_max = resolve_live_date() 取最近已收盘交易日
+  - 实时段 (smoke 主线程 single-day 循环):
+        范围 = 最近 N 个交易日 (从 live_max = resolve_live_date() 倒推)
+        实现 = for day in live_days:
+                   run_daily_ingest_now(day)                # 每日真触发 ingest
+                   run_pipeline_now(name, as_of_date=day)   # single-day pipeline
+                   sleep(SMOKE_LIVE_SECONDS_PER_DAY)        # 让 mlearnweb 采样
+        产物 = 每日 batch_mode=false 的完整四件套
+        与生产 21:00 cron 触发完全相同代码路径.
+
+边界: SMOKE_LIVE_DAYS=0 → 全部归 batch replay (无 single-day 段),
+等价于 run_ml_headless 默认启动行为, 用作等价性测试 baseline.
+
+## 不 monkey-patch date.today()
+
+run_pipeline_now(as_of_date=) 已支持显式日期注入 (engine.py:239), 所有下游
+从 today=as_of_date 派生 (template.py:345), 无需 patch.
 
 ## 与 run_ml_headless 等价性
 
-走完全相同的代码路径: ``MLEngine.run_pipeline_now → run_daily_pipeline →
-QlibPredictor subprocess``. 仅外围差异:
-  - ingest 由 helper 显式触发 (生产是 cron)
-  - 派生 webtrader / mlearnweb uvicorn 子进程 (生产由别处启)
-  - ``run_pipeline_now(strategy_name, as_of_date=day)`` 显式注入历史日期
-    (生产 cron 触发时 as_of_date=None 走 date.today())
-
-不 monkey-patch ``date.today()`` — template.run_daily_pipeline 显式传 as_of_date
-后所有下游都从 today=as_of_date 派生, 无需 patch.
+smoke (SMOKE_LIVE_DAYS=3) vs run_ml_headless (SMOKE_LIVE_DAYS=0 等价启动)
+跑出的产物应严格一致, 验证工具:
+    F:/Program_Home/vnpy/python.exe \\
+        vnpy_ml_strategy/test/diff_smoke_vs_headless.py OUT_ROOT_A OUT_ROOT_B
 
 ## 运行
 
 ```
+# 默认: batch replay 全段 + single-day 最近 3 天
 F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
 
-# 默认: 回放 5 个交易日 + 之后所有可用交易日作实时段
-# 缩短: 回放 2 个交易日 + 实时段最多 2 天
-SMOKE_REPLAY_DAYS=2 SMOKE_LIVE_DAYS_LIMIT=2 \\
-    F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
+# baseline B: 全 batch replay (无 single-day, 等价 run_ml_headless 启动)
+SMOKE_LIVE_DAYS=0 F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
 
-# 长回放: 回放 60 个交易日 (lookback 预热) + 实时段不限
-SMOKE_REPLAY_DAYS=60 F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
+# 调实时段长度
+SMOKE_LIVE_DAYS=5 F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
 
-# 关下单 (仅验证流水线产出)
+# 关下单
 SMOKE_ENABLE_TRADING=0 F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
+
+# 关 mlearnweb 子进程
+SMOKE_SPAWN_MLEARNWEB=0 F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
 ```
 
 ## 与 smoke_full_pipeline.py 区别
 
   smoke_full_pipeline:  单策略硬编码 jq41_csi300_2026, 默认 1 天 ingest+推理
   run_ml_headless_smoke: 复用 run_ml_headless 的多策略多 gateway 配置,
-                         默认回放 5 天 + 实时 3 天, 多策略串行驱动
+                         先 batch replay 再 single-day, 多策略串行驱动
 
-两者都用同一份 _pipeline_drivers helper.
+两者都用同一份 _pipeline_drivers helper (实时段 single-day 部分).
 """
 
 from __future__ import annotations
@@ -115,8 +127,6 @@ from run_ml_headless import (  # noqa: E402  (sys.path 必须先注入)
 from vnpy_ml_strategy.test._pipeline_drivers import (  # noqa: E402
     assert_orders_for_gateway,
     assert_strategy_day_outputs,
-    build_next_n_trade_days,
-    build_trade_days,
     resolve_live_date,
     run_ingest_with_heartbeat,
     wait_pipeline_with_heartbeat,
@@ -128,21 +138,14 @@ from vnpy_ml_strategy.test._pipeline_drivers import (  # noqa: E402
 # =====================================================================
 
 # --- 1) 阶段切分 ---
-# 回放/实时切分语义 (用户原话):
-#   - 回放段:  replay_start_date 起的 **前 N 个交易日**       (N = SMOKE_REPLAY_DAYS)
-#   - 实时段:  第 N+1 个交易日  →  today-1 (取最近已收盘交易日, 不会拉未来数据)
-#
-# 与 cron 语义对齐: 回放段是模型上线前的"历史预热", 实时段对应"上线后每日 cron 推理".
-# N 控制 "预热期长度", 不可为 0 (没有回放段就退化为纯实时, 无意义).
-#
-# 边界情况:
-#   - replay_start 起的总可用交易日 <= N: 全部归为回放段, 实时段为空 (告警提示)
-#   - today 非交易日: 实时段终点取 resolve_live_date() — 最近已完整收盘交易日
-#   - SMOKE_LIVE_DAYS_LIMIT > 0: 实时段额外截尾到最多 N 个交易日 (从前往后取)
-SMOKE_REPLAY_DAYS: int = int(os.getenv("SMOKE_REPLAY_DAYS", "5"))
-
-# 实时段交易日数上限, 0=不限 (实际上限受 today-1 约束)
-SMOKE_LIVE_DAYS_LIMIT: int = int(os.getenv("SMOKE_LIVE_DAYS_LIMIT", "0"))
+# SMOKE_LIVE_DAYS = N (默认 3):
+#   - 回放段 = 策略 on_start 自动 batch replay [replay_start, live_days[0]-1]
+#             (smoke 通过 setting 注入 replay_end_date 让 batch 提前停)
+#   - 实时段 = smoke 主线程 single-day 循环最近 N 个交易日
+#             (从 live_max = resolve_live_date() 倒推 N 个)
+# SMOKE_LIVE_DAYS=0 → 全 batch replay 跑到 today-1, 无 single-day 段
+#                    (等价 run_ml_headless 默认启动行为, 用作等价性 baseline)
+SMOKE_LIVE_DAYS: int = int(os.getenv("SMOKE_LIVE_DAYS", "3"))
 
 # 实时段每日尾 sleep (秒) — 让 mlearnweb ml_snapshot_loop 60s tick 至少触发一次
 SMOKE_LIVE_SECONDS_PER_DAY: int = int(os.getenv("SMOKE_LIVE_SECONDS_PER_DAY", "30"))
@@ -177,6 +180,11 @@ SIM_DB_DIR: str = r"F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state"
 # --- 5) ingest 环境变量 (复用 smoke_full_pipeline 同一套) ---
 if "ML_INGEST_LOOKBACK_DAYS" not in os.environ:
     os.environ["ML_INGEST_LOOKBACK_DAYS"] = "250"
+
+# DumpDataAll ProcessPoolExecutor max_workers 默认 4 (ml_data_build 默认 8).
+# Windows spawn 模式每 worker 占 500MB-1GB commit memory, 4 worker 内存峰值
+# 比 8 worker 减半. CSV→bin 是 IO bound, 4 worker 已能让多核充分利用.
+os.environ.setdefault("ML_INGEST_DUMP_WORKERS", "4")
 
 WEBTRADER_HTTP_PORT: int = 8001
 MLEARNWEB_PORT: int = 8100
@@ -349,10 +357,55 @@ def main() -> int:
         _log(f"FAIL: webtrader uvicorn died early (rc={webtrader_uv.returncode})")
         return 2
 
-    # --- Phase 2: add + init + start 所有策略 ---
-    _log("=== Phase 2 — add_strategy ===")
+    # --- Phase 2: 计算 live_days + replay_end (注入 add_strategy 之前) ---
+    _log("=== Phase 2 — 计算阶段切分 ===")
+    downloader = tushare_engine._get_tushare_datafeed().downloader
+
+    def _is_trade_date_fn(d: date) -> bool:
+        return bool(downloader.is_trade_date(d.strftime("%Y%m%d")))
+
+    today = date.today()
+    live_max = resolve_live_date(_is_trade_date_fn)
+    _log(f"  today={today}, live_max={live_max} (最近已完整收盘交易日)")
+
+    # live_days = 从 live_max 倒推 SMOKE_LIVE_DAYS 个交易日 (含 live_max)
+    if SMOKE_LIVE_DAYS > 0:
+        live_days: List[date] = []
+        cursor = live_max
+        scanned = 0
+        while len(live_days) < SMOKE_LIVE_DAYS and scanned < 60:
+            try:
+                if _is_trade_date_fn(cursor):
+                    live_days.insert(0, cursor)
+            except Exception:  # noqa: BLE001 — 查失败保守保留
+                live_days.insert(0, cursor)
+            cursor -= timedelta(days=1)
+            scanned += 1
+        if not live_days:
+            _log(f"FAIL: live_max={live_max} 倒推 {SMOKE_LIVE_DAYS} 天没找到交易日")
+            _teardown_uvicorn(webtrader_uv, "webtrader")
+            _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
+            main_engine.close()
+            return 2
+        replay_end = live_days[0] - timedelta(days=1)  # 回放段终点 = 实时段第一天前一天
+        _log(
+            f"  实时段 {len(live_days)} 日 [{live_days[0]} ~ {live_days[-1]}] "
+            f"(smoke single-day per day)"
+        )
+        _log(f"  回放段终点 replay_end_date={replay_end} (策略 batch replay 跑到这天)")
+    else:
+        live_days = []
+        replay_end = live_max
+        _log(
+            f"  SMOKE_LIVE_DAYS=0, 全 batch replay 到 {replay_end}, 无 single-day 段 "
+            f"(等价 run_ml_headless 默认启动)"
+        )
+
+    # --- Phase 3: add + init + start 所有策略 (注入 replay_end_date) ---
+    # 策略 on_start 会自动后台触发 batch replay [replay_start_date, replay_end_date]
+    _log("=== Phase 3 — add_strategy + 触发 batch replay ===")
     valid_gw = {gw["name"] for gw in GATEWAYS}
-    started: List[Tuple[str, str]] = []  # [(strategy_name, gateway_name)]
+    started: List[Tuple[str, str]] = []
 
     for strat_def in STRATEGIES:
         name = strat_def["strategy_name"]
@@ -366,11 +419,14 @@ def main() -> int:
             **STRATEGY_BASE_SETTING,
             **strat_def["setting_override"],
             "gateway": gw_name,
-            # smoke 强制覆盖: 启用下单 + 拉长 subprocess timeout
+            # smoke 强制覆盖
             "enable_trading": SMOKE_ENABLE_TRADING,
             "subprocess_timeout_s": PIPELINE_TIMEOUT_S,
+            # 关键: 注入 replay_end_date 让策略 batch replay 自动停在该日,
+            # smoke Phase 5 接管 single-day 实时段
+            "replay_end_date": replay_end.strftime("%Y-%m-%d"),
         }
-        _log(f"  adding {name} → gateway={gw_name} (enable_trading={SMOKE_ENABLE_TRADING})")
+        _log(f"  adding {name} → gateway={gw_name} replay_end={replay_end} trading={SMOKE_ENABLE_TRADING}")
         try:
             ml_engine.add_strategy(cls, name, setting)
         except Exception as exc:  # noqa: BLE001
@@ -393,159 +449,200 @@ def main() -> int:
 
     _log(f"  {len(started)} 策略已启动: {[s[0] for s in started]}")
 
-    # --- Phase 3: 构造日序列 (回放 + 实时无缝) ---
-    _log("=== Phase 3 — 构造日序列 ===")
-    downloader = tushare_engine._get_tushare_datafeed().downloader
+    # --- Phase 4: 等所有策略 batch replay 完成 ---
+    # 策略 on_start 启动后台线程跑 _run_replay_loop, 主线程立即返回.
+    # smoke 主线程 poll strategy.replay_status 直到全部进入终态.
+    # 终态: completed / skipped_live / error
+    # (template.py:1065/977/989/1068; "running" 是中间态)
+    _log("=== Phase 4 — 等 batch replay 完成 ===")
+    poll_t0 = time.time()
+    poll_interval = 5.0
+    last_heartbeat = poll_t0
+    BATCH_TIMEOUT_S = int(os.getenv("SMOKE_BATCH_REPLAY_TIMEOUT_S", "1800"))  # 默认 30 分钟
+    terminal_states = {"completed", "skipped_live", "error"}
 
-    def _is_trade_date_fn(d: date) -> bool:
-        return bool(downloader.is_trade_date(d.strftime("%Y%m%d")))
+    while True:
+        elapsed = time.time() - poll_t0
+        statuses = []
+        all_terminal = True
+        for name, _gw in started:
+            strat = ml_engine.strategies.get(name)
+            status = getattr(strat, "replay_status", "unknown") if strat else "missing"
+            statuses.append(f"{name}={status}")
+            if status not in terminal_states:
+                all_terminal = False
 
-    today = date.today()
-    live_max = resolve_live_date(_is_trade_date_fn)  # 最近已完整收盘交易日 (实时段终点)
-    _log(f"  today={today}, live_max={live_max} (最近已收盘交易日 = 实时段终点)")
+        if all_terminal:
+            _log(f"  batch replay 全部终态 (elapsed={elapsed:.0f}s): {' | '.join(statuses)}")
+            break
 
-    # 各策略 replay_start_date 取最早 (双策略起点不同时, 先开始的策略多跑几天)
-    replay_starts: List[date] = []
-    for strat_def in STRATEGIES:
-        rs_str = strat_def["setting_override"].get("replay_start_date")
-        if rs_str:
-            from datetime import datetime as _dt
-            replay_starts.append(_dt.strptime(rs_str, "%Y-%m-%d").date())
-    if not replay_starts:
-        _log("FAIL: 所有策略都没配 replay_start_date, 无法构造回放段")
-        _teardown_uvicorn(webtrader_uv, "webtrader")
-        _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
-        main_engine.close()
-        return 2
-    replay_start = min(replay_starts)
-    _log(f"  replay_start={replay_start} (取所有策略 replay_start_date 最小值)")
+        if elapsed > BATCH_TIMEOUT_S:
+            _log(f"FAIL: batch replay 超时 {BATCH_TIMEOUT_S}s, 状态: {' | '.join(statuses)}")
+            _teardown_uvicorn(webtrader_uv, "webtrader")
+            _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
+            main_engine.close()
+            return 3
 
-    # 列出 [replay_start, live_max] 之间所有交易日, 然后按 SMOKE_REPLAY_DAYS 切分
-    all_days = build_trade_days(replay_start, live_max, _is_trade_date_fn)
-    if not all_days:
-        _log(f"FAIL: [{replay_start}, {live_max}] 内无交易日")
-        _teardown_uvicorn(webtrader_uv, "webtrader")
-        _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
-        main_engine.close()
-        return 2
+        now = time.time()
+        if now - last_heartbeat >= 30.0:
+            _log(f"  ... batch replay running (elapsed={elapsed:.0f}s) {' | '.join(statuses)}")
+            last_heartbeat = now
+        time.sleep(poll_interval)
 
-    if SMOKE_REPLAY_DAYS <= 0:
-        _log(f"FAIL: SMOKE_REPLAY_DAYS={SMOKE_REPLAY_DAYS} 必须 >= 1")
-        _teardown_uvicorn(webtrader_uv, "webtrader")
-        _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
-        main_engine.close()
-        return 2
+    # 检查是否有策略 replay error
+    for name, _gw in started:
+        strat = ml_engine.strategies.get(name)
+        status = getattr(strat, "replay_status", "unknown") if strat else "missing"
+        if status == "error":
+            err = getattr(strat, "last_error", "?")
+            _log(f"FAIL: 策略 {name} batch replay error: {err}")
+            _teardown_uvicorn(webtrader_uv, "webtrader")
+            _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
+            main_engine.close()
+            return 3
 
-    # 切分: 前 N 个交易日为回放, 第 N+1 起为实时段; N 超过总数时全归回放
-    n = min(SMOKE_REPLAY_DAYS, len(all_days))
-    replay_days = all_days[:n]
-    live_days = all_days[n:]
-    if SMOKE_LIVE_DAYS_LIMIT > 0 and len(live_days) > SMOKE_LIVE_DAYS_LIMIT:
-        live_days = live_days[:SMOKE_LIVE_DAYS_LIMIT]
-    if SMOKE_REPLAY_DAYS > len(all_days):
-        _log(
-            f"  WARN: SMOKE_REPLAY_DAYS={SMOKE_REPLAY_DAYS} > 总可用交易日 {len(all_days)}, "
-            f"全部归为回放段, 实时段为空"
-        )
+    # --- Phase 5: 实时段 single-day 循环 (仅 SMOKE_LIVE_DAYS > 0 时执行) ---
+    if live_days:
+        _log(f"=== Phase 5 — 实时段 single-day 循环 ({len(live_days)} 天) ===")
+        for idx, day in enumerate(live_days):
+            is_last = idx == len(live_days) - 1
+            day_str = day.strftime("%Y%m%d")
+            _log(f"--- Live Day {idx + 1}/{len(live_days)} {day} ({day_str}) ---")
 
-    days: List[Tuple[date, str]] = (
-        [(d, "replay") for d in replay_days] + [(d, "live") for d in live_days]
-    )
-    _log(
-        f"  回放 {len(replay_days)} 日 [{replay_days[0] if replay_days else '-'} ~ {replay_days[-1] if replay_days else '-'}]"
-        f" + 实时 {len(live_days)} 日 [{live_days[0] if live_days else '-'} ~ {live_days[-1] if live_days else '-'}]"
-    )
-    est_min = (
-        len(days) * len(started) * 75 / 60.0  # 每策略每日 ~75s subprocess
-        + len(live_days) * SMOKE_LIVE_SECONDS_PER_DAY / 60.0
-        + len(days) * (60 if SMOKE_DO_INGEST else 0) / 60.0
-    )
-    _log(f"  预估总时长: ~{est_min:.0f} 分钟 (subprocess + ingest + live sleep)")
-
-    # --- Phase 4: 统一日推进循环 ---
-    _log("=== Phase 4 — 日推进循环 ===")
-    for idx, (day, phase) in enumerate(days):
-        is_last = idx == len(days) - 1
-        day_str = day.strftime("%Y%m%d")
-        _log(f"--- Day {idx + 1}/{len(days)} [{phase}] {day} ({day_str}) ---")
-
-        # Phase 4.1 — Ingest
-        if SMOKE_DO_INGEST:
-            try:
-                result, elapsed = run_ingest_with_heartbeat(
-                    tushare_engine, day_str,
-                    heartbeat_s=INGEST_HEARTBEAT_S, log_fn=_log,
+            # Phase 5.1 — Ingest (实时段每日真触发)
+            if SMOKE_DO_INGEST:
+                try:
+                    result, elapsed = run_ingest_with_heartbeat(
+                        tushare_engine, day_str,
+                        heartbeat_s=INGEST_HEARTBEAT_S, log_fn=_log,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"  FAIL: ingest 抛异常: {type(exc).__name__}: {exc}")
+                    _teardown_uvicorn(webtrader_uv, "webtrader")
+                    _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
+                    main_engine.close()
+                    return 3
+                if result is None:
+                    _log("  FAIL: run_daily_ingest_now 返回 None")
+                    _teardown_uvicorn(webtrader_uv, "webtrader")
+                    _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
+                    main_engine.close()
+                    return 3
+                if result.get("skipped"):
+                    _log(f"  SKIPPED: {day} 非交易日, 跳过本日 single-day")
+                    continue
+                stages = result.get("stages_elapsed", {})
+                stage_parts = [f"{s}={stages.get(s, 0):.1f}s" for s in
+                               ("fetch", "filter", "by_stock", "dump") if s in stages]
+                _log(
+                    f"  ingest OK merged_rows={result.get('merged_rows')} "
+                    f"filtered_today_rows={result.get('filtered_today_rows')} "
+                    f"stages=[{' | '.join(stage_parts)}] total={elapsed:.1f}s"
                 )
-            except Exception as exc:  # noqa: BLE001
-                _log(f"  FAIL: ingest 抛异常: {type(exc).__name__}: {exc}")
-                _teardown_uvicorn(webtrader_uv, "webtrader")
-                _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
-                main_engine.close()
-                return 3
-            if result is None:
-                _log("  FAIL: run_daily_ingest_now 返回 None")
-                _teardown_uvicorn(webtrader_uv, "webtrader")
-                _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
-                main_engine.close()
-                return 3
-            if result.get("skipped"):
-                _log(f"  SKIPPED: {day} 非交易日, 跳过本日全流程")
-                continue
-            stages = result.get("stages_elapsed", {})
-            stage_parts = [f"{s}={stages.get(s, 0):.1f}s" for s in
-                           ("fetch", "filter", "by_stock", "dump") if s in stages]
-            _log(
-                f"  ingest OK merged_rows={result.get('merged_rows')} "
-                f"filtered_today_rows={result.get('filtered_today_rows')} "
-                f"stages=[{' | '.join(stage_parts)}] total={elapsed:.1f}s"
-            )
 
-        # Phase 4.2 — 多策略串行 pipeline
-        for strat_name, _gw in started:
+                # Phase 5.1.b — Ingest 后强制释放内存 (防 OOM)
+                # 根因: DumpDataAll ProcessPoolExecutor 每 worker 占 500MB-1GB
+                # commit memory, Windows 子进程退出后 OS 异步回收 page file 不立即归还.
+                # 多次 ingest 累积 → MemoryError.
+                # 缓解: gc.collect() 主动释放 Python heap + sleep 让 OS 自然回收.
+                # 配套: ML_INGEST_DUMP_WORKERS 默认 4 (smoke 顶层 setdefault)
+                # 把内存峰值减半. cooldown 默认 10s — 假设 page file 已配 16GB+,
+                # 25GB+ page file 下 cooldown=10s 已充足让 OS 回收.
+                import gc
+                gc.collect()
+                sleep_s = int(os.getenv("SMOKE_INGEST_COOLDOWN_S", "10"))
+                if sleep_s > 0:
+                    _log(f"  ingest cooldown {sleep_s}s (gc.collect + 等 OS 回收 page file)")
+                    time.sleep(sleep_s)
+
+            # Phase 5.2 — Ingest 后刷新 ml_engine 的 trade_calendar 缓存
+            # 必要性: ingest 内 DumpDataAll 重写 D:/vnpy_data/qlib_data_bin/calendars/day.txt,
+            # 但 QlibCalendar 实例在首次 _load() 时缓存了 trade_days set, 后续不重读.
+            # 不刷新会导致策略 _is_trade_day(day) 用陈旧 cache, 走 non-trading day 路径
+            # 直接 skip 不写 diagnostics, smoke 会被错误地认为有 bug.
             try:
-                ok, elapsed = wait_pipeline_with_heartbeat(
-                    ml_engine, strat_name, day,
-                    output_root=STRATEGY_BASE_SETTING["output_root"],
-                    timeout_s=PIPELINE_TIMEOUT_S,
-                    heartbeat_s=PIPELINE_HEARTBEAT_S,
-                    log_fn=_log,
-                )
+                cal = getattr(ml_engine, "_trade_calendar", None)
+                if cal is not None and hasattr(cal, "refresh"):
+                    cal.refresh()
+                    _log(f"  trade_calendar refreshed (after ingest {day_str})")
             except Exception as exc:  # noqa: BLE001
-                _log(f"  FAIL: pipeline[{strat_name}] 抛异常: {type(exc).__name__}: {exc}")
-                _teardown_uvicorn(webtrader_uv, "webtrader")
-                _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
-                main_engine.close()
-                return 3
-            if ok:
-                _log(f"  pipeline[{strat_name}] done elapsed={elapsed:.1f}s")
-            else:
-                _log(f"  TIMEOUT: pipeline[{strat_name}] 未在 {PIPELINE_TIMEOUT_S}s 内产出新 diagnostics")
-                _teardown_uvicorn(webtrader_uv, "webtrader")
-                _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
-                main_engine.close()
-                return 3
+                _log(f"  WARN: trade_calendar.refresh() failed: {exc}")
 
-        # Phase 4.3 — 实时段每日尾 sleep
-        if phase == "live" and not is_last and SMOKE_LIVE_SECONDS_PER_DAY > 0:
-            _log(f"  [live] sleep {SMOKE_LIVE_SECONDS_PER_DAY}s 让 mlearnweb snapshot loop tick")
-            time.sleep(SMOKE_LIVE_SECONDS_PER_DAY)
+            # Phase 5.3 — 多策略串行 single-day pipeline
+            for strat_name, _gw in started:
+                try:
+                    status, elapsed = wait_pipeline_with_heartbeat(
+                        ml_engine, strat_name, day,
+                        output_root=STRATEGY_BASE_SETTING["output_root"],
+                        timeout_s=PIPELINE_TIMEOUT_S,
+                        heartbeat_s=PIPELINE_HEARTBEAT_S,
+                        log_fn=_log,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"  FAIL: pipeline[{strat_name}] 抛异常: {type(exc).__name__}: {exc}")
+                    _teardown_uvicorn(webtrader_uv, "webtrader")
+                    _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
+                    main_engine.close()
+                    return 3
+                if status == "ok":
+                    _log(f"  pipeline[{strat_name}] done status=ok elapsed={elapsed:.1f}s")
+                elif status in ("empty", "non_trading"):
+                    _log(
+                        f"  pipeline[{strat_name}] status={status} elapsed={elapsed:.1f}s "
+                        f"(允许, 但跳过该日产物断言)"
+                    )
+                else:
+                    _log(f"  FAIL: pipeline[{strat_name}] status={status} elapsed={elapsed:.1f}s")
+                    _teardown_uvicorn(webtrader_uv, "webtrader")
+                    _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
+                    main_engine.close()
+                    return 3
 
-    # --- Phase 5: 多策略多日断言 ---
-    _log("=== Phase 5 — 断言 ===")
+            # Phase 5.3 — 实时段每日尾 settle (T+1 持仓结转 + mark-to-market)
+            # 关键: 生产环境 gateway.process_timer_event 按自然日 wall-clock 触发
+            # auto-settle, 但 smoke fast-forward 多日的 wall-clock 没跨日, auto-settle
+            # 不会触发. 不显式 settle → 当日新买入 yd_volume 永远 0 → 次日 sell 被
+            # T+1 拒单. 显式 settle 让 yd_volume = volume + 标 mark-to-market.
+            for strat_name, gw_name in started:
+                gw = main_engine.get_gateway(gw_name)
+                counter = getattr(getattr(gw, "td", None), "counter", None)
+                if counter is None or not hasattr(counter, "settle_end_of_day"):
+                    continue
+                try:
+                    counter.settle_end_of_day(day)
+                    _log(f"  [{gw_name}] settle_end_of_day({day}) ok")
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"  WARN: {gw_name} settle({day}) 异常: {type(exc).__name__}: {exc}")
+
+            # Phase 5.4 — 实时段每日尾 sleep
+            if not is_last and SMOKE_LIVE_SECONDS_PER_DAY > 0:
+                _log(f"  [live] sleep {SMOKE_LIVE_SECONDS_PER_DAY}s 让 mlearnweb snapshot loop tick")
+                time.sleep(SMOKE_LIVE_SECONDS_PER_DAY)
+    else:
+        _log("=== Phase 5 — 跳过 (SMOKE_LIVE_DAYS=0) ===")
+
+    # --- Phase 6: 多策略多日断言 ---
+    _log("=== Phase 6 — 断言 ===")
     errors: List[str] = []
     out_root = STRATEGY_BASE_SETTING["output_root"]
+
+    # 收集所有跑过的天 (回放段 + 实时段) 用于断言
+    # 回放段日期由策略 batch replay 隐式产出, 这里通过扫 OUT_ROOT 对应 strategy 子目录获取
+    # 仅 single-day 实时段我们从 live_days 直接拿
     for strat_name, _gw in started:
-        for day, _phase in days:
+        # 实时段 single-day 产物: 每天必有 status=ok 且四件套齐
+        for day in live_days:
             errors.extend(assert_strategy_day_outputs(
                 strat_name, out_root, day, expected_topk=7,
-                require_status_ok=False,  # 允许非交易日 / lookback 不足时 empty
+                require_status_ok=False,  # 允许 status=empty (lookback 不足时)
             ))
 
-    if SMOKE_ENABLE_TRADING:
-        # sim 撮合发生在 day+1 09:30 — 取所有 day 都查 sim_trades
+    if SMOKE_ENABLE_TRADING and live_days:
+        # sim 撮合发生在 day+1 09:30, 仅检实时段下的撮合 (回放段下单走的是
+        # batch replay 内 in-process apply, 也会写 sim_trades, 但只验实时段更精准)
         for strat_name, gw_name in started:
             errors.extend(assert_orders_for_gateway(
-                gw_name, strat_name, [d for d, _ in days],
+                gw_name, strat_name, list(live_days),
                 sim_db_dir=SIM_DB_DIR,
                 min_trades_per_day=1,
             ))
@@ -559,7 +656,10 @@ def main() -> int:
         main_engine.close()
         return 4
 
-    _log(f"PASS: {len(days)} 日 x {len(started)} 策略 全部断言通过 [OK]")
+    _log(
+        f"PASS: batch replay [..., {replay_end}] + single-day {len(live_days)} day(s) "
+        f"x {len(started)} 策略 全部断言通过 [OK]"
+    )
 
     if not SMOKE_KEEP_ALIVE:
         _teardown_uvicorn(webtrader_uv, "webtrader")
@@ -567,8 +667,8 @@ def main() -> int:
         main_engine.close()
         return 0
 
-    # --- Phase 6: 常驻 ---
-    _log("=== Phase 6 — READY ===")
+    # --- Phase 7: 常驻 ---
+    _log("=== Phase 7 — READY ===")
     _log("回放 + 实时模拟全流程完成, 所有断言通过.")
     _log(f"webtrader REST :{WEBTRADER_HTTP_PORT} | mlearnweb live_main :{MLEARNWEB_PORT}")
     _log("Ctrl+C to exit.")

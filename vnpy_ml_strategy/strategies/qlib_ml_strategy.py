@@ -10,7 +10,7 @@ pipeline:
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -53,12 +53,22 @@ class QlibMLStrategy(MLStrategyTemplate):
     # 下单 — A 股 T+1 + 涨跌停 + ST 过滤
     # ------------------------------------------------------------------
 
-    def generate_orders(self, pred_score: pd.Series, selected: pd.DataFrame) -> None:
+    def generate_orders(
+        self,
+        pred_score: pd.Series,
+        selected: pd.DataFrame,
+        on_day: Optional[date] = None,
+    ) -> None:
         """Phase 6: 把全量 pred_score 交给 qlib TopkDropoutStrategy 算法决策。
 
         策略真实时序（实盘）：T 日 21:00 推理 → T+1 日 09:30 开盘 rebalance。
         本方法是实时模式下 ``run_daily_pipeline`` 末尾的入口，委托给父类
-        ``rebalance_to_target(pred_score)`` 走 qlib TopkDropoutStrategy 等价算法。
+        ``rebalance_to_target(pred_score, on_day=on_day)`` 走 qlib TopkDropoutStrategy
+        等价算法。
+
+        ``on_day`` 来自 ``run_daily_pipeline`` 的 ``today`` (= as_of_date or date.today()),
+        smoke / 历史回放场景下必须透传, 否则会错用 wall-clock today 导致 log 乱日期 +
+        参考价取错日.
 
         回放模式不走本方法，由 ``_replay_loop_iter`` 直接调
         ``rebalance_to_target(prev_day_pred_score, on_day=current_day)``。
@@ -68,7 +78,7 @@ class QlibMLStrategy(MLStrategyTemplate):
         if not self.enable_trading:
             self.write_log("generate_orders: enable_trading=False, skipping (dry-run)")
             return
-        self.rebalance_to_target(pred_score, on_day=date.today())
+        self.rebalance_to_target(pred_score, on_day=on_day or date.today())
 
     # ------------------------------------------------------------------
     # Helpers
