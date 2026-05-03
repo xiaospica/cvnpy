@@ -49,7 +49,16 @@ install_finder()
 import qlib  # noqa: E402
 from qlib_strategy_core.inference import predict_from_bundle  # noqa: E402
 
-BUNDLE_DIR = Path(r"f:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964")
+# BUNDLE_DIR 须与 vnpy 端 run_ml_headless.py 的当前活跃 bundle 一致, 否则 qlib
+# backtest pred 与 vnpy 推理 pred 不同源, e2e 测试无意义。
+# 可通过环境变量 BUNDLE_DIR 覆盖。
+import os as _os
+BUNDLE_DIR = Path(
+    _os.getenv(
+        "BUNDLE_DIR",
+        r"f:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/c38e6cfdf549446fbb0d637549e4a245",
+    )
+)
 PROVIDER_URI = r"D:/vnpy_data/qlib_data_bin"
 OUT_DIR = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
 
@@ -106,7 +115,10 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. 用 D:/vnpy_data/qlib_data_bin 初始化 qlib
-    qlib.init(provider_uri=PROVIDER_URI, region="cn")
+    # kernels=2 限制 joblib worker 数量, 避免 30+ worker 各 200MB 拉爆 Windows page file
+    # (DLL load failed: ImportError _zpropack 页面文件太小). 默认 NUM_USABLE_CPU 在多核机器
+    # 上会一次性 spawn 30+ 进程导致内存不足.
+    qlib.init(provider_uri=PROVIDER_URI, region="cn", kernels=2)
 
     # 2. 用 bundle 推理拿 pred (live_end=END_TIME, lookback 大点 cover 整个回放区间)
     # filter_parquet 必须用 D:/vnpy_data 的最新 snapshot, 否则 task.json 里

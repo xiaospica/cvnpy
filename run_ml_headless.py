@@ -85,9 +85,13 @@ QMT_SETTING = {
 # 实盘模式下必为 1 个 gateway（miniqmt 单账户约束）。
 
 if USE_GATEWAY_KIND == "QMT_SIM":
+    # 双策略并发模拟示例: csi300_lgb_headless (老 bundle f6017) + csi300_lgb_headless_2
+    # (新 bundle c38e6c). 每策略独立 gateway → 独立 sim_<gateway>.db → 资金/持仓物理
+    # 隔离, mlearnweb 前端各自一条曲线. 命名规则见 vnpy_common/naming.py.
     GATEWAYS = [
-        {"name": "QMT_SIM_csi300", "setting": dict(QMT_SIM_BASE_SETTING)},
-        # 启用多策略沙盒示例（取消注释下方两行 + 同步加 STRATEGIES）：
+        {"name": "QMT_SIM_csi300",   "setting": dict(QMT_SIM_BASE_SETTING)},
+        {"name": "QMT_SIM_csi300_2", "setting": dict(QMT_SIM_BASE_SETTING)},
+        # 进一步扩展示例 (取消注释 + 同步加 STRATEGIES):
         # {"name": "QMT_SIM_zz500",   "setting": dict(QMT_SIM_BASE_SETTING)},
         # {"name": "QMT_SIM_alldata", "setting": dict(QMT_SIM_BASE_SETTING)},
     ]
@@ -131,6 +135,7 @@ STRATEGY_BASE_SETTING = {
 
 STRATEGIES = [
     {
+        # 策略 1: 老 bundle f6017 (训练 run_id)
         "strategy_name": "csi300_lgb_headless",
         "strategy_class": "QlibMLStrategy",
         "gateway_name": "QMT_SIM_csi300" if USE_GATEWAY_KIND == "QMT_SIM" else "QMT",
@@ -141,18 +146,33 @@ STRATEGIES = [
             ),
             "topk": 7,
             "n_drop": 1,
-            # TODO delete below line
-            "replay_start_date": "2026-01-27",  # 显式跳过 qlib 数据未覆盖区间
+            "replay_start_date": "2026-01-27",
         },
     },
-    # 多策略沙盒示例（仅 QMT_SIM 模式下意义；记得同步打开上面 GATEWAYS 的对应行）：
+    {
+        # 策略 2: 新 bundle c38e6c (训练 run_id)
+        # 用独立 gateway → 独立 sim_QMT_SIM_csi300_2.db → 与策略 1 资金/持仓不冲突
+        "strategy_name": "csi300_lgb_headless_2",
+        "strategy_class": "QlibMLStrategy",
+        "gateway_name": "QMT_SIM_csi300_2" if USE_GATEWAY_KIND == "QMT_SIM" else "QMT",
+        "setting_override": {
+            "bundle_dir": os.getenv(
+                "BUNDLE_DIR_2",
+                r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/c38e6cfdf549446fbb0d637549e4a245",
+            ),
+            "topk": 7,
+            "n_drop": 1,
+            "replay_start_date": "2026-01-27",
+        },
+    },
+    # 进一步扩展示例 (仅 QMT_SIM 模式下意义；记得同步打开上面 GATEWAYS 的对应行):
     # {
     #     "strategy_name": "zz500_lgb_headless",
     #     "strategy_class": "QlibMLStrategy",
     #     "gateway_name": "QMT_SIM_zz500",
     #     "setting_override": {
     #         "bundle_dir": os.getenv("BUNDLE_DIR_ZZ500", r"...zz500_bundle..."),
-    #         "topk": 5, "n_drop": 1,  # risk_degree 走 STRATEGY_BASE_SETTING 默认
+    #         "topk": 5, "n_drop": 1,
     #     },
     # },
 ]

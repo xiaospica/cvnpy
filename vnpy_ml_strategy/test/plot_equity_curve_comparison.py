@@ -1,13 +1,20 @@
 """画 vnpy 回放权益曲线 vs qlib backtest 复利累积收益率对比图.
 
-输出: docs/equity_curve_comparison.png
+输出: docs/equity_curve_comparison{_suffix}.png
 
 数据源:
   - vnpy: mlearnweb db strategy_equity_snapshots replay_settle
   - qlib: report_normal_1day.pkl (account 列)
+
+CLI:
+  python plot_equity_curve_comparison.py [strategy_name]
+  默认 strategy_name=csi300_lgb_headless;若 vnpy 重命名了策略 (e.g. csi300_lgb_headless_2),
+  传入新名即可。注意 qlib ground truth 必须先用对应的 bundle 跑 generate_qlib_ground_truth.py
+  重新生成。
 """
 from __future__ import annotations
 
+import argparse
 import pickle
 import sqlite3
 import sys
@@ -34,13 +41,14 @@ def load_qlib_curve():
     return series
 
 
-def load_vnpy_curve():
+def load_vnpy_curve(strategy_name: str):
     conn = sqlite3.connect(str(MLEARNWEB_DB))
     cur = conn.cursor()
     cur.execute(
         """SELECT ts, strategy_value FROM strategy_equity_snapshots
-           WHERE strategy_name='csi300_lgb_headless' AND source_label='replay_settle'
-           ORDER BY ts ASC"""
+           WHERE strategy_name=? AND source_label='replay_settle'
+           ORDER BY ts ASC""",
+        (strategy_name,),
     )
     rows = cur.fetchall()
     conn.close()
@@ -54,9 +62,14 @@ def load_vnpy_curve():
     return pd.Series({d: v for d, v in data}).sort_index()
 
 
-def main():
+def main(strategy_name: str = "csi300_lgb_headless"):
     q = load_qlib_curve()
-    v = load_vnpy_curve()
+    v = load_vnpy_curve(strategy_name)
+    if v.empty:
+        raise SystemExit(
+            f"vnpy 曲线为空: strategy_name='{strategy_name}' 在 strategy_equity_snapshots "
+            f"中无 replay_settle 记录。检查 vnpy 实盘进程是否已用此 strategy_name 跑完回放。"
+        )
     overlap = sorted(set(q.index) & set(v.index))
     q_aligned = q.loc[overlap]
     v_aligned = v.loc[overlap]
@@ -80,8 +93,8 @@ def main():
     ax.axhline(0, color="gray", alpha=0.4, linewidth=0.5)
     ax.set_ylabel("累积收益率 (%)", fontsize=11)
     ax.set_title(
-        f"vnpy 回放 vs qlib backtest 累积收益率对比 — 同 D:/vnpy_data 数据源 / 同 bundle / qlib deal_price=$open\n"
-        f"重叠 {len(overlap)} 个交易日 ({overlap[0].date()} ~ {overlap[-1].date()})",
+        f"vnpy 回放 vs qlib backtest 累积收益率对比 — strategy={strategy_name}\n"
+        f"同 D:/vnpy_data 数据源 / 同 bundle / qlib deal_price=$open / 重叠 {len(overlap)} 个交易日 ({overlap[0].date()} ~ {overlap[-1].date()})",
         fontsize=12,
     )
     ax.legend(loc="upper left", fontsize=10)
@@ -135,13 +148,26 @@ def main():
 
     plt.tight_layout()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUT_DIR / "equity_curve_comparison.png"
+    # 默认策略名出 equity_curve_comparison.png 保持向后兼容; 其他策略名加 suffix
+    if strategy_name == "csi300_lgb_headless":
+        out_path = OUT_DIR / "equity_curve_comparison.png"
+    else:
+        out_path = OUT_DIR / f"equity_curve_comparison_{strategy_name}.png"
     plt.savefig(out_path, dpi=120, bbox_inches="tight", facecolor="#0A0E1A")
     print(f"saved: {out_path}")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "strategy_name",
+        nargs="?",
+        default="csi300_lgb_headless",
+        help="strategy name (default: csi300_lgb_headless)",
+    )
+    args = parser.parse_args()
+
     # 中文字体
     plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
-    main()
+    main(args.strategy_name)
