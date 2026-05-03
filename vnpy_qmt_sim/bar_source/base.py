@@ -21,6 +21,7 @@ class BarQuote:
     pricetick: float
     name: str = ""
     pct_chg: float = 0.0  # tushare 同名字段，单位 %（已含除权调整，等价于 hfq 涨跌幅）
+    close_price: float = 0.0  # 当日收盘价 — settle_end_of_day 的 close_p / open_p 用于今日新买入 mark-to-market
 
 
 class SimBarSource(ABC):

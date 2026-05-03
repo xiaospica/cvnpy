@@ -644,8 +644,12 @@ class SimulationCounter:
                     today_cost = float(today_buy.get("cost", 0))
                     yd_vol = float(pos.yd_volume or 0)
                     pct = float(quote.pct_chg) / 100.0
-                    open_p = float(getattr(quote, "open", 0) or 0)
-                    close_p = float(getattr(quote, "close", 0) or 0)
+                    # BarQuote 字段名是 open_price / close_price (不是 open / close).
+                    # 早期 bug: 用 getattr(quote, "open", 0) 拿不到值 → open_p=close_p=0
+                    # → "今日新买入" / "混合" 分支判定失败, 误走 pct_chg 累乘 →
+                    # 节后第一日新买的股按 pct_chg(含隔夜跳空)mark, weight 高估 ~10%.
+                    open_p = float(getattr(quote, "open_price", 0) or 0)
+                    close_p = float(getattr(quote, "close_price", 0) or 0)
 
                     # 老持仓 mark: pre_close → close
                     # 老持仓 EOD 总市值 = yd_vol × old_price × (1+pct)

@@ -205,6 +205,7 @@ class MergedParquetBarSource(SimBarSource):
             pricetick=0.01,
             name=str(row["name"]) if pd.notna(row["name"]) else "",
             pct_chg=pct_chg,
+            close_price=float(row["close"]),
         )
 
     def prefetch(self, vt_symbols, as_of_date) -> None:
