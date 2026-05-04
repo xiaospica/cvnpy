@@ -102,7 +102,8 @@ QMT_SIM_BASE_SETTING: Dict[str, Any] = {
     "merged_parquet_fallback_days": 10,
     "merged_parquet_stale_warn_hours": 48,
     "启用持久化": "是",
-    "持久化目录": str(_HERE / "vnpy_qmt_sim" / ".trading_state"),
+    # [A2] 状态文件统一到 ${QS_DATA_ROOT}/state/
+    "持久化目录": f"{_QS_DATA_ROOT}/state",
 }
 
 # 实盘 miniqmt 默认 setting (V3 用; 资金账号 由 --qmt-account 注入, 路径走 .env)
@@ -152,8 +153,8 @@ def _cleanup_demo_state(strategy_names: List[str], gateway_names: List[str]) -> 
     print("Step 1 · 清理 demo 状态")
     print("=" * 60)
 
-    # 1a. sim_db (按 demo gateway_names)
-    sim_state_dir = _HERE / "vnpy_qmt_sim" / ".trading_state"
+    # 1a. sim_db (按 demo gateway_names) — [A2] 已统一到 ${QS_DATA_ROOT}/state
+    sim_state_dir = Path(_QS_DATA_ROOT) / "state"
     if sim_state_dir.exists():
         for gw_name in gateway_names:
             for suffix in (".db", ".db-shm", ".db-wal", ".lock"):
@@ -472,7 +473,7 @@ def _print_verification(mode: str, strategy_names: List[str], gateway_names: Lis
     print("\n" + "=" * 60)
     print(f"Step 6 · 退出后验证 cmd ({mode})")
     print("=" * 60)
-    sim_state = _HERE / "vnpy_qmt_sim" / ".trading_state"
+    sim_state = Path(_QS_DATA_ROOT) / "state"
 
     print("\n# (a) sim_db 物理隔离 — 各 gateway 独立持仓 / 资金:")
     for gw in gateway_names:

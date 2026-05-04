@@ -34,7 +34,9 @@ gateway_base_settings:
     merged_parquet_fallback_days: 10
     merged_parquet_stale_warn_hours: 48
     启用持久化: "是"
-    持久化目录: "F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state"
+    # [A2] 状态文件统一到 D:/vnpy_data/state/, 与 replay_history.db 同级,
+    # 备份 / 跨机部署友好. 旧路径 vnpy_qmt_sim/.trading_state/ 已废弃.
+    持久化目录: "${QS_DATA_ROOT}/state"
     # 账户 字段不写: QmtSimGateway.connect 会用 gateway_name 兜底,
     # 多 gateway 实例之间天然有不同 account_id (独立 sim_<name>.db).
 

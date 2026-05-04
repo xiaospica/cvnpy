@@ -451,6 +451,34 @@ schtasks /create /tn "vnpy_daily_backup" `
 判定 stale → 自动清理重建. 进程崩溃 (TerminateProcess / OS 重启) 后再启动不
 需要人工删 .lock.
 
+### 5.7 状态文件目录统一 (A2 已落地)
+
+所有 vnpy 端状态文件集中在 `D:/vnpy_data/state/`:
+
+| 文件 | 来源 | 作用 |
+|---|---|---|
+| `replay_history.db` | vnpy_ml_strategy 回放 (A1/B2) | 回放权益历史; mlearnweb fanout 拉 |
+| `sim_<gateway>.db` × N | vnpy_qmt_sim 持久化 | 模拟柜台账户 / 持仓 / 订单 / 成交 |
+| `sim_<gateway>.db-shm/-wal` | SQLite WAL | 自动清理, 重启不影响 |
+| `sim_<gateway>.lock` | [P0-5] PID-stamped 文件锁 | 防同 account_id 多进程 |
+
+旧路径 `vnpy_qmt_sim/.trading_state/` 已废弃. 升级方式:
+```powershell
+move F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state\sim_*.db D:\vnpy_data\state\
+```
+DB 文件位置变, schema 不变, 重启即生效.
+
+### 5.8 IaC 一键复刻 (P2-2 已落地)
+
+`deploy/bootstrap.ps1` 把数据目录 + pip 依赖 + NTP + NSSM + 备份计划任务 + dry-run
+统一编排; 重装 / 灾备复刻服务器从"半天"降到"5-10 分钟". 用 `-Check` 模式可在不
+改任何状态的情况下出诊断报告.
+
+```powershell
+.\deploy\bootstrap.ps1 -Check     # 前置检查
+.\deploy\bootstrap.ps1 -Apply     # 全量装 (Administrator)
+```
+
 ---
 
 ## 6. 应急联系 / 升级路径

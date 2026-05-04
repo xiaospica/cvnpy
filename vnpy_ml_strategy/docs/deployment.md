@@ -99,6 +99,63 @@ flowchart TB
 
 ## 2. 部署 checklist (按顺序)
 
+> **⚡ 快速通道 (P2-2 一键 IaC bootstrap)**: 如果你只是想最快速度跑起来一个**模拟模式**
+> 推理服务器 (sim gateway, 不连真券商), 直接看 [§2.0 一键 bootstrap](#20-一键-bootstrap-推荐) — 单条命令把
+> 数据目录 / Python 依赖 / NSSM / NTP / 备份计划任务全装好. 实盘 (live + miniqmt)
+> 仍需走 Step 4c + Step 10 手动填凭证.
+
+### 2.0 一键 bootstrap (推荐)
+
+前置 — 这两个**必须**人工先装 (脚本不会装二进制):
+
+| 工具 | 装法 |
+|---|---|
+| Python 3.13 (vnpy) + 3.11 (推理) | `winget install Python.Python.3.13` 等; 详见 Step 1 |
+| NSSM | `choco install nssm` 或下 https://nssm.cc/ |
+| 7zip (可选, 备份压缩用) | `choco install 7zip` |
+
+然后:
+
+```powershell
+# 1. 拉代码 (两个仓库)
+cd F:\Quant\vnpy
+git clone --recursive <vnpy-strategy-dev-repo-url> vnpy_strategy_dev
+cd vnpy_strategy_dev
+
+# 2. 拷配置文件并填值
+copy .env.example .env.production
+notepad .env.production   # 至少改: TUSHARE_TOKEN, QMT_ACCOUNT, QMT_CLIENT_PATH
+
+copy config\strategies.example.yaml config\strategies.production.yaml
+notepad config\strategies.production.yaml   # 改 bundle_dir 等
+
+# 3. 先跑前置检查 (不动任何状态, 看每条 OK / FAIL)
+.\deploy\bootstrap.ps1 -Check
+
+# 4. 全部就绪后 (Administrator), 一键 apply:
+.\deploy\bootstrap.ps1 -Apply
+
+# 自定义跳过某些步骤:
+.\deploy\bootstrap.ps1 -Apply -SkipNtp -SkipBackupSchedule
+```
+
+bootstrap.ps1 干了 7 件事:
+1. 前置检查 (Python 解释器 / NSSM / 7zip / .env / yaml / vt_setting.json)
+2. 创建数据目录 (`${QS_DATA_ROOT}/{snapshots,state,models,...}`, `${ML_OUTPUT_ROOT}`, `${LOG_ROOT}`, `${BACKUP_ROOT}`)
+3. pip install 关键依赖 (vnpy + 推理两套环境)
+4. (可选 -SkipNtp 关闭) 调 `configure_ntp.ps1` 配 NTP
+5. (可选 -SkipServices 关闭) 调 `install_services.ps1` 装 NSSM 服务
+6. (可选 -SkipBackupSchedule 关闭) schtasks 创建每日 02:00 备份任务
+7. (可选 -SkipDryRun 关闭) 跑 `import run_ml_headless` dry-run 验证 .env / yaml 配置链
+
+⚠️ **bootstrap 不会**自动:
+- 改 `vt_setting.json` 里 tushare token / SMTP 凭据 (Step 4c 手填)
+- 拷 bundle (Step 8 训练机 rsync)
+- 装 miniqmt 客户端 (Step 10 券商私有流程)
+- 跑第一次 daily_ingest (Step 7 上线前手动验证一次)
+
+bootstrap 完成后, 跳到 Step 7 + Step 8 + Step 10 手工补这几项.
+
 ### Step 1. 安装 Python 双版本
 
 | Python | 版本 | 用途 | 安装路径 (本仓库默认) |
@@ -193,16 +250,32 @@ notepad C:\Users\$env:USERNAME\.vntrader\vt_setting.json
 
 ### Step 5. 配置数据目录
 
+> 跑了 `bootstrap.ps1 -Apply` 时这步**已完成**, 跳过. 仅手工部署需要.
+
 ```powershell
 # 数据根 (统一 D:, 路径与 .env.production 一致)
 mkdir D:\vnpy_data
 mkdir D:\vnpy_data\snapshots\merged
 mkdir D:\vnpy_data\snapshots\filtered
 mkdir D:\vnpy_data\stock_data
-mkdir D:\vnpy_data\state           # replay_history.db (A1/B2)
+mkdir D:\vnpy_data\state           # [A1+A2] replay_history.db + sim_<gateway>.db 集中
 mkdir D:\vnpy_data\models          # bundle 部署目录
 mkdir D:\vnpy_data\jq_index        # 聚宽成分股 CSV
 mkdir D:\ml_output                 # 策略每日产物
+mkdir D:\vnpy_logs                 # [P1-2] loguru rotation 写入
+mkdir D:\backups                   # [P1-6] daily_backup.ps1 输出
+```
+
+⚠️ **[A2] 状态文件统一到 `D:\vnpy_data\state\`**:
+- `replay_history.db` — vnpy 端本地回放权益历史 (A1/B2)
+- `sim_<gateway>.db` × N — 模拟柜台状态 (持仓 / 资金 / 订单 / 成交)
+- `sim_<gateway>.lock` — [P0-5] PID-stamped lockfile
+
+旧路径 `vnpy_qmt_sim/.trading_state/` **已废弃**. 升级时:
+```powershell
+mkdir D:\vnpy_data\state -Force
+move F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state\sim_*.db D:\vnpy_data\state\
+# .lock 文件可不动 (重启时自动重建); 改完重启即生效
 ```
 
 ⚠️ **不再需要 setx Machine env** — 所有路径 由 .env.production 提供, 由

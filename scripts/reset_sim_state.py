@@ -26,8 +26,16 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TRADING_STATE_DIR = REPO_ROOT / "vnpy_qmt_sim" / ".trading_state"
-ML_OUTPUT_ROOT = Path(r"D:/ml_output")  # 与 run_ml_headless 默认一致
+
+# [A2] 状态文件统一到 D:/vnpy_data/state/ — 与 replay_history.db 集中, 便于备份.
+# 老路径 vnpy_qmt_sim/.trading_state/ 已废弃, 升级时 mv 即可.
+def _trading_state_dir() -> Path:
+    qs_root = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
+    return Path(qs_root) / "state"
+
+
+TRADING_STATE_DIR = _trading_state_dir()
+ML_OUTPUT_ROOT = Path(os.getenv("ML_OUTPUT_ROOT", r"D:/ml_output"))
 
 # Phase A1/B2 解耦后,vnpy 端在 {QS_DATA_ROOT}/state/replay_history.db 维护本地
 # 回放权益历史,mlearnweb 通过 vnpy_webtrader endpoint 增量 fanout 拉.

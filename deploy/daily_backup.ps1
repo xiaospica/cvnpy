@@ -58,7 +58,8 @@ if (Test-Path $replayDb) {
 }
 
 # 2. sim_<gateway>.db × N (模拟柜台状态; .lock 跳过)
-$simStateDir = Join-Path $VnpyRoot "vnpy_qmt_sim\.trading_state"
+# [A2] 状态文件统一到 ${QS_DATA_ROOT}/state/, 与 replay_history.db 同级.
+$simStateDir = Join-Path $VnpyDataRoot "state"
 if (Test-Path $simStateDir) {
     $simDbs = Get-ChildItem $simStateDir -Filter "sim_*.db"
     $simDbs | Copy-Item -Destination $staging -ErrorAction SilentlyContinue

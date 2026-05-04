@@ -43,7 +43,10 @@ class QmtSimGateway(BaseGateway):
         "merged_parquet_fallback_days": 10,
         "merged_parquet_stale_warn_hours": 48,
         "启用持久化": "是",
-        "持久化目录": r"F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state",
+        # [A2] 默认放在 D:/vnpy_data/state/ 与其他状态文件 (replay_history.db)
+        # 集中, 便于备份 / 跨机部署. 旧路径 vnpy_qmt_sim/.trading_state/ 已废弃,
+        # 升级时 mv 即可 (无 DB schema 变化, 文件位置变化).
+        "持久化目录": r"D:\vnpy_data\state",
     }
 
     exchanges = [Exchange.SSE, Exchange.SZSE]
@@ -107,7 +110,7 @@ class QmtSimGateway(BaseGateway):
             self.write_log(f"持久化模块加载失败，跳过: {exc}")
             return
 
-        root = setting.get("持久化目录") or r"F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state"
+        root = setting.get("持久化目录") or r"D:\vnpy_data\state"
         account_id = setting.get("账户", "test_id")
         try:
             persistence = QmtSimPersistence(account_id=str(account_id), root=root)
