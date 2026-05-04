@@ -138,22 +138,44 @@ def main() -> int:
     print(f"[ground_truth] bundle_dir   = {bundle_dir}")
     print(f"[ground_truth] out_dir      = {out_dir}")
 
+    # Phase 2 后 filter snapshot 命名 = {filter_id}_{T}.parquet, filter_id 来自
+    # bundle/filter_config.json. 自动派生最新 snapshot 路径 (扫文件名 max date).
+    # 不再写死 csi300_filtered_*.parquet (Phase 2 已删此命名).
+    import json as _json
+    import re as _re
+    filter_cfg = _json.loads(
+        (bundle_dir / "filter_config.json").read_text(encoding="utf-8")
+    )
+    filter_id = filter_cfg["filter_id"]
+    filter_dir = Path(r"D:/vnpy_data/snapshots/filtered")
+    pattern = _re.compile(rf"^{_re.escape(filter_id)}_(\d{{8}})\.parquet$")
+    candidates = []
+    for entry in filter_dir.iterdir():
+        m = pattern.match(entry.name)
+        if m:
+            candidates.append((m.group(1), entry))
+    if not candidates:
+        raise FileNotFoundError(
+            f"{filter_dir} 无 {filter_id}_*.parquet snapshot. "
+            "先跑 daily_ingest_pipeline 至少一次产出今日快照."
+        )
+    candidates.sort(key=lambda x: x[0])
+    latest_date_str, latest_path = candidates[-1]
+    print(f"[ground_truth] filter_id = {filter_id}")
+    print(f"[ground_truth] filter_parquet (最新 snapshot) = {latest_path.name}")
+
     # 1. 用 D:/vnpy_data/qlib_data_bin 初始化 qlib
     # kernels=2 限制 joblib worker 数量, 避免 30+ worker 各 200MB 拉爆 Windows page file
-    # (DLL load failed: ImportError _zpropack 页面文件太小). 默认 NUM_USABLE_CPU 在多核机器
-    # 上会一次性 spawn 30+ 进程导致内存不足.
     qlib.init(provider_uri=PROVIDER_URI, region="cn", kernels=2)
 
     # 2. 用 bundle 推理拿 pred (live_end=END_TIME, lookback 大点 cover 整个回放区间)
-    # filter_parquet 必须用 D:/vnpy_data 的最新 snapshot, 否则 task.json 里
-    # 固化的训练时 filter 截止 2026-01-28 → pred 只覆盖到 1-28 → backtest 只 1 天
     print(f"=== Step 1: predict_from_bundle ({START_TIME} ~ {END_TIME}) ===")
     pred_df, task = predict_from_bundle(
         bundle_dir=bundle_dir,
         live_end=pd.Timestamp(END_TIME),
         lookback_days=160,  # 160 天回看, 覆盖整个回放区间
         handler_overrides={
-            "filter_parquet": r"D:/vnpy_data/snapshots/filtered/csi300_filtered_20260430.parquet",
+            "filter_parquet": str(latest_path),
         },
     )
     pred_df.to_pickle(out_dir / "pred.pkl")
