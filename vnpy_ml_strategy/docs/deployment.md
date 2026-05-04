@@ -106,13 +106,24 @@ flowchart TB
 
 ### 2.0 一键 bootstrap (推荐)
 
-前置 — 这两个**必须**人工先装 (脚本不会装二进制):
+**部署机最小前置** — 只这一项必须人工装:
 
-| 工具 | 装法 |
+| 工具 | 装法 | 必需性 |
+|---|---|---|
+| Python 3.13 (vnpy) + 3.11 (推理) | `winget install Python.Python.3.13` + `winget install Python.Python.3.11` | **必装** |
+
+**bootstrap.ps1 -Apply 自动装的依赖**:
+
+| 工具 | 自动装方式 | 关闭开关 |
+|---|---|---|
+| NSSM | winget → 官方 zip 直下载 fallback (装到 `C:\Program Files\nssm\`) | `-NoAutoInstallNssm` |
+
+**bootstrap.ps1 不装的可选依赖**(缺失时降级运行,不阻断):
+
+| 工具 | 缺失时影响 |
 |---|---|
-| Python 3.13 (vnpy) + 3.11 (推理) | `winget install Python.Python.3.13` 等; 详见 Step 1 |
-| NSSM | `choco install nssm` 或下 https://nssm.cc/ |
-| 7zip (可选, 备份压缩用) | `choco install 7zip` |
+| 7zip | `daily_backup.ps1` 降级用 zip (压缩比稍差) |
+| miniqmt 客户端 | 仅实盘(`kind=live`)需要; 全模拟模式不需要 |
 
 然后:
 
@@ -472,13 +483,17 @@ watchdog_service 启动时自动周期 probe `vnpy_nodes.yaml` 里所有节点 `
 
 ### Step 14. 服务化 (Windows Service)
 
+> 跑了 `bootstrap.ps1 -Apply` 时这步**已完成**, 跳过. 仅手工部署需要.
+
 详见 [operations.md §服务化](operations.md). 推荐 NSSM:
 
 ```powershell
-# 安装 NSSM
-choco install nssm  # 或下 https://nssm.cc/
+# bootstrap.ps1 -Apply 内部会自动装 NSSM (winget → 官方 zip 直下载),
+# 不需要手动 choco install. 单独装见下:
+#   winget install --id NSSM.NSSM --silent
+#   或: 下 https://nssm.cc/release/nssm-2.24.zip 解压 win64\nssm.exe 放到 PATH
 
-# 注册 vnpy_headless 服务
+# 注册 vnpy_headless 服务 (bootstrap.ps1 -Apply 内会自动调 install_services.ps1):
 nssm install vnpy_headless F:\Program_Home\vnpy\python.exe F:\Quant\vnpy\vnpy_strategy_dev\run_ml_headless.py
 nssm set vnpy_headless AppStdout D:\vnpy_logs\vnpy_headless.log
 nssm set vnpy_headless AppStderr D:\vnpy_logs\vnpy_headless.err
