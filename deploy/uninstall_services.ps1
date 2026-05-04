@@ -1,4 +1,4 @@
-#requires -RunAsAdministrator
+﻿#requires -RunAsAdministrator
 <#
 .SYNOPSIS
     卸载 install_services.ps1 装的所有 NSSM 服务.
@@ -24,7 +24,8 @@ if (-not $nssmExe) {
     exit 1
 }
 
-$services = @("vnpy_headless", "mlearnweb_research", "mlearnweb_live", "mlearnweb_frontend")
+# 推理端只装一个服务 (mlearnweb 在另一项目, 不在这里管理)
+$services = @("vnpy_headless")
 foreach ($svc in $services) {
     & $nssmExe.Source status $svc 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
