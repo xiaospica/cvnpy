@@ -20,8 +20,12 @@
 #   - install_services.ps1 — NSSM 装 vnpy_headless
 #   - daily_backup.ps1    — 备份逻辑 (本脚本只调度任务)
 #
+# 自动装的依赖 (无需用户预先 winget):
+#   - NSSM: winget → 官方 zip 直下载 fallback. 关闭走 -NoAutoInstallNssm
+#
 # 不做的:
-#   - 安装 Python / NSSM / 7zip 二进制 (用 winget / choco 自己装, 建议先做)
+#   - 安装 Python (3.13 vnpy + 3.11 推理) — 体积大, 自己 winget install Python.Python.3.13
+#   - 安装 7zip (备份脚本可降级 zip, 不阻断)
 #   - 装 miniqmt 客户端 (券商私有 installer, 走券商提供的安装流程)
 #   - 拷 bundle (训练机 rsync; 详见 vnpy_ml_strategy/docs/deployment.md Step 8)
 #   - 改 vt_setting.json (P0-1 凭证, 详见 deployment.md Step 4c)
@@ -46,13 +50,21 @@ param(
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$SkipDryRun,
 
+    # 默认开启 NSSM 自动安装. 关闭时若未找到 nssm Apply 阶段 raise.
+    # 自动安装顺序: winget → 直接下载官方 zip 解压 (无前置依赖)
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$NoAutoInstallNssm,
+
     [string]$VnpyRoot = (Split-Path -Parent (Split-Path -Parent $PSCommandPath)),
     [string]$VnpyPython = "F:\Program_Home\vnpy\python.exe",
     [string]$InferencePython = "E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.exe",
     [string]$QsDataRoot = "D:\vnpy_data",
     [string]$MlOutputRoot = "D:\ml_output",
     [string]$LogRoot = "D:\vnpy_logs",
-    [string]$BackupRoot = "D:\backups"
+    [string]$BackupRoot = "D:\backups",
+    # NSSM 直下载 fallback 用. 默认装到 C:\Program Files\nssm\, 加系统 PATH.
+    [string]$NssmInstallDir = "C:\Program Files\nssm",
+    [string]$NssmDownloadUrl = "https://nssm.cc/release/nssm-2.24.zip"
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,6 +100,83 @@ function Require-Admin() {
     }
 }
 
+function Install-Nssm() {
+    <#
+    .SYNOPSIS
+        自动装 NSSM. 三层 fallback, 不依赖 chocolatey.
+
+    .DESCRIPTION
+        NSSM 是单 exe 工具, 装法非常轻. 顺序:
+          1. winget (Win11 / Server 2022 自带, 无人值守一行)
+          2. 直接下载官方 zip → 提 nssm.exe → 加系统 PATH
+        全失败时 throw, 由调用方决定 abort.
+    #>
+
+    # 1. 尝试 winget — Win11 / Server 2022 默认装
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Host "  [nssm] 走 winget 装..." -ForegroundColor DarkGray
+        $rc = & winget install --id NSSM.NSSM --silent --accept-source-agreements --accept-package-agreements 2>&1
+        # winget 可能返回 "已是最新" 或 "成功", 都视为 OK; 检查 PATH 即可.
+        # 刷新当前进程 PATH (winget 装的工具新增到系统 PATH, 但当前会话不会自动取)
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+        if (Get-Command nssm -ErrorAction SilentlyContinue) {
+            Write-Host "  [nssm] winget 装成功" -ForegroundColor Green
+            return $true
+        }
+        Write-Host "  [nssm] winget 装似乎完成但 PATH 没刷新出来 — 转 fallback" -ForegroundColor Yellow
+    }
+
+    # 2. fallback: 直接下载官方 zip → 提 nssm.exe
+    Write-Host "  [nssm] 走 zip 直下载 ($NssmDownloadUrl)..." -ForegroundColor DarkGray
+    if (-not (Test-Path $NssmInstallDir)) {
+        New-Item -ItemType Directory -Path $NssmInstallDir -Force | Out-Null
+    }
+    $tmpZip = Join-Path $env:TEMP "nssm_$(Get-Date -Format yyyyMMddHHmmss).zip"
+    $tmpDir = Join-Path $env:TEMP "nssm_extract_$(Get-Date -Format yyyyMMddHHmmss)"
+
+    try {
+        # TLS 1.2 给 nssm.cc HTTPS — 老 PS5 默认 TLS 可能太低
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $NssmDownloadUrl -OutFile $tmpZip -UseBasicParsing
+        Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force
+
+        # zip 内部结构: nssm-2.24/win64/nssm.exe
+        $exeCandidate = Get-ChildItem -Path $tmpDir -Recurse -Filter "nssm.exe" |
+            Where-Object { $_.FullName -match "win64" } |
+            Select-Object -First 1
+        if (-not $exeCandidate) {
+            # 兜底: 任意 nssm.exe (32-bit)
+            $exeCandidate = Get-ChildItem -Path $tmpDir -Recurse -Filter "nssm.exe" |
+                Select-Object -First 1
+        }
+        if (-not $exeCandidate) {
+            throw "下载的 zip 里没找到 nssm.exe"
+        }
+
+        Copy-Item $exeCandidate.FullName (Join-Path $NssmInstallDir "nssm.exe") -Force
+        Write-Host "  [nssm] 已装到 $NssmInstallDir\nssm.exe" -ForegroundColor Green
+    }
+    finally {
+        Remove-Item $tmpZip -ErrorAction SilentlyContinue
+        Remove-Item $tmpDir -Recurse -ErrorAction SilentlyContinue
+    }
+
+    # 加到系统 PATH (要 admin, Apply 模式已经要求)
+    $sysPath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    if ($sysPath -notlike "*$NssmInstallDir*") {
+        [System.Environment]::SetEnvironmentVariable("Path", "$sysPath;$NssmInstallDir", "Machine")
+        Write-Host "  [nssm] 已加 $NssmInstallDir 到系统 PATH" -ForegroundColor Green
+    }
+    # 当前进程 PATH 同步 (新装的 nssm 立即可用)
+    $env:Path = "$env:Path;$NssmInstallDir"
+
+    if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
+        throw "NSSM 装好了但 'nssm' 仍不在 PATH; 手动: $NssmInstallDir\nssm.exe install ..."
+    }
+    return $true
+}
+
 # ---- step 1: 前置检查 -----------------------------------------------------
 
 Section "Step 1 · 前置检查 (binaries + paths)"
@@ -101,11 +190,22 @@ $ipyOk = Test-Path $InferencePython
 $detail = if ($ipyOk) { (& $InferencePython --version 2>&1) -join " " } else { "缺失 $InferencePython — 推理子进程用的 Python 3.11" }
 Add-Check "inference Python" $ipyOk $detail
 
-# NSSM
+# NSSM — 装在 PATH 里; 没装时 Apply 模式会自动装 (除非 -NoAutoInstallNssm)
 $nssm = Get-Command nssm -ErrorAction SilentlyContinue
 $nssmOk = $null -ne $nssm
-$detail = if ($nssmOk) { $nssm.Source } else { "未找到 nssm — 跑 'choco install nssm' 或下 https://nssm.cc/ 手装" }
-Add-Check "NSSM" $nssmOk $detail
+$nssmAutoInstall = (-not $nssmOk) -and ((-not $IsApplyMode) -or (-not $NoAutoInstallNssm))
+if ($nssmOk) {
+    $detail = $nssm.Source
+    Add-Check "NSSM" $true $detail
+} elseif ($nssmAutoInstall) {
+    # 没装但会自动装 → WARN, 不阻断 -Check (Apply 阶段 Step 1.5 会装并复查)
+    $detail = "未找到 nssm — Apply 时自动装 (winget → 官方 zip 直下载 fallback)"
+    Add-Check "NSSM" $false $detail -IsWarning
+} else {
+    # Apply + -NoAutoInstallNssm 时才算 FAIL
+    $detail = "未找到 nssm 且 -NoAutoInstallNssm 已设 — 手动: winget install NSSM.NSSM"
+    Add-Check "NSSM" $false $detail
+}
 
 # 7zip (备份用, 没装则降级 zip — 仅 warning)
 $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue
@@ -146,6 +246,29 @@ if (-not $IsApplyMode) {
 }
 
 Require-Admin
+
+# ---- step 1.5: NSSM 自动安装 ---------------------------------------------
+
+if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
+    if ($NoAutoInstallNssm) {
+        Write-Error "[bootstrap] NSSM 未装且 -NoAutoInstallNssm 已设, abort. 手动装后重试."
+        exit 1
+    }
+    Section "Step 1.5 · 自动安装 NSSM"
+    try {
+        Install-Nssm | Out-Null
+        # 二次校验
+        $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
+        if (-not $nssmCmd) {
+            throw "Install-Nssm 返回但 nssm 仍不可用"
+        }
+        Write-Host "  ✓ nssm 现在可用: $($nssmCmd.Source)" -ForegroundColor Green
+    }
+    catch {
+        Write-Error "[bootstrap] 自动装 NSSM 失败: $_`n手动: 下 https://nssm.cc/release/nssm-2.24.zip 解压, 把 win64\nssm.exe 放到 PATH 上"
+        exit 1
+    }
+}
 
 # ---- step 2: 数据目录 -----------------------------------------------------
 
