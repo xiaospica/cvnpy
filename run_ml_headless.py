@@ -1,27 +1,38 @@
 # -*- coding: utf-8 -*-
-"""ML 策略无 Qt 启动脚本 — 支持单/多 gateway 多策略沙盒。
+"""ML 策略无 Qt 启动脚本 — 支持单/多 gateway 多策略沙盒 + 实盘/模拟双轨.
 
 启动姿势:
     F:/Program_Home/vnpy/python.exe run_ml_headless.py
 
-两种模式:
-    模式 A · 实盘 miniqmt（单 gateway）
-        USE_GATEWAY_KIND = "QMT"
-        GATEWAYS = [{"name": "QMT", "setting": QMT_SETTING}]
-        STRATEGIES = [{"gateway_name": "QMT", ...}, ...]   # 所有策略共用 QMT 网关
-        约束：miniqmt 单进程单账户，多策略只能合并到一个账户
+P2-1 双轨架构: GATEWAYS 中每条自带 kind 字段, 按需混部:
+    kind="live"      vnpy_qmt.QmtGateway      (真 miniqmt, ≤1 个, 单账户约束)
+    kind="sim"       vnpy_qmt_sim.QmtSimGateway (本地撮合, 任意条数)
+    kind="fake_live" tests.fakes.FakeQmtGateway (开发桩, 仅 V2 验证用)
 
-    模式 B · 模拟多策略沙盒（多 gateway，方案 Y）
-        USE_GATEWAY_KIND = "QMT_SIM"
+典型配置:
+    模式 A · 全模拟双策略 (默认):
         GATEWAYS = [
-            {"name": "QMT_SIM_csi300", "setting": {...}},
-            {"name": "QMT_SIM_zz500",  "setting": {...}},
+            {"kind": "sim", "name": "QMT_SIM_csi300",   "setting": {...}},
+            {"kind": "sim", "name": "QMT_SIM_csi300_2", "setting": {...}},
+        ]
+        每 sim gateway 独立 sim_<name>.db, mlearnweb 前端各自一条权益曲线.
+
+    模式 B · 实盘单策略:
+        GATEWAYS = [{"kind": "live", "name": "QMT", "setting": QMT_SETTING}]
+        STRATEGIES = [{"gateway_name": "QMT", ...}]
+
+    模式 C · 实盘 + 同信号影子 (P2-1 双轨核心):
+        GATEWAYS = [
+            {"kind": "live", "name": "QMT",                    "setting": QMT_SETTING},
+            {"kind": "sim",  "name": "QMT_SIM_csi300_shadow",  "setting": {...}},
         ]
         STRATEGIES = [
-            {"gateway_name": "QMT_SIM_csi300", ...},
-            {"gateway_name": "QMT_SIM_zz500",  ...},
+            {"strategy_name": "csi300_live",        "gateway_name": "QMT",                   ...},
+            {"strategy_name": "csi300_live_shadow", "gateway_name": "QMT_SIM_csi300_shadow",
+             "setting_override": {..., "signal_source_strategy": "csi300_live"}},
         ]
-        每策略独立 SQLite + 独立账户，mlearnweb 前端三策略各自一条权益曲线
+        影子策略复用上游 selections.parquet, 仅撮合走不同 gateway, 用于评估
+        模拟柜台真实度 / 实盘 A/B 对照.
 
 与 run_sim.py 的差异:
     - 无 Qt 依赖, 可在 Windows Service / docker 里跑
@@ -47,11 +58,7 @@ if (_QLIB_SOURCE / "qlib" / "__init__.py").exists() and str(_QLIB_SOURCE) not in
     sys.path.insert(0, str(_QLIB_SOURCE))
 
 
-# ─── 模式选择 ───────────────────────────────────────────────────────────
-USE_GATEWAY_KIND = "QMT_SIM"   # "QMT_SIM" | "QMT"
-
-
-# ─── QmtSimGateway 默认参数（模拟模式各 gateway 共享） ───────────────────
+# ─── QmtSimGateway 默认参数（模拟 gateway 共享） ───────────────────────
 QMT_SIM_BASE_SETTING = {
     "模拟资金": 1_000_000.0,
     "部分成交率": 0.0,
@@ -80,25 +87,27 @@ QMT_SETTING = {
 }
 
 
-# ─── Gateways 列表 ─────────────────────────────────────────────────────
-# 模拟模式下默认 1 个 gateway（与历史行为等价）；启用多策略沙盒在下面注释处加。
-# 实盘模式下必为 1 个 gateway（miniqmt 单账户约束）。
-
-if USE_GATEWAY_KIND == "QMT_SIM":
-    # 双策略并发模拟示例: csi300_lgb_headless (老 bundle f6017) + csi300_lgb_headless_2
-    # (新 bundle c38e6c). 每策略独立 gateway → 独立 sim_<gateway>.db → 资金/持仓物理
-    # 隔离, mlearnweb 前端各自一条曲线. 命名规则见 vnpy_common/naming.py.
-    GATEWAYS = [
-        {"name": "QMT_SIM_csi300",   "setting": dict(QMT_SIM_BASE_SETTING)},
-        {"name": "QMT_SIM_csi300_2", "setting": dict(QMT_SIM_BASE_SETTING)},
-        # 进一步扩展示例 (取消注释 + 同步加 STRATEGIES):
-        # {"name": "QMT_SIM_zz500",   "setting": dict(QMT_SIM_BASE_SETTING)},
-        # {"name": "QMT_SIM_alldata", "setting": dict(QMT_SIM_BASE_SETTING)},
-    ]
-elif USE_GATEWAY_KIND == "QMT":
-    GATEWAYS = [{"name": "QMT", "setting": QMT_SETTING}]
-else:
-    raise ValueError(f"unknown USE_GATEWAY_KIND: {USE_GATEWAY_KIND}")
+# ─── Gateways 列表 (P2-1 双轨架构: 每条 gateway 自带 kind) ────────────
+# kind="live" → vnpy_qmt.QmtGateway (真 miniqmt, 受 miniqmt 单进程单账户约束 ≤1 个)
+# kind="sim"  → vnpy_qmt_sim.QmtSimGateway (本地撮合, 任意条数, 各自独立 sim_<name>.db)
+# kind="fake_live" → tests.fakes.FakeQmtGateway (无实盘环境时模拟 'QMT' 命名 +
+#                    sim 撮合内核的开发桩, 仅 P2-1 V2/V3 验证用, 部署机不安装此目录)
+#
+# 双轨混部 (实盘 + 影子 + 独立纸面策略):
+#   GATEWAYS = [
+#       {"kind": "live",      "name": "QMT",                   "setting": QMT_SETTING},
+#       {"kind": "sim",       "name": "QMT_SIM_csi300_paper",  "setting": dict(QMT_SIM_BASE_SETTING)},
+#       {"kind": "sim",       "name": "QMT_SIM_csi300_shadow", "setting": dict(QMT_SIM_BASE_SETTING)},
+#   ]
+#
+# 当前默认: 双策略并发模拟 (双 sim gateway 物理隔离). 命名规则见 vnpy_common/naming.py.
+GATEWAYS = [
+    {"kind": "sim", "name": "QMT_SIM_csi300",   "setting": dict(QMT_SIM_BASE_SETTING)},
+    {"kind": "sim", "name": "QMT_SIM_csi300_2", "setting": dict(QMT_SIM_BASE_SETTING)},
+    # 进一步扩展示例 (取消注释 + 同步加 STRATEGIES):
+    # {"kind": "sim",  "name": "QMT_SIM_zz500",   "setting": dict(QMT_SIM_BASE_SETTING)},
+    # {"kind": "live", "name": "QMT",             "setting": QMT_SETTING},  # 实盘混部
+]
 
 
 # ─── ML 策略基础参数（所有策略共用） ───────────────────────────────────
@@ -130,23 +139,26 @@ STRATEGY_BASE_SETTING = {
 
 
 # ─── 策略列表 ──────────────────────────────────────────────────────────
-# 每条策略一个 add_strategy 调用。gateway_name 必须在 GATEWAYS 中存在。
-# 实盘模式下所有策略指向同一个 "QMT"；模拟沙盒下各指向自己的 QMT_SIM_*。
+# 每条策略一个 add_strategy 调用。gateway_name 显式指向 GATEWAYS 中某一条。
 #
-# ⚠️ 多策略 trigger_time 必须错开（推荐间隔 ≥ 10 分钟）
-#   单策略推理峰值 4-5 GB（qlib + lightgbm 加载 alpha158 全量特征）。
-#   同 trigger_time 多策略并发 → 内存峰值 N×5GB → 容易触发 swap / OOM,
-#   把交易主进程和 webtrader 都拖慢。
-#   启动期 _validate_trigger_time_unique() 会硬校验冲突, 不合规直接 raise.
-#   escape hatch: env ALLOW_TRIGGER_TIME_COLLISION=1 跳过校验
-#                 (仅在确认机器内存能扛住的场景下使用)
+# 双轨架构 (P2-1):
+#   * 实盘策略 → kind=live gateway (真 miniqmt)
+#   * 影子策略 → kind=sim gateway, signal_source_strategy=<上游实盘策略名>
+#                (复用上游 selections.parquet, 不重复推理, 仅撮合差异)
+#   * 独立模拟 → kind=sim gateway, 自己跑推理 (默认行为, signal_source_strategy="")
+#
+# ⚠️ 多策略 trigger_time 必须错开（推荐间隔 ≥ 10 分钟）— 但**影子策略不跑推理**,
+#   不参与本校验 (signal_source_strategy 非空时跳过 trigger_time 检查).
+#   单策略推理峰值 4-5 GB; 同 trigger_time 自跑推理的策略并发 → swap/OOM.
+#   启动期 _validate_trigger_time_unique() 硬校验; escape hatch:
+#   env ALLOW_TRIGGER_TIME_COLLISION=1.
 
 STRATEGIES = [
     {
         # 策略 1: 老 bundle f6017 (训练 run_id)
         "strategy_name": "csi300_lgb_headless",
         "strategy_class": "QlibMLStrategy",
-        "gateway_name": "QMT_SIM_csi300" if USE_GATEWAY_KIND == "QMT_SIM" else "QMT",
+        "gateway_name": "QMT_SIM_csi300",
         "setting_override": {
             "bundle_dir": os.getenv(
                 "BUNDLE_DIR",
@@ -163,7 +175,7 @@ STRATEGIES = [
         # 用独立 gateway → 独立 sim_QMT_SIM_csi300_2.db → 与策略 1 资金/持仓不冲突
         "strategy_name": "csi300_lgb_headless_2",
         "strategy_class": "QlibMLStrategy",
-        "gateway_name": "QMT_SIM_csi300_2" if USE_GATEWAY_KIND == "QMT_SIM" else "QMT",
+        "gateway_name": "QMT_SIM_csi300_2",
         "setting_override": {
             "bundle_dir": os.getenv(
                 "BUNDLE_DIR_2",
@@ -175,14 +187,21 @@ STRATEGIES = [
             "replay_start_date": "2026-01-27",
         },
     },
-    # 进一步扩展示例 (仅 QMT_SIM 模式下意义；记得同步打开上面 GATEWAYS 的对应行):
+    # 双轨示例 (P2-1) — 实盘 + 同信号影子 (要求上面 GATEWAYS 加 kind=live + kind=sim):
     # {
-    #     "strategy_name": "zz500_lgb_headless",
+    #     "strategy_name": "csi300_live",
     #     "strategy_class": "QlibMLStrategy",
-    #     "gateway_name": "QMT_SIM_zz500",
+    #     "gateway_name": "QMT",                              # ← 实盘 gateway
+    #     "setting_override": {"bundle_dir": ..., "topk": 7, "n_drop": 1, "trigger_time": "21:00"},
+    # },
+    # {
+    #     "strategy_name": "csi300_live_shadow",
+    #     "strategy_class": "QlibMLStrategy",
+    #     "gateway_name": "QMT_SIM_csi300_shadow",            # ← sim gateway, 物理隔离
     #     "setting_override": {
-    #         "bundle_dir": os.getenv("BUNDLE_DIR_ZZ500", r"...zz500_bundle..."),
-    #         "topk": 5, "n_drop": 1,
+    #         "bundle_dir": ...,                              # ← 与上游 csi300_live 同 bundle
+    #         "topk": 7, "n_drop": 1,                          # ← 必须与上游一致
+    #         "signal_source_strategy": "csi300_live",        # ← 复用上游 selections.parquet
     #     },
     # },
 ]
@@ -202,13 +221,14 @@ WEBTRADER_HTTP_PORT = 8001
 
 
 def _validate_trigger_time_unique() -> None:
-    """启动期硬校验: 避免多策略同 trigger_time 触发推理 OOM.
+    """启动期硬校验: 避免**自跑推理**的多策略同 trigger_time 触发 OOM.
 
-    单策略推理峰值 4-5 GB; 同 trigger_time 多策略并发 → 内存峰值 N×5GB →
-    swap / OOM 把整套系统拖慢. 不合规直接 raise.
+    单策略推理峰值 4-5 GB; 同 trigger_time 多策略并发 → N×5GB → swap/OOM.
 
-    escape hatch: env ALLOW_TRIGGER_TIME_COLLISION=1 跳过校验 (仅在确认
-    机器内存能扛住且实测过并发场景的部署中使用).
+    P2-1 影子策略 (signal_source_strategy 非空) 复用上游 selections.parquet,
+    不跑自己的推理 → 不参与本校验, 即使 trigger_time 与上游同也无冲突.
+
+    escape hatch: env ALLOW_TRIGGER_TIME_COLLISION=1 跳过校验.
     """
     if os.getenv("ALLOW_TRIGGER_TIME_COLLISION") == "1":
         print(
@@ -218,6 +238,9 @@ def _validate_trigger_time_unique() -> None:
         return
     seen: dict[str, str] = {}
     for s in STRATEGIES:
+        # 影子策略不跑推理, 跳过 trigger_time 校验
+        if (s.get("setting_override") or {}).get("signal_source_strategy"):
+            continue
         # 优先 setting_override > STRATEGY_BASE_SETTING > 默认 21:00
         t = (
             (s.get("setting_override") or {}).get("trigger_time")
@@ -233,33 +256,81 @@ def _validate_trigger_time_unique() -> None:
         seen[t] = s["strategy_name"]
 
 
+def _validate_signal_source_consistency() -> None:
+    """P2-1: 影子策略 signal_source_strategy 必须与上游 bundle/topk/n_drop 一致.
+
+    不一致 → 信号语义错位 (上游 selections.parquet 的 instrument 集合用错的
+    bundle 算出来). 启动期硬校验.
+    """
+    by_name = {s["strategy_name"]: s for s in STRATEGIES}
+    for s in STRATEGIES:
+        sso = (s.get("setting_override") or {}).get("signal_source_strategy") or ""
+        if not sso:
+            continue
+        if sso not in by_name:
+            raise ValueError(
+                f"策略 {s['strategy_name']!r} signal_source_strategy={sso!r} "
+                f"不存在 (STRATEGIES 中无此 strategy_name)"
+            )
+        upstream = by_name[sso]
+        if (upstream.get("setting_override") or {}).get("signal_source_strategy"):
+            raise ValueError(
+                f"策略 {s['strategy_name']!r} signal_source_strategy={sso!r} 本身"
+                f"也是影子 (链式依赖). 影子必须直接指向独立推理的上游."
+            )
+        # 关键字段 bundle_dir / topk / n_drop 必须与上游严格相等
+        for f in ("bundle_dir", "topk", "n_drop"):
+            us = (upstream.get("setting_override") or {}).get(f)
+            sv = (s.get("setting_override") or {}).get(f)
+            if us != sv:
+                raise ValueError(
+                    f"影子策略 {s['strategy_name']!r}.{f}={sv!r} 与上游 "
+                    f"{sso!r}.{f}={us!r} 不一致 — 信号会错位."
+                )
+
+
 def _validate_startup_config() -> None:
     """启动前对 GATEWAYS / STRATEGIES 做命名约定与一致性校验。
 
     详见 vnpy_common/naming.py 模块 docstring。
-    任何不合规命名 / 引用不存在的 gateway → 启动直接 raise，避免运行后才发现。
+    任何不合规命名 / 引用不存在的 gateway / 配置错位 → 启动直接 raise.
     """
     from vnpy_common.naming import validate_gateway_name
 
-    expected_cls = "sim" if USE_GATEWAY_KIND == "QMT_SIM" else "live"
-    gw_names = set()
+    # P2-1: 实盘 gateway (kind=live) 受 miniqmt 单进程单账户约束, 至多 1 个.
+    n_live = sum(1 for g in GATEWAYS if g.get("kind") == "live")
+    if n_live > 1:
+        raise ValueError(
+            f"GATEWAYS 含 {n_live} 个 kind=live gateway, miniqmt 单进程单账户约束只允许 1 个."
+        )
+
+    # P2-1: 每个 gateway 按自己的 kind 校验命名 (混部时 sim+live+fake_live 各自独立)
+    gw_names: set[str] = set()
     for gw in GATEWAYS:
-        name = gw["name"]
-        validate_gateway_name(name, expected_class=expected_cls)
-        if name in gw_names:
-            raise ValueError(f"GATEWAYS 中 name={name!r} 重复")
-        gw_names.add(name)
+        kind = gw.get("kind")
+        if kind not in ("live", "sim", "fake_live"):
+            raise ValueError(
+                f"GATEWAYS 中 {gw.get('name')!r} 的 kind={kind!r} 非法, "
+                f"必须是 live / sim / fake_live 之一."
+            )
+        # fake_live 命名约定为 'QMT' (与真 live 同, 用于命名 validator 走 live 分支)
+        expected_class = "live" if kind in ("live", "fake_live") else "sim"
+        validate_gateway_name(gw["name"], expected_class=expected_class)
+        if gw["name"] in gw_names:
+            raise ValueError(f"GATEWAYS 中 name={gw['name']!r} 重复")
+        gw_names.add(gw["name"])
 
     for s in STRATEGIES:
-        gw = s["gateway_name"]
-        if gw not in gw_names:
+        if s["gateway_name"] not in gw_names:
             raise ValueError(
-                f"策略 {s['strategy_name']!r} 引用了未注册的 gateway_name={gw!r}。"
+                f"策略 {s['strategy_name']!r} 引用了未注册的 gateway_name={s['gateway_name']!r}。"
                 f"已注册：{sorted(gw_names)}"
             )
 
     # P1-1: 多策略 trigger_time 错峰硬校验
     _validate_trigger_time_unique()
+    # P2-1: 影子策略 signal_source_strategy 与上游一致性校验
+    _validate_signal_source_consistency()
 
 
 def main() -> int:
@@ -271,15 +342,25 @@ def main() -> int:
     event_engine = EventEngine()
     main_engine = MainEngine(event_engine)
 
-    # 挂 gateway 类
-    if USE_GATEWAY_KIND == "QMT_SIM":
-        from vnpy_qmt_sim import QmtSimGateway as _GatewayClass
-    else:
-        from vnpy_qmt import QmtGateway as _GatewayClass
+    # P2-1: 按每条 GATEWAY 自己的 kind 挑类 (混部 sim + live + fake_live).
+    # lazy import 避免装了 vnpy_qmt 才能跑 sim 模式 (反之亦然).
+    def _load_gateway_class(kind: str):
+        if kind == "sim":
+            from vnpy_qmt_sim import QmtSimGateway
+            return QmtSimGateway
+        if kind == "live":
+            from vnpy_qmt import QmtGateway
+            return QmtGateway
+        if kind == "fake_live":
+            from tests.fakes.fake_qmt_gateway import FakeQmtGateway
+            return FakeQmtGateway
+        raise ValueError(f"unknown gateway kind: {kind!r}")
 
-    # 注册所有 gateway 实例
+    # 注册所有 gateway 实例 (每条按 kind 挑类)
     for gw in GATEWAYS:
-        main_engine.add_gateway(_GatewayClass, gateway_name=gw["name"])
+        cls = _load_gateway_class(gw["kind"])
+        print(f"[headless] add_gateway kind={gw['kind']} name={gw['name']} class={cls.__name__}")
+        main_engine.add_gateway(cls, gateway_name=gw["name"])
 
     # 挂 app
     from vnpy_tushare_pro import TushareProApp
