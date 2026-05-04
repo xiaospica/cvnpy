@@ -21,8 +21,12 @@ def _prepend_sys_path(p: Path) -> None:
         sys.path.insert(0, str(p))
 
 
+# 0. repo root — 让 `from tests.fakes...` / `from run_ml_headless` 等在 pytest 上下文可解析
+_ROOT = Path(__file__).resolve().parent
+_prepend_sys_path(_ROOT)
+
 # 1. qlib_strategy_core submodule
-_CORE_DIR = Path(__file__).resolve().parent / "vendor" / "qlib_strategy_core"
+_CORE_DIR = _ROOT / "vendor" / "qlib_strategy_core"
 _prepend_sys_path(_CORE_DIR)
 
 # 2. Microsoft qlib source hosted inside qlib_strategy_dev sibling repo.
