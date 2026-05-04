@@ -296,7 +296,12 @@ def main() -> int:
     # 校验：每个策略的 gateway_name 必须在 GATEWAYS 中
     valid_gw_names = {gw["name"] for gw in GATEWAYS}
     started: list[str] = []
+    inited: list[str] = []
 
+    # 第一轮: add_strategy + init_strategy. init_strategy 会触发 strategy.on_init
+    # → MLEngine.validate_bundle → ModelRegistry.register, 把 bundle 的
+    # filter_config.json 缓存到 ModelRegistry. 必须在 start_strategy 之前 (on_start
+    # 可能立即触发 replay → 走 run_inference_range → 需要 filter_chain_specs 已注入).
     for strat_def in STRATEGIES:
         name = strat_def["strategy_name"]
         cls = strat_def["strategy_class"]
@@ -323,6 +328,41 @@ def main() -> int:
             print(f"[headless] init_strategy({name}) 失败")
             continue
 
+        inited.append(name)
+
+    # 第二轮: 把 bundle 声明的 filter_chain_specs 注入 DailyIngestPipeline. 之后
+    # 20:00 daily_ingest 才知道要给哪些 filter_id 产 active/snapshot, run_inference
+    # 也才能据此查找 {QS_DATA_ROOT}/snapshots/filtered/{filter_id}_{T}.parquet.
+    if inited:
+        try:
+            from vnpy_tushare_pro.engine import APP_NAME as TS_APP_NAME
+            ts_engine = main_engine.get_engine(TS_APP_NAME)
+            ts_datafeed = ts_engine._get_tushare_datafeed()
+            ts_pipeline = getattr(ts_datafeed, "daily_ingest_pipeline", None)
+            if ts_pipeline is None:
+                print(
+                    "[headless] WARN: TushareDatafeedPro.daily_ingest_pipeline 为 None "
+                    "(ML_DAILY_INGEST_ENABLED 未设为 1?), 跳过 filter_chain_specs 注入. "
+                    "20:00 cron 无效, 也无法做实时推理."
+                )
+            else:
+                specs = ml_engine.list_active_filter_configs()
+                if not specs:
+                    print(
+                        "[headless] WARN: ml_engine.list_active_filter_configs() 返空; "
+                        "策略未声明 bundle 或 filter_config 缺失? "
+                        "DailyIngestPipeline.ingest_today 会 raise."
+                    )
+                ts_pipeline.set_filter_chain_specs(specs)
+                print(
+                    f"[headless] DailyIngestPipeline.filter_chain_specs 已注入 "
+                    f"{len(specs)} 个 filter_id: {list(specs.keys())}"
+                )
+        except Exception as exc:
+            print(f"[headless] 注入 filter_chain_specs 失败: {exc}")
+
+    # 第三轮: start_strategy + 可选立即触发. 此时 filter_chain_specs 已就绪.
+    for name in inited:
         if not ml_engine.start_strategy(name):
             print(f"[headless] start_strategy({name}) 失败")
             continue

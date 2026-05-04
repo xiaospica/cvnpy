@@ -178,16 +178,16 @@ class TushareDatafeedPro(BaseDatafeed):
 
         默认布局:
           {QS_DATA_ROOT}/stock_data/daily_merged_all_new.parquet     (活动 merged, 观察档)
-          {QS_DATA_ROOT}/csi300_custom_filtered.parquet              (活动 filtered, 观察档)
           {QS_DATA_ROOT}/stock_data/by_stock/                        (qlib CSV 临时区)
           {QS_DATA_ROOT}/qlib_data_bin/                              (qlib bin, 每日重建)
-          {QS_DATA_ROOT}/snapshots/                                  (merged + filtered 快照 + 审计)
+          {QS_DATA_ROOT}/snapshots/merged/daily_merged_{T}.parquet   (推理用 merged 快照)
+          {QS_DATA_ROOT}/snapshots/filtered/active_{filter_id}.parquet  (滚动累积过滤档)
+          {QS_DATA_ROOT}/snapshots/filtered/{filter_id}_{T}.parquet  (推理用过滤快照)
           {QS_DATA_ROOT}/jq_index/hs300_*.csv                        (聚宽成分股 CSV)
 
         覆盖:
           ML_DAILY_INGEST_ENABLED    "1" 启用 (默认 "0" 关闭, 向后兼容老部署)
           ML_MERGED_PARQUET_PATH     显式指定, 覆盖 QS_DATA_ROOT 默认
-          ML_FILTERED_PARQUET_PATH
           ML_BY_STOCK_CSV_DIR
           ML_QLIB_DIR
           ML_SNAPSHOT_DIR
@@ -195,6 +195,13 @@ class TushareDatafeedPro(BaseDatafeed):
           ML_INGEST_LOOKBACK_DAYS    snapshot 窗口自然日数 (默认 120, ≈80 交易日 cover Alpha158
                                      60 滚动窗口的当日推理). 回放需要更长历史时改大 (250 ≈ 165
                                      交易日, 可 cover ~3 个月前的回放推理).
+
+        Phase 2 关键变更:
+          DailyIngestPipeline 不再持有静态 ``filtered_parquet_path``. 多 universe
+          (csi300 / all_market / zz500 ...) 通过 ``filter_chain_specs`` 路由,
+          每条独立产 ``snapshots/filtered/active_{filter_id}.parquet`` +
+          ``{filter_id}_{T}.parquet``. 启动期由 ``run_ml_headless.py`` 调用
+          ``ml_engine.list_active_filter_configs()`` 收集 + 注入此 pipeline.
         """
         if os.getenv("ML_DAILY_INGEST_ENABLED", "0") != "1":
             return None
@@ -227,9 +234,6 @@ class TushareDatafeedPro(BaseDatafeed):
                 merged_parquet_path=_env_or_default(
                     "ML_MERGED_PARQUET_PATH", "stock_data/daily_merged_all_new.parquet"
                 ),
-                filtered_parquet_path=_env_or_default(
-                    "ML_FILTERED_PARQUET_PATH", "csi300_custom_filtered.parquet"
-                ),
                 by_stock_csv_dir=_env_or_default(
                     "ML_BY_STOCK_CSV_DIR", "stock_data/by_stock"
                 ),
@@ -237,7 +241,9 @@ class TushareDatafeedPro(BaseDatafeed):
                 snapshot_dir=_env_or_default("ML_SNAPSHOT_DIR", "snapshots"),
                 index_code="000300.SH",
                 lookback_days=int(os.getenv("ML_INGEST_LOOKBACK_DAYS", "120")),
-                # event_callback 由 TushareProEngine 在 engine.init_engine 里注入
+                # filter_chain_specs 由 run_ml_headless.py add_strategy 后调
+                # set_filter_chain_specs 注入 (ml_engine.list_active_filter_configs).
+                # event_callback 由 TushareProEngine 在 engine.init_engine 里注入.
             )
         except Exception as exc:
             logger.warning(f"[daily_ingest] 构造 DailyIngestPipeline 失败: {exc}")

@@ -390,16 +390,16 @@ class MLEngine(BaseEngine):
         filter_parquet_path: Optional[str] = None,
         timeout_s: int = 180,
     ) -> Dict[str, Any]:
-        """委托给 QlibPredictor. Phase 2: 按 bundle 自带的 filter_config.filter_id 派生
-        snapshot 路径 ``snapshots/filtered/{filter_id}_{YYYYMMDD}.parquet``.
+        """委托给 QlibPredictor. 按 bundle 自带的 filter_config.filter_id 派生
+        snapshot 路径 ``{QS_DATA_ROOT}/snapshots/filtered/{filter_id}_{YYYYMMDD}.parquet``.
 
-        ``filter_parquet_path`` 若 None: 从 ModelRegistry 拿 bundle 的 filter_id (强制),
-        拼 ``{QS_DATA_ROOT}/snapshots/filtered/{filter_id}_{live_end}.parquet``.
-        快照不存在 → warn 但不阻塞 (handler 走 task.json 默认 = 训练时 filter).
-        显式传入的 filter_parquet_path 优先.
+        ``filter_parquet_path`` 若 None:
+          1. 必须设 env ``QS_DATA_ROOT``, 否则 raise.
+          2. 从 ModelRegistry 拿 bundle 的 filter_id (强制), 拼路径.
+          3. 快照不存在 → strict raise (引导调用方先跑 daily_ingest 或检查
+             ``set_filter_chain_specs`` 是否注入了对应 filter_id).
 
-        Phase 2 前是硬编码 ``csi300_filtered_{YYYYMMDD}.parquet`` (单 universe). 现按
-        bundle 声明的 filter_id 派生, 多 universe 共存不冲突.
+        显式传入的 ``filter_parquet_path`` (非 None) 优先, 跳过派生.
         """
         import os as _os
         from pathlib import Path as _Path
@@ -407,24 +407,28 @@ class MLEngine(BaseEngine):
         if self._predictor is None:
             raise RuntimeError("Predictor not set")
 
-        # Phase 2: 按 bundle 的 filter_id 派生 snapshot 路径
+        # 按 bundle 的 filter_id 派生 snapshot 路径; 缺失即 raise
         if filter_parquet_path is None:
             qs_data_root = _os.getenv("QS_DATA_ROOT")
-            if qs_data_root:
-                filter_id = self._resolve_filter_id(bundle_dir)
-                candidate = (
-                    _Path(qs_data_root) / "snapshots" / "filtered"
-                    / f"{filter_id}_{live_end.strftime('%Y%m%d')}.parquet"
+            if not qs_data_root:
+                raise RuntimeError(
+                    "QS_DATA_ROOT env 未设, 无法定位 filter snapshot. "
+                    "实盘启动前必须设此 env (run_ml_headless.py 已 setdefault)"
                 )
-                if candidate.exists():
-                    filter_parquet_path = str(candidate)
-                else:
-                    # 快照不存在: warn 但不阻塞 (可能是首次跑 / 快照未到), 用 task.json 默认
-                    from loguru import logger
-                    logger.warning(
-                        f"[MLEngine] filter snapshot 不存在 {candidate}, "
-                        "handler 用 bundle task.json 默认(可能是训练时点历史值)"
-                    )
+            filter_id = self._resolve_filter_id(bundle_dir)
+            candidate = (
+                _Path(qs_data_root) / "snapshots" / "filtered"
+                / f"{filter_id}_{live_end.strftime('%Y%m%d')}.parquet"
+            )
+            if not candidate.exists():
+                raise FileNotFoundError(
+                    f"filter snapshot 不存在: {candidate} "
+                    f"(filter_id={filter_id}, live_end={live_end}). "
+                    "排查: (1) daily_ingest 当日是否跑过? "
+                    "(2) DailyIngestPipeline.filter_chain_specs 是否含此 filter_id "
+                    "(run_ml_headless.py 启动期 set_filter_chain_specs 注入)?"
+                )
+            filter_parquet_path = str(candidate)
 
         return self._predictor.predict(
             bundle_dir=bundle_dir,
@@ -461,13 +465,18 @@ class MLEngine(BaseEngine):
         Note: 批量模式不写 metrics.json（PSI/KS/IC 等留单日实时模式做）；
         每日 diagnostics.json 含 ``batch_mode=true`` 标记。
 
-        Phase 2: 与 ``run_inference`` 对齐, 按 bundle 的 filter_id 派生 snapshot
-        模式 ``{QS_DATA_ROOT}/snapshots/filtered/{filter_id}_*.parquet``,
-        选**最新**(按文件名日期 max). 由于 _stage_filter 按 [T-lookback, T]
-        window 回填, 最新 snapshot 总是含完整 lookback window 的合规数据.
+        按 bundle 的 filter_id 派生 snapshot 模式 ``{QS_DATA_ROOT}/snapshots/
+        filtered/{filter_id}_*.parquet``, 选**最新**(按文件名日期 max). 由于
+        ``_stage_filter`` 按 [T-lookback, T] window 回填, 最新 snapshot 总是含完整
+        lookback window 的合规数据, 一份足以驱动整个 [range_start, range_end] 回放.
 
-        Phase 2 前硬编码 ``csi300_filtered_*.parquet`` (单 universe). 现支持多
-        universe 共存(每个 bundle 自己的 filter_id 各取各的 snapshot).
+        ``filter_parquet_path`` 若 None:
+          1. 必须设 env ``QS_DATA_ROOT``, 否则 raise.
+          2. 没有任何 ``{filter_id}_*.parquet`` 匹配 → raise (回放无法用训练时
+             固化的 filter, 因为它的日期范围只覆盖训练截止日, 走到训练截止日之后
+             handler 全 status=empty 是隐藏的失败).
+
+        显式传入的 ``filter_parquet_path`` (非 None) 优先, 跳过派生.
         """
         import os as _os
         import re as _re
@@ -476,40 +485,42 @@ class MLEngine(BaseEngine):
         if self._predictor is None:
             raise RuntimeError("Predictor not set")
 
-        # Phase 2: 按 bundle 的 filter_id 派生 snapshot 模式 + 选最新
+        # 按 bundle 的 filter_id 派生 snapshot 模式 + 选最新; 缺失即 raise
         if filter_parquet_path is None:
             qs_data_root = _os.getenv("QS_DATA_ROOT")
-            if qs_data_root:
-                filter_id = self._resolve_filter_id(bundle_dir)
-                filter_dir = _Path(qs_data_root) / "snapshots" / "filtered"
-                # filter_id 可能含数字 (如 "min_90_days"), 文件名结构 = {filter_id}_{8位日期}.parquet
-                # 用 re.escape + \d{8} 严格匹配本 filter_id 的 snapshot
-                pattern = _re.compile(rf"^{_re.escape(filter_id)}_(\d{{8}})\.parquet$")
-                latest_path = None
-                latest_date_str = None
-                if filter_dir.exists():
-                    for entry in filter_dir.iterdir():
-                        m = pattern.match(entry.name)
-                        if not m:
-                            continue
-                        d_str = m.group(1)
-                        if latest_date_str is None or d_str > latest_date_str:
-                            latest_date_str = d_str
-                            latest_path = entry
+            if not qs_data_root:
+                raise RuntimeError(
+                    "QS_DATA_ROOT env 未设, 无法定位 filter snapshot."
+                )
+            filter_id = self._resolve_filter_id(bundle_dir)
+            filter_dir = _Path(qs_data_root) / "snapshots" / "filtered"
+            # filter_id 可能含数字 (如 "min_90_days"), 文件名结构 = {filter_id}_{8位日期}.parquet
+            # 用 re.escape + \d{8} 严格匹配本 filter_id 的 snapshot
+            pattern = _re.compile(rf"^{_re.escape(filter_id)}_(\d{{8}})\.parquet$")
+            latest_path = None
+            latest_date_str = None
+            if filter_dir.exists():
+                for entry in filter_dir.iterdir():
+                    m = pattern.match(entry.name)
+                    if not m:
+                        continue
+                    d_str = m.group(1)
+                    if latest_date_str is None or d_str > latest_date_str:
+                        latest_date_str = d_str
+                        latest_path = entry
 
-                from loguru import logger
-                if latest_path is not None:
-                    filter_parquet_path = str(latest_path)
-                    logger.info(
-                        f"[MLEngine] batch 推理使用 filter 快照 {latest_path.name} "
-                        f"(选最新; range=[{range_start},{range_end}])"
-                    )
-                else:
-                    logger.warning(
-                        f"[MLEngine] {filter_dir} 无 {filter_id}_*.parquet, "
-                        "回放将用 bundle task.json 里固化的训练时 filter — "
-                        "若该 filter 不覆盖 range_end, 超出范围的日子全 status=empty"
-                    )
+            if latest_path is None:
+                raise FileNotFoundError(
+                    f"{filter_dir} 无 {filter_id}_*.parquet 快照. 排查: "
+                    "(1) daily_ingest 是否跑过? "
+                    "(2) DailyIngestPipeline.filter_chain_specs 是否含此 filter_id?"
+                )
+            filter_parquet_path = str(latest_path)
+            from loguru import logger
+            logger.info(
+                f"[MLEngine] batch 推理使用 filter 快照 {latest_path.name} "
+                f"(选最新; range=[{range_start},{range_end}])"
+            )
 
         return self._predictor.run_range(
             bundle_dir=bundle_dir,
