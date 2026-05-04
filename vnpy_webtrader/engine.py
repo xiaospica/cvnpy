@@ -97,6 +97,7 @@ class WebEngine(BaseEngine):
         self.server.register(self.get_ml_metrics_history)
         self.server.register(self.get_ml_prediction_summary)
         self.server.register(self.get_ml_health)
+        self.server.register(self.get_ml_replay_equity_snapshots)
 
     def start_server(self, rep_address: str, pub_address: str) -> None:
         """启动 RPC 服务器。"""
@@ -334,6 +335,23 @@ class WebEngine(BaseEngine):
         if adapter is None:
             return self._err("MlStrategy 引擎未注册", 404)
         return {"ok": True, "message": "", "data": adapter.get_health()}
+
+    def get_ml_replay_equity_snapshots(
+        self,
+        name: str,
+        since: Optional[str] = None,
+        limit: int = 10000,
+    ) -> Dict[str, Any]:
+        """读 vnpy 端本地 replay_history.db 回放权益快照 (A1/B2 解耦).
+
+        mlearnweb replay_equity_sync_service 用 since=local_max(inserted_at)
+        增量 fanout 拉.
+        """
+        adapter = self._ml_adapter()
+        if adapter is None:
+            return self._err("MlStrategy 引擎未注册", 404)
+        rows = adapter.get_replay_equity_snapshots(name, since=since, limit=limit)
+        return {"ok": True, "message": "", "data": rows}
 
     # ------------------------------------------------------------------
     # 关闭
