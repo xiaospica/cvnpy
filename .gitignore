@@ -76,3 +76,4 @@ vnpy_ctastrategy
 vnpy_signal_strategy
 vnpy_xt-main
 vnpy_webtrader-main
+.trading_state

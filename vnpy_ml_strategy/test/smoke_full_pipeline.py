@@ -22,11 +22,47 @@
   Phase 6 12 条验证断言
   Phase 7 常驻等 Ctrl+C, 清理 2 个 uvicorn 子进程
 
+## 数据范围 / "拉几天" 的三个数量级 (易混淆)
+
+本脚本默认"只拉 1 天"指的是**增量**, 不是本地数据总量. 三者要分开:
+
+  A. 本次跑新拉的天数 (增量)
+     - 默认 = 1 天 (LIVE_DATE 一天)
+     - SIMULATE_ROLLING_DAYS=N → N+1 天 (从 LIVE_DATE 回溯 N 自然日, 仅保留交易日)
+     - run_daily_ingest_now(day) 一次只拉 day 一天 bar, 增量追加到本地累积
+
+  B. 本地已累积的总天数 (存量)
+     - merged.parquet / qlib bin / by_stock CSV 历年累积, 由历次 ingest 增量写入
+     - 例: merged.parquet 几十 MB ≈ 历年所有 A 股日线; qlib bin calendar 末尾 = 最后
+       一次 ingest 的日期. 推理实际读的是这部分
+
+  C. 推理用的回看天数 (lookback)
+     - 由策略 parameter ``lookback_days`` 控制 (默认 60)
+     - subprocess 读 qlib bin [live_end-60, live_end] 60 天历史算 Alpha158 特征
+     - 推理读的是 B + 本次 A 新拉的那天, 不是单独看 A
+
+常见误区: "smoke 默认拉 1 天 → 1 天怎么够推理?" 实际推理用 60 天 lookback 跨
+本地累积区间, 1 天只是把"今天"补到累积末尾让 lookback 窗口右端能到 live_end.
+
+## 每日 snapshot (训练/推理时点冻结)
+
+ingest 写两套数据:
+
+  1) 滚动覆盖型: merged.parquet / csi300_custom_filtered.parquet / qlib bin
+     - 后续 ingest 会增量追加或覆盖, 看到的总是"最新累积"
+  2) 时点冻结型: snapshots/filtered/csi300_filtered_{YYYYMMDD}.parquet
+                 snapshots/merged/{YYYYMMDD}_*.parquet
+     - 每天一个独立文件, 推理 subprocess 通过 ``--filter-parquet`` 指向当日快照,
+       保证"训练时用的是 D 日成分股, 推理也用 D 日成分股", 金融实盘可复现性硬要求
+
 ## 多日模拟 (问题 3)
 
   SIMULATE_ROLLING_DAYS=N (env) → 从 LIVE_DATE 回溯 N 自然日, 仅保留交易日,
   逐日跑 ingest+pipeline. 每日产出独立的 diagnostics/metrics/selections,
   前端跨天曲线才有数据. N=0 时保持原单日行为.
+
+  典型用途: 新机器初次拉数补足 60 天 lookback (`SIMULATE_ROLLING_DAYS=60`),
+  让 qlib bin calendar 末尾覆盖到今天且历史足够 60 天回看.
 
 ## 关键修复 (基于 log.log 排查)
 
@@ -89,6 +125,10 @@ sys.path.insert(0, r"F:\Quant\code\qlib_strategy_dev")
 # =====================================================================
 # 配置区 — 按用途分组, 维护时只需改对应小节
 # =====================================================================
+
+if "ML_INGEST_LOOKBACK_DAYS" not in os.environ:
+    os.environ["ML_INGEST_LOOKBACK_DAYS"] = "250"
+    print("ML_INGEST_LOOKBACK_DAYS not set, defaulting to 250")
 
 # --- 1) 运行开关 ----------------------------------------------------
 # 控制本次跑哪些 Phase, 用于快速 iter (如只跑 vnpy 不拉数, 或不启 mlearnweb)

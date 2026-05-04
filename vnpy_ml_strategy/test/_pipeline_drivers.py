@@ -151,46 +151,64 @@ def wait_pipeline_with_heartbeat(
     day: date,
     output_root: str,
     *,
-    timeout_s: int = 600,
-    heartbeat_s: float = 30.0,
-    log_fn: Callable[[str], None] = print,
-) -> Tuple[bool, float]:
-    """触发 ``run_pipeline_now(strategy_name, as_of_date=day)`` + 轮询 diagnostics.json mtime.
+    timeout_s: int = 600,  # noqa: ARG001 — 保留兼容签名, 实际不再使用
+    heartbeat_s: float = 30.0,  # noqa: ARG001
+    log_fn: Callable[[str], None] = print,  # noqa: ARG001
+) -> Tuple[str, float]:
+    """触发 ``run_pipeline_now(strategy_name, as_of_date=day)`` 并同步等待返回.
 
-    用 ``mtime > initial_mtime`` 判断 "本次运行新产出", 否则旧 diagnostics 会立刻命中.
+    ``ml_engine.run_pipeline_now`` 通过 ``scheduler.run_job_now`` 同步阻塞直到
+    job 完成 (subprocess 推理或 non-trading day skip). 返回后策略所有状态字段
+    (last_run_date / last_status / last_n_pred 等) 已稳定, 不需要 mtime 轮询.
 
-    ``run_pipeline_now`` 同步阻塞直到 subprocess 完成 (~60-90s),
-    所以理论上调返回时 diagnostics 应已落盘. 但 IO 落盘有微秒延迟,
-    保留轮询窗口做兜底.
+    返回 status 而非 bool, 让调用方区分:
+        - "ok"          : 推理成功, diagnostics + metrics + selections 齐全
+        - "empty"       : status=empty (lookback 不足等), 仅 diagnostics
+        - "non_trading" : 策略 _is_trade_day(day)=False, 直接 skip 不写产物
+                          (策略 qlib calendar 与 smoke 调用方判定不一致时出现)
+        - "failed"      : subprocess 失败
+        - "unknown"     : 状态字段缺失或异常
 
     Returns
     -------
-    (ok, elapsed_s): ok=True 表示 diagnostics 在 timeout 内被本次运行重写
+    (status_str, elapsed_s)
     """
-    day_str = day.strftime("%Y%m%d")
-    out_day_dir = Path(output_root) / strategy_name / day_str
-    diag_path = out_day_dir / "diagnostics.json"
-    initial_mtime = diag_path.stat().st_mtime if diag_path.exists() else 0.0
+    strat = ml_engine.strategies.get(strategy_name)
+    if strat is None:
+        raise RuntimeError(f"strategy {strategy_name!r} not registered")
 
+    expected_date = day.strftime("%Y-%m-%d")
     t0 = time.time()
     if not ml_engine.run_pipeline_now(strategy_name, as_of_date=day):
         raise RuntimeError(
             f"run_pipeline_now({strategy_name!r}, as_of_date={day}) returned False"
         )
+    elapsed = time.time() - t0
 
-    last_hb = t0
-    while time.time() - t0 < timeout_s:
-        if diag_path.exists() and diag_path.stat().st_mtime > initial_mtime:
-            return True, time.time() - t0
-        time.sleep(2)
-        now = time.time()
-        if now - last_hb >= heartbeat_s:
-            log_fn(
-                f"  ... pipeline[{strategy_name}/{day_str}] running ({now - t0:.0f}s elapsed, "
-                f"waiting for {diag_path.name})"
-            )
-            last_hb = now
-    return False, time.time() - t0
+    last_run_date = getattr(strat, "last_run_date", "") or ""
+    last_status = getattr(strat, "last_status", "") or ""
+
+    # last_run_date 必然 == expected_date (template.run_daily_pipeline 第一行就设)
+    # 否则就是 ml_engine.run_pipeline_now 内部异常吃掉了
+    if last_run_date != expected_date:
+        return "unknown", elapsed
+
+    # 区分 non-trading day vs status=empty:
+    #   - non-trading day 路径: template L350 提前 return, 不进入 PREDICT 阶段, last_status 保持上一次值
+    #   - status=empty 路径: subprocess 跑了但 rows=0, last_status="empty"
+    # 用 _emit_heartbeat 的事件作信号? 不便. 改用 last_n_pred + last_stage 组合:
+    last_stage = getattr(strat, "last_stage", "") or ""
+    last_n_pred = getattr(strat, "last_n_pred", -1)
+
+    if last_stage in ("", "predict") and last_n_pred == 0 and last_status == "":
+        # template L348 重置 last_error/last_stage 然后 _is_trade_day 失败提前 return
+        # last_n_pred 来自上一次 inference, 这里不严格但通常为 0
+        return "non_trading", elapsed
+
+    if last_status in ("ok", "empty", "failed"):
+        return last_status, elapsed
+
+    return "unknown", elapsed
 
 
 # =====================================================================
