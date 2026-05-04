@@ -53,159 +53,91 @@ _HERE = Path(__file__).resolve().parent
 _CORE_DIR = _HERE / "vendor" / "qlib_strategy_core"
 if _CORE_DIR.exists() and str(_CORE_DIR) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR))
+
+
+# ─── P0-1/P0-2: load .env + yaml config ────────────────────────────────
+# 优先级:
+#   1. env 变量 DOTENV_FILE (e.g. .env.staging)
+#   2. .env.production (如存在)
+#   3. .env (如存在)
+#   4. 系统 env (Machine scope)
+#   5. .env.example 中的注释默认值 (仅参考, 不会自动加载)
+from dotenv import load_dotenv  # noqa: E402
+
+_DOTENV_FILE = os.getenv("DOTENV_FILE")
+if _DOTENV_FILE and (_HERE / _DOTENV_FILE).exists():
+    load_dotenv(_HERE / _DOTENV_FILE, override=False)
+elif (_HERE / ".env.production").exists():
+    load_dotenv(_HERE / ".env.production", override=False)
+elif (_HERE / ".env").exists():
+    load_dotenv(_HERE / ".env", override=False)
+# 如果都没有, 继续走系统 env / 启动期会因关键 env 缺失而 raise
+
+# qlib source root 是相对 path, .env 加载后才稳定
 _QLIB_SOURCE = Path(os.getenv("QLIB_SOURCE_ROOT", r"F:\Quant\code\qlib_strategy_dev"))
 if (_QLIB_SOURCE / "qlib" / "__init__.py").exists() and str(_QLIB_SOURCE) not in sys.path:
     sys.path.insert(0, str(_QLIB_SOURCE))
 
 
-# ─── QmtSimGateway 默认参数（模拟 gateway 共享） ───────────────────────
-QMT_SIM_BASE_SETTING = {
-    "模拟资金": 1_000_000.0,
-    "部分成交率": 0.0,
-    "拒单率": 0.0,
-    "订单超时秒数": 30,
-    "成交延迟毫秒": 0,
-    "报单上报延迟毫秒": 0,
-    "卖出持仓不足拒单": "是",
-    "行情源": "merged_parquet",
-    "merged_parquet_merged_root": r"D:\vnpy_data\snapshots\merged",
-    # today_open：撮合用当日**原始**(未复权) open（对齐"次日 09:30 开盘成交"语义）
-    "merged_parquet_reference_kind": "today_open",
-    "merged_parquet_fallback_days": 10,
-    "merged_parquet_stale_warn_hours": 48,
-    "启用持久化": "是",
-    "持久化目录": r"F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state",
-    # "账户" 字段不写：QmtSimGateway.connect 会用 gateway_name 兜底，
-    # 多 gateway 实例之间天然有不同 account_id（独立 SQLite 文件）。
-}
+def _load_yaml_config(yaml_path: Path) -> dict:
+    """加载 yaml 配置, ${VAR} 占位符按 .env / 系统 env 展开.
+
+    用 os.path.expandvars 而非 string.Template — 前者支持 ${VAR} 与 $VAR 两种;
+    在 .yaml 中只用 ${VAR} 形式 (避免与 yaml 自身语法冲突).
+
+    缺失的 env 变量会保留 ${VAR} 字面量; 后续启动期 dict 解构时会报"路径含 $"
+    使其暴露 (而非默默走错路径).
+    """
+    import yaml
+    if not yaml_path.exists():
+        raise FileNotFoundError(
+            f"strategies yaml 不存在: {yaml_path}\n"
+            f"拷贝 config/strategies.example.yaml 到此路径并按部署填实际值."
+        )
+    text = yaml_path.read_text(encoding="utf-8")
+    text = os.path.expandvars(text)
+    return yaml.safe_load(text)
 
 
-# ─── QmtGateway 实盘参数 ────────────────────────────────────────────────
-QMT_SETTING = {
-    "资金账号": "",
-    "客户端路径": r"E:\迅投极速交易终端 睿智融科版\userdata_mini",
-}
+# 加载 yaml: 路径默认 config/strategies.production.yaml
+_STRATEGIES_YAML = Path(
+    os.getenv("STRATEGIES_CONFIG", "config/strategies.production.yaml")
+)
+if not _STRATEGIES_YAML.is_absolute():
+    _STRATEGIES_YAML = _HERE / _STRATEGIES_YAML
+_CFG = _load_yaml_config(_STRATEGIES_YAML)
 
 
-# ─── Gateways 列表 (P2-1 双轨架构: 每条 gateway 自带 kind) ────────────
-# kind="live" → vnpy_qmt.QmtGateway (真 miniqmt, 受 miniqmt 单进程单账户约束 ≤1 个)
-# kind="sim"  → vnpy_qmt_sim.QmtSimGateway (本地撮合, 任意条数, 各自独立 sim_<name>.db)
-# kind="fake_live" → vnpy_ml_strategy.test.fakes.FakeQmtGateway (无实盘环境时
-#                    模拟 'QMT' 命名 + sim 撮合内核的开发桩, 仅 P2-1 V2/V3
-#                    验证用, 部署机不安装 vnpy_ml_strategy/test/ 目录)
-#
-# 双轨混部 (实盘 + 影子 + 独立纸面策略):
-#   GATEWAYS = [
-#       {"kind": "live",      "name": "QMT",                   "setting": QMT_SETTING},
-#       {"kind": "sim",       "name": "QMT_SIM_csi300_paper",  "setting": dict(QMT_SIM_BASE_SETTING)},
-#       {"kind": "sim",       "name": "QMT_SIM_csi300_shadow", "setting": dict(QMT_SIM_BASE_SETTING)},
-#   ]
-#
-# 当前默认: 双策略并发模拟 (双 sim gateway 物理隔离). 命名规则见 vnpy_common/naming.py.
-GATEWAYS = [
-    {"kind": "sim", "name": "QMT_SIM_csi300",   "setting": dict(QMT_SIM_BASE_SETTING)},
-    {"kind": "sim", "name": "QMT_SIM_csi300_2", "setting": dict(QMT_SIM_BASE_SETTING)},
-    # 进一步扩展示例 (取消注释 + 同步加 STRATEGIES):
-    # {"kind": "sim",  "name": "QMT_SIM_zz500",   "setting": dict(QMT_SIM_BASE_SETTING)},
-    # {"kind": "live", "name": "QMT",             "setting": QMT_SETTING},  # 实盘混部
-]
+# ─── 从 yaml 解析 GATEWAYS / STRATEGIES / 共享 base setting ─────────────
+
+def _build_gateways(cfg: dict) -> list:
+    """yaml gateways[] 各 entry 的 base 字段引用 gateway_base_settings 解析为 setting dict."""
+    base_pool: dict[str, dict] = cfg.get("gateway_base_settings", {})
+    out = []
+    for gw in cfg["gateways"]:
+        base_name = gw.get("base", "")
+        base_setting = dict(base_pool.get(base_name, {}))
+        # 允许 yaml 中 inline 'setting' 字段直接覆盖 base
+        inline_setting = gw.get("setting") or {}
+        base_setting.update(inline_setting)
+        out.append({
+            "kind": gw["kind"],
+            "name": gw["name"],
+            "setting": base_setting,
+        })
+    return out
 
 
-# ─── ML 策略基础参数（所有策略共用） ───────────────────────────────────
-# QS_DATA_ROOT 同时 setenv：MLEngine.run_inference{,_range} 用 os.getenv 自动按
-# live_end 拼 snapshots/filtered/csi300_filtered_{date}.parquet 覆盖 task.json
-# 训练时点固化的 filter（否则回放到训练截止日之后全部 status=empty）。
-os.environ.setdefault("QS_DATA_ROOT", r"D:/vnpy_data")
-QS_DATA_ROOT = os.environ["QS_DATA_ROOT"]
-VNPY_MODEL_ROOT = os.getenv("VNPY_MODEL_ROOT", r"D:/vnpy_data/models")
+GATEWAYS = _build_gateways(_CFG)
+STRATEGY_BASE_SETTING = dict(_CFG["strategy_base_setting"])
+STRATEGIES = list(_CFG["strategies"])
 
-STRATEGY_BASE_SETTING = {
-    "inference_python": os.getenv(
-        "INFERENCE_PYTHON",
-        r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
-    ),
-    "provider_uri": os.getenv("QS_PROVIDER_URI", f"{QS_DATA_ROOT}/qlib_data_bin"),
-    "trigger_time": "21:00",
-    "output_root": os.getenv("ML_OUTPUT_ROOT", r"D:/ml_output"),
-    "lookback_days": 60,
-    "subprocess_timeout_s": 300,
-    "baseline_path": "",
-    "monitor_window_days": 30,
-    # qlib TopkDropoutStrategy 等权 cash 系数
-    # 公式：buy_amount = floor(cash × risk_degree / n_buys / open / 100) × 100
-    "risk_degree": 0.95,
-    # **安全开关 — 默认干跑**
-    "enable_trading": True,
-}
-
-
-# ─── 策略列表 ──────────────────────────────────────────────────────────
-# 每条策略一个 add_strategy 调用。gateway_name 显式指向 GATEWAYS 中某一条。
-#
-# 双轨架构 (P2-1):
-#   * 实盘策略 → kind=live gateway (真 miniqmt)
-#   * 影子策略 → kind=sim gateway, signal_source_strategy=<上游实盘策略名>
-#                (复用上游 selections.parquet, 不重复推理, 仅撮合差异)
-#   * 独立模拟 → kind=sim gateway, 自己跑推理 (默认行为, signal_source_strategy="")
-#
-# ⚠️ 多策略 trigger_time 必须错开（推荐间隔 ≥ 10 分钟）— 但**影子策略不跑推理**,
-#   不参与本校验 (signal_source_strategy 非空时跳过 trigger_time 检查).
-#   单策略推理峰值 4-5 GB; 同 trigger_time 自跑推理的策略并发 → swap/OOM.
-#   启动期 _validate_trigger_time_unique() 硬校验; escape hatch:
-#   env ALLOW_TRIGGER_TIME_COLLISION=1.
-
-STRATEGIES = [
-    {
-        # 策略 1: 老 bundle f6017 (训练 run_id)
-        "strategy_name": "csi300_lgb_headless",
-        "strategy_class": "QlibMLStrategy",
-        "gateway_name": "QMT_SIM_csi300",
-        "setting_override": {
-            "bundle_dir": os.getenv(
-                "BUNDLE_DIR",
-                r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964",
-            ),
-            "topk": 7,
-            "n_drop": 1,
-            "trigger_time": "21:00",          # 错峰示例:  21:00
-            "replay_start_date": "2026-01-27",
-        },
-    },
-    {
-        # 策略 2: 新 bundle c38e6c (训练 run_id)
-        # 用独立 gateway → 独立 sim_QMT_SIM_csi300_2.db → 与策略 1 资金/持仓不冲突
-        "strategy_name": "csi300_lgb_headless_2",
-        "strategy_class": "QlibMLStrategy",
-        "gateway_name": "QMT_SIM_csi300_2",
-        "setting_override": {
-            "bundle_dir": os.getenv(
-                "BUNDLE_DIR_2",
-                r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/c38e6cfdf549446fbb0d637549e4a245",
-            ),
-            "topk": 7,
-            "n_drop": 1,
-            "trigger_time": "21:15",          # 错峰示例: 21:15 (与策略 1 间隔 15 min)
-            "replay_start_date": "2026-01-27",
-        },
-    },
-    # 双轨示例 (P2-1) — 实盘 + 同信号影子 (要求上面 GATEWAYS 加 kind=live + kind=sim):
-    # {
-    #     "strategy_name": "csi300_live",
-    #     "strategy_class": "QlibMLStrategy",
-    #     "gateway_name": "QMT",                              # ← 实盘 gateway
-    #     "setting_override": {"bundle_dir": ..., "topk": 7, "n_drop": 1, "trigger_time": "21:00"},
-    # },
-    # {
-    #     "strategy_name": "csi300_live_shadow",
-    #     "strategy_class": "QlibMLStrategy",
-    #     "gateway_name": "QMT_SIM_csi300_shadow",            # ← sim gateway, 物理隔离
-    #     "setting_override": {
-    #         "bundle_dir": ...,                              # ← 与上游 csi300_live 同 bundle
-    #         "topk": 7, "n_drop": 1,                          # ← 必须与上游一致
-    #         "signal_source_strategy": "csi300_live",        # ← 复用上游 selections.parquet
-    #     },
-    # },
-]
+# 显式 set QS_DATA_ROOT 到环境变量 (engine.run_inference / run_inference_range 内部用 os.getenv)
+# 之前的版本用 os.environ.setdefault, 现在改成由 .env 提供; 这里仅做兜底防错.
+if not os.getenv("QS_DATA_ROOT"):
+    raise RuntimeError(
+        "QS_DATA_ROOT 未设. 检查 .env (或 .env.production) 是否存在并含此字段."
+    )
 
 
 TRIGGER_ON_STARTUP = True

@@ -1,0 +1,142 @@
+# ─────────────────────────────────────────────────────────────────────
+# vnpy_ml_strategy 策略 + Gateway 配置示例
+# ─────────────────────────────────────────────────────────────────────
+#
+# 用法:
+#   1. 拷贝本文件为 strategies.production.yaml (或 staging / local)
+#   2. 改 strategies.bundle_dir / 加减 gateway / 改 trigger_time 等
+#   3. .production.yaml 在 .gitignore 不会被提交
+#   4. ${VAR} 占位符会被 .env 文件中值替换 (run_ml_headless 启动期 expandvars)
+#
+# 配置切换: 改 .env STRATEGIES_CONFIG 字段指向其他 yaml.
+# ─────────────────────────────────────────────────────────────────────
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Gateway base settings (按 base 名引用, 可被 setting_override 覆盖)
+# ═════════════════════════════════════════════════════════════════════
+
+gateway_base_settings:
+
+  # vnpy_qmt_sim 模拟柜台默认参数 (任何 sim / fake_live gateway 共用)
+  qmt_sim:
+    模拟资金: 1000000.0
+    部分成交率: 0.0
+    拒单率: 0.0
+    订单超时秒数: 30
+    成交延迟毫秒: 0
+    报单上报延迟毫秒: 0
+    卖出持仓不足拒单: "是"
+    行情源: merged_parquet
+    merged_parquet_merged_root: "${QS_DATA_ROOT}/snapshots/merged"
+    # today_open: 撮合用当日**原始** (未复权) open, 对齐"次日 09:30 开盘成交"
+    merged_parquet_reference_kind: today_open
+    merged_parquet_fallback_days: 10
+    merged_parquet_stale_warn_hours: 48
+    启用持久化: "是"
+    持久化目录: "F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state"
+    # 账户 字段不写: QmtSimGateway.connect 会用 gateway_name 兜底,
+    # 多 gateway 实例之间天然有不同 account_id (独立 sim_<name>.db).
+
+  # 真 miniqmt 实盘 (kind=live) 用; ${...} 从 .env 取
+  qmt_live:
+    资金账号: "${QMT_ACCOUNT}"
+    客户端路径: "${QMT_CLIENT_PATH}"
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Strategy base setting (所有策略共享; 每条策略可在 setting_override 覆盖)
+# ═════════════════════════════════════════════════════════════════════
+
+strategy_base_setting:
+  inference_python: "${INFERENCE_PYTHON}"
+  provider_uri: "${QS_DATA_ROOT}/qlib_data_bin"
+  trigger_time: "21:00"      # ⚠️ 多策略必须错开 ≥ 10 min
+  buy_sell_time: "09:26"     # 09:25 集合竞价开盘价后立即下单
+  output_root: "${ML_OUTPUT_ROOT}"
+  lookback_days: 60
+  subprocess_timeout_s: 300
+  baseline_path: ""
+  monitor_window_days: 30
+  risk_degree: 0.95           # qlib TopkDropoutStrategy 等权 cash 系数
+  enable_trading: true        # **安全开关 — false 即干跑**
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Gateway 列表 (kind: live / sim / fake_live)
+# ═════════════════════════════════════════════════════════════════════
+#
+# kind=live      → vnpy_qmt.QmtGateway      (真 miniqmt, ≤ 1 个, 单进程单账户)
+# kind=sim       → vnpy_qmt_sim.QmtSimGateway (本地撮合, 任意条数)
+# kind=fake_live → vnpy_ml_strategy.test.fakes.FakeQmtGateway
+#                  (default_name='QMT' 命名走 live, 内核 sim, 仅 P2-1 V2 验证用)
+#
+# base 字段 = gateway_base_settings 的 key.
+
+gateways:
+  - kind: sim
+    name: QMT_SIM_csi300
+    base: qmt_sim
+  - kind: sim
+    name: QMT_SIM_csi300_2
+    base: qmt_sim
+
+  # 双轨实盘 + 影子混部示例 (取消注释 + 同步加 STRATEGIES):
+  # - kind: live
+  #   name: QMT
+  #   base: qmt_live
+  # - kind: sim
+  #   name: QMT_SIM_csi300_shadow
+  #   base: qmt_sim
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 策略列表
+# ═════════════════════════════════════════════════════════════════════
+#
+# ⚠️ 多策略 trigger_time 必须错开 (推荐 ≥ 10 min)
+#    单策略推理峰值 4-5 GB; 同 trigger_time 多策略并发 → swap/OOM.
+#    启动期 _validate_trigger_time_unique() 硬校验.
+#    escape: env ALLOW_TRIGGER_TIME_COLLISION=1
+#
+# ⚠️ 影子策略 (signal_source_strategy 非空) 必须与上游 bundle/topk/n_drop 一致
+#    启动期 _validate_signal_source_consistency() 硬校验.
+
+strategies:
+  - strategy_name: csi300_lgb_headless
+    strategy_class: QlibMLStrategy
+    gateway_name: QMT_SIM_csi300
+    setting_override:
+      bundle_dir: "${VNPY_MODEL_ROOT}/f6017411b44c4c7790b63c5766b93964"
+      topk: 7
+      n_drop: 1
+      trigger_time: "21:00"
+      replay_start_date: "2026-01-27"
+
+  - strategy_name: csi300_lgb_headless_2
+    strategy_class: QlibMLStrategy
+    gateway_name: QMT_SIM_csi300_2
+    setting_override:
+      bundle_dir: "${VNPY_MODEL_ROOT}/c38e6cfdf549446fbb0d637549e4a245"
+      topk: 7
+      n_drop: 1
+      trigger_time: "21:15"     # 错开 15 min
+      replay_start_date: "2026-01-27"
+
+  # 双轨示例 (P2-1, 实盘 + 同信号影子):
+  # - strategy_name: csi300_live
+  #   strategy_class: QlibMLStrategy
+  #   gateway_name: QMT
+  #   setting_override:
+  #     bundle_dir: "${VNPY_MODEL_ROOT}/<live-bundle-run-id>"
+  #     topk: 7
+  #     n_drop: 1
+  #     trigger_time: "21:00"
+  # - strategy_name: csi300_live_shadow
+  #   strategy_class: QlibMLStrategy
+  #   gateway_name: QMT_SIM_csi300_shadow
+  #   setting_override:
+  #     bundle_dir: "${VNPY_MODEL_ROOT}/<live-bundle-run-id>"  # 必须与上游一致
+  #     topk: 7
+  #     n_drop: 1
+  #     signal_source_strategy: csi300_live   # 复用上游 selections.parquet

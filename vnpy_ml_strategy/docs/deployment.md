@@ -151,29 +151,50 @@ npm install
 npm run build
 ```
 
-### Step 4. 配置 vt_setting.json (vnpy 全局设置)
+### Step 4. 配置 .env.production (P0-1/P0-2 凭证 + 路径外置)
+
+**4a. 拷贝 .env.example → .env.production** (后者在 .gitignore, 不会被提交):
 
 ```powershell
-# 默认路径: C:\Users\{user}\.vntrader\vt_setting.json
-# 关键字段:
-{
-  "datafeed.name": "tushare_pro",
-  "datafeed.username": "test",
-  "datafeed.password": "<your tushare token>",   # ← 必填!
-  "log.active": true,
-  "log.level": 20,
-  "log.file": true,
-  ...
-}
+cd F:\Quant\vnpy\vnpy_strategy_dev
+copy .env.example .env.production
+notepad .env.production
 ```
 
-⚠️ **凭证管理**: tushare token 不要 commit. 部署机一次性复制,
-权限限定到运行账户. 详见 [operations.md §凭证安全](operations.md).
+**4b. 填实际值**:
 
-### Step 5. 配置数据目录 + env
+```bash
+# .env.production 关键字段
+TUSHARE_TOKEN=<你的 tushare token>
+QMT_ACCOUNT=<券商资金账号>
+QMT_CLIENT_PATH=E:/迅投极速交易终端 睿智融科版/userdata_mini
+
+QS_DATA_ROOT=D:/vnpy_data
+ML_OUTPUT_ROOT=D:/ml_output
+VNPY_MODEL_ROOT=D:/vnpy_data/models
+INFERENCE_PYTHON=E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe
+
+ML_DAILY_INGEST_ENABLED=1                              # 实盘必须 1
+STRATEGIES_CONFIG=config/strategies.production.yaml   # 默认值
+```
+
+**4c. 设 vt_setting.json 也读 env** (vnpy 框架本身的 datafeed.password 还要填):
 
 ```powershell
-# 数据根 (统一 D:)
+notepad C:\Users\$env:USERNAME\.vntrader\vt_setting.json
+# 改成 (datafeed.password 取 env, 但 vt_setting.json 不支持 ${} 语法,
+# 需要部署脚本启动期注入或直接填具体值)
+```
+
+⚠️ **加固建议** (上线后 ~2 周升级到 Windows Credential Manager / DPAPI 加密):
+- 当前 .env.production 存硬盘, 文件 ACL 限定到运行账户
+- 不要 commit (`.gitignore` 已配)
+- 不要复制到代码评审工具 / 截屏 / 邮件
+
+### Step 5. 配置数据目录
+
+```powershell
+# 数据根 (统一 D:, 路径与 .env.production 一致)
 mkdir D:\vnpy_data
 mkdir D:\vnpy_data\snapshots\merged
 mkdir D:\vnpy_data\snapshots\filtered
@@ -182,16 +203,10 @@ mkdir D:\vnpy_data\state           # replay_history.db (A1/B2)
 mkdir D:\vnpy_data\models          # bundle 部署目录
 mkdir D:\vnpy_data\jq_index        # 聚宽成分股 CSV
 mkdir D:\ml_output                 # 策略每日产物
-
-# 关键 env (Machine scope)
-setx QS_DATA_ROOT "D:/vnpy_data" /M
-setx ML_DAILY_INGEST_ENABLED "1" /M  # 关键! 启 20:00 cron
-setx ML_OUTPUT_ROOT "D:/ml_output" /M
-setx VNPY_MODEL_ROOT "D:/vnpy_data/models" /M
-setx INFERENCE_PYTHON "E:/ssd_backup/.../python-3.11.0-amd64/python.exe" /M
 ```
 
-⚠️ env 改动后**重启所有 PowerShell** 才生效.
+⚠️ **不再需要 setx Machine env** — 所有路径 由 .env.production 提供, 由
+`run_ml_headless.py` 启动期 `load_dotenv()` 加载.
 
 ### Step 6. 准备聚宽成分股 CSV
 
@@ -237,27 +252,44 @@ rsync -avz qs_exports/rolling_exp/<run_id>/ user@deploy_host:D:/vnpy_data/models
 
 bundle 含: `params.pkl, task.json, manifest.json, filter_config.json` (5 个文件).
 
-### Step 9. 改 run_ml_headless.py 配置
+### Step 9. 配置 strategies.production.yaml (P0-2 路径外置)
 
-```python
-# F:/Quant/vnpy/vnpy_strategy_dev/run_ml_headless.py 顶部改:
-
-# 9a. STRATEGIES 中 bundle_dir 指向 Step 8 拷过来的目录
-STRATEGIES = [
-    {
-        "strategy_name": "csi300_live",
-        "strategy_class": "QlibMLStrategy",
-        "gateway_name": "QMT",   # 或 "QMT_SIM_xxx"
-        "setting_override": {
-            "bundle_dir": r"D:/vnpy_data/models/<run_id>",  # ← 改这里
-            "topk": 7, "n_drop": 1,
-            "trigger_time": "21:00",
-        },
-    },
-]
-
-# 9b. GATEWAYS 选实盘 / 模拟 / 双轨 (详见 dual_track.md §3)
+```powershell
+# 9a. 拷贝 example → production (后者在 .gitignore, 不会被提交)
+copy F:\Quant\vnpy\vnpy_strategy_dev\config\strategies.example.yaml ^
+     F:\Quant\vnpy\vnpy_strategy_dev\config\strategies.production.yaml
+notepad F:\Quant\vnpy\vnpy_strategy_dev\config\strategies.production.yaml
 ```
+
+**9b. 改三处**:
+
+```yaml
+# config/strategies.production.yaml
+
+# 1. gateways: 选实盘 / 模拟 / 双轨 (详见 ../docs/dual_track.md §3)
+gateways:
+  - kind: live          # 实盘 (改这一行 sim → live)
+    name: QMT
+    base: qmt_live      # ${QMT_ACCOUNT} / ${QMT_CLIENT_PATH} 自动从 .env 取
+
+# 2. strategies[*].setting_override.bundle_dir: 指向 Step 8 拷过来的目录
+strategies:
+  - strategy_name: csi300_live
+    strategy_class: QlibMLStrategy
+    gateway_name: QMT
+    setting_override:
+      bundle_dir: "${VNPY_MODEL_ROOT}/<run_id_from_step_8>"
+      topk: 7
+      n_drop: 1
+      trigger_time: "21:00"
+
+# 3. (可选) 加双轨影子策略 — 详见 dual_track.md §3 模式 C
+```
+
+⚠️ **不再改 run_ml_headless.py 任何代码** — `STRATEGIES` / `GATEWAYS` /
+`STRATEGY_BASE_SETTING` 都从 yaml 读, 切环境直接换 yaml 文件. 测试 / 生产 /
+影子配置可同时存在 (`strategies.staging.yaml` / `strategies.production.yaml`),
+通过 env `STRATEGIES_CONFIG` 切换.
 
 ### Step 10. 配置 miniqmt (实盘必须)
 

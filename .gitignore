@@ -50,8 +50,23 @@ lab/
 
 # Local secrets (do not commit)
 vnpy_signal_strategy/mysql_signal_setting.json
+
+# P0-1 凭证 / P0-2 路径外置 (.env + yaml configs)
+# .env / .env.production / .env.staging / .env.local 等都忽略
+# 唯独 .env.example 必须提交 (给新部署者参考)
 .env
 .env.*
+!.env.example
+
+# config/strategies.production.yaml / .staging.yaml / .local.yaml 等忽略
+# 唯独 config/strategies.example.yaml 必须提交
+config/*.production.yaml
+config/*.staging.yaml
+config/*.local.yaml
+config/*.production.yml
+config/*.staging.yml
+config/*.local.yml
+
 stock_data
 api.json
 vnpy_tushare

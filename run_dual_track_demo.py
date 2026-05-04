@@ -34,7 +34,6 @@ P2-1 实盘 / 模拟双轨架构 — 一键演示脚本
 """
 
 import argparse
-import hashlib
 import os
 import shutil
 import signal
@@ -52,26 +51,43 @@ _HERE = Path(__file__).resolve().parent
 _CORE_DIR = _HERE / "vendor" / "qlib_strategy_core"
 if _CORE_DIR.exists() and str(_CORE_DIR) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR))
+
+# P0-1/P0-2: load .env (与 run_ml_headless 同源逻辑)
+from dotenv import load_dotenv  # noqa: E402
+
+_DOTENV_FILE = os.getenv("DOTENV_FILE")
+if _DOTENV_FILE and (_HERE / _DOTENV_FILE).exists():
+    load_dotenv(_HERE / _DOTENV_FILE, override=False)
+elif (_HERE / ".env.production").exists():
+    load_dotenv(_HERE / ".env.production", override=False)
+elif (_HERE / ".env").exists():
+    load_dotenv(_HERE / ".env", override=False)
+
 _QLIB_SOURCE = Path(os.getenv("QLIB_SOURCE_ROOT", r"F:\Quant\code\qlib_strategy_dev"))
 if (_QLIB_SOURCE / "qlib" / "__init__.py").exists() and str(_QLIB_SOURCE) not in sys.path:
     sys.path.insert(0, str(_QLIB_SOURCE))
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
-os.environ.setdefault("QS_DATA_ROOT", r"D:/vnpy_data")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 配置常量 (与 run_ml_headless.py 中 STRATEGY_BASE_SETTING / QMT_SIM_BASE 相同)
+# 配置常量 (从 .env 读)
 # ═══════════════════════════════════════════════════════════════════════════
 
-# 选 csi300_lgb_headless (bundle f6017) 作 demo 唯一示例策略.
-# 训练 run_id, 与 run_ml_headless STRATEGIES[0] 一致.
+# 选 csi300_lgb_headless (bundle f6017) 作 demo 示例策略 (与 strategies.production.yaml 一致).
+# .env 没配 VNPY_MODEL_ROOT 时报错 (不留兼容默认).
+_VNPY_MODEL_ROOT = os.environ.get("VNPY_MODEL_ROOT")
+if not _VNPY_MODEL_ROOT:
+    raise RuntimeError(
+        "VNPY_MODEL_ROOT 未设. 检查 .env / .env.production 是否含此字段."
+    )
 DEMO_BUNDLE_DIR = os.getenv(
-    "DEMO_BUNDLE_DIR",
-    r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964",
+    "DEMO_BUNDLE_DIR",  # demo 专用覆盖, 默认走 .env VNPY_MODEL_ROOT + 默认 run_id
+    f"{_VNPY_MODEL_ROOT}/f6017411b44c4c7790b63c5766b93964",
 )
 
-# 基础 setting (sim gateway 共享)
+# 基础 setting (sim gateway 共享, 与 strategies.production.yaml 中 qmt_sim 同源)
+_QS_DATA_ROOT = os.environ.get("QS_DATA_ROOT") or "D:/vnpy_data"
 QMT_SIM_BASE_SETTING: Dict[str, Any] = {
     "模拟资金": 1_000_000.0,
     "部分成交率": 0.0,
@@ -81,29 +97,32 @@ QMT_SIM_BASE_SETTING: Dict[str, Any] = {
     "报单上报延迟毫秒": 0,
     "卖出持仓不足拒单": "是",
     "行情源": "merged_parquet",
-    "merged_parquet_merged_root": r"D:\vnpy_data\snapshots\merged",
+    "merged_parquet_merged_root": f"{_QS_DATA_ROOT}/snapshots/merged",
     "merged_parquet_reference_kind": "today_open",
     "merged_parquet_fallback_days": 10,
     "merged_parquet_stale_warn_hours": 48,
     "启用持久化": "是",
-    "持久化目录": r"F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state",
+    "持久化目录": str(_HERE / "vnpy_qmt_sim" / ".trading_state"),
 }
 
-# 实盘 miniqmt 默认 setting (V3 用, 需要券商仿真账户)
+# 实盘 miniqmt 默认 setting (V3 用; 资金账号 由 --qmt-account 注入, 路径走 .env)
 QMT_SETTING_TEMPLATE: Dict[str, Any] = {
     "资金账号": "",   # ← V3 必填 (--qmt-account)
-    "客户端路径": r"E:\迅投极速交易终端 睿智融科版\userdata_mini",
+    "客户端路径": os.getenv(
+        "QMT_CLIENT_PATH",
+        r"E:/迅投极速交易终端 睿智融科版/userdata_mini",
+    ),
 }
 
 STRATEGY_BASE_SETTING: Dict[str, Any] = {
-    "inference_python": os.getenv(
+    "inference_python": os.environ.get(
         "INFERENCE_PYTHON",
         r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
     ),
-    "provider_uri": os.getenv("QS_PROVIDER_URI", f"{os.environ['QS_DATA_ROOT']}/qlib_data_bin"),
+    "provider_uri": f"{_QS_DATA_ROOT}/qlib_data_bin",
     "trigger_time": "21:00",
     "buy_sell_time": "09:26",
-    "output_root": os.getenv("ML_OUTPUT_ROOT", r"D:/ml_output"),
+    "output_root": os.environ.get("ML_OUTPUT_ROOT", "D:/ml_output"),
     "lookback_days": 60,
     "subprocess_timeout_s": 300,
     "baseline_path": "",
