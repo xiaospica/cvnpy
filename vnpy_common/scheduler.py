@@ -11,6 +11,34 @@ from apscheduler.triggers.cron import CronTrigger
 from loguru import logger
 
 
+# P1-4: 启动期硬校验 OS local time 与 APScheduler 时区一致.
+# Windows Server 默认 UTC, 跑 cron '21:00' 实际是北京 5:00 — 完全错档.
+# 即使 APScheduler 用自己的 timezone 调度, 策略日志 / 逻辑日 计算仍依赖
+# datetime.now() (OS local), 时区错位会引发隐蔽 bug (非交易日误判 / settle
+# 时点偏移). 启动期硬告警提示用户配置 NTP + tzutil.
+def _check_os_timezone(expected_tz: str) -> None:
+    """启动期对比 OS 时区与 expected_tz, 不一致时 log error (不 raise, 让用户决定)."""
+    try:
+        import tzlocal
+        local_tz = tzlocal.get_localzone_name()
+    except Exception as exc:
+        logger.warning(
+            f"[scheduler] 无法检测 OS 时区 (tzlocal 异常: {exc}); 跳过校验"
+        )
+        return
+    if local_tz != expected_tz:
+        logger.error(
+            f"[scheduler] ⚠️ OS 时区 {local_tz!r} ≠ APScheduler 时区 "
+            f"{expected_tz!r}. cron 时间会与 datetime.now() 错位 N 小时, "
+            f"可能引发非交易日误判 / settle 时点偏移.\n"
+            f"  → Windows: tzutil /s \"China Standard Time\"\n"
+            f"  → 或在系统设置改时区 + w32tm /resync\n"
+            f"  详见 vnpy_ml_strategy/docs/operations.md §NTP 时钟同步."
+        )
+    else:
+        logger.info(f"[scheduler] OS 时区 = APScheduler 时区 = {expected_tz}")
+
+
 @dataclass(frozen=True)
 class DailyJobConfig:
     job_id: str
@@ -40,6 +68,8 @@ class DailyTimeTaskScheduler:
         with self._lock:
             if self._started:
                 return
+            # P1-4: 启动期校验 OS 时区与 APScheduler 一致 (仅 log, 不 raise)
+            _check_os_timezone(str(self.tz))
             self._scheduler.start()
             self._started = True
 

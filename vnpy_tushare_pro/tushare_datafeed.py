@@ -186,7 +186,8 @@ class TushareDatafeedPro(BaseDatafeed):
           {QS_DATA_ROOT}/jq_index/hs300_*.csv                        (聚宽成分股 CSV)
 
         覆盖:
-          ML_DAILY_INGEST_ENABLED    "1" 启用 (默认 "0" 关闭, 向后兼容老部署)
+          ML_DAILY_INGEST_ENABLED    "1" 启用 (默认 "1"; 实盘必须 1,
+                                     设 "0" 仅用于无 tushare 的研发机)
           ML_MERGED_PARQUET_PATH     显式指定, 覆盖 QS_DATA_ROOT 默认
           ML_BY_STOCK_CSV_DIR
           ML_QLIB_DIR
@@ -203,7 +204,8 @@ class TushareDatafeedPro(BaseDatafeed):
           ``{filter_id}_{T}.parquet``. 启动期由 ``run_ml_headless.py`` 调用
           ``ml_engine.list_active_filter_configs()`` 收集 + 注入此 pipeline.
         """
-        if os.getenv("ML_DAILY_INGEST_ENABLED", "0") != "1":
+        # P0-3: 默认 "1" (实盘默认必启). 显式设 "0" 才关闭 (研发机无 tushare 时).
+        if os.getenv("ML_DAILY_INGEST_ENABLED", "1") != "1":
             return None
 
         import json

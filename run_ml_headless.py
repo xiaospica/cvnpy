@@ -399,10 +399,15 @@ def main() -> int:
             ts_datafeed = ts_engine._get_tushare_datafeed()
             ts_pipeline = getattr(ts_datafeed, "daily_ingest_pipeline", None)
             if ts_pipeline is None:
-                print(
-                    "[headless] WARN: TushareDatafeedPro.daily_ingest_pipeline 为 None "
-                    "(ML_DAILY_INGEST_ENABLED 未设为 1?), 跳过 filter_chain_specs 注入. "
-                    "20:00 cron 无效, 也无法做实时推理."
+                # P0-3: ML_DAILY_INGEST_ENABLED 显式设 "0" (默认 "1" 启用)
+                # 实盘 / 模拟回放都依赖 daily_ingest 产 filter snapshot, 没它
+                # 21:00 推理走 strict raise. 这里直接 abort 让用户感知.
+                raise RuntimeError(
+                    "DailyIngestPipeline 未启用 (ML_DAILY_INGEST_ENABLED='0').\n"
+                    "实盘 / 回放都需要它产 filter snapshot, 否则 21:00 推理将"
+                    "因 'filter snapshot 不存在' raise.\n"
+                    "解决: 在 .env.production 中设 ML_DAILY_INGEST_ENABLED=1, "
+                    "或 (仅研发机无 tushare) 显式删除该策略."
                 )
             else:
                 specs = ml_engine.list_active_filter_configs()
