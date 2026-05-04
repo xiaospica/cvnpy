@@ -1,6 +1,6 @@
 """画 vnpy 回放权益曲线 vs qlib backtest 复利累积收益率对比图.
 
-输出: docs/equity_curve_comparison{_suffix}.png
+输出: vnpy_ml_strategy/test/result/equity_curve_comparison{_suffix}.png
 
 数据源:
   - vnpy: mlearnweb db strategy_equity_snapshots replay_settle
@@ -30,7 +30,7 @@ sys.path.insert(0, str(_ROOT / "vendor" / "qlib_strategy_core"))  # qlib (unpick
 
 QLIB_BT_REPORT = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest/report_normal_1day.pkl")
 MLEARNWEB_DB = Path(r"f:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db")
-OUT_DIR = Path(r"f:/Quant/vnpy/vnpy_strategy_dev/docs")
+OUT_DIR = Path(__file__).resolve().parent / "result"
 INIT_CASH = 1_000_000.0
 
 

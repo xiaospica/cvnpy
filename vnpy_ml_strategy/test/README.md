@@ -16,7 +16,7 @@
 | 脚本     | `generate_qlib_ground_truth.py`   | **生成 qlib ground truth**(positions\_normal\_1day.pkl + report\_normal\_1day.pkl + pred.pkl)给 e2e 测试消费 |
 | 脚本     | `diagnose_holdings_diverge.py`    | 持仓集合 diverge 诊断 — 逐日 dump 找 first divergence day                                                      |
 | 脚本     | `diagnose_weight_offset.py`       | weight 残余偏差归因(整百取整 + 撮合价分母 vs settle 浮点累积)                                                            |
-| 脚本     | `plot_equity_curve_comparison.py` | 出对比图 `docs/equity_curve_comparison.png`                                                               |
+| 脚本     | `plot_equity_curve_comparison.py` | 出对比图 `vnpy_ml_strategy/test/result/equity_curve_comparison.png`                                                               |
 | smoke  | `smoke_subprocess.py`             | 单进程 → QlibPredictor → subprocess 推理(最小链路)                                                             |
 | smoke  | `smoke_engine_rpc.py`             | MLEngine + WebTrader RPC + 派生 webtrader uvicorn                                                       |
 | smoke  | `smoke_full_pipeline.py`          | 全栈一键(含 mlearnweb live\_main 子进程 + ml\_snapshot\_loop tick)                                            |
@@ -242,7 +242,7 @@ F:/Program_Home/vnpy/python.exe vnpy_ml_strategy/test/diagnose_holdings_diverge.
 
 **目的**: 把 vnpy / qlib 权益曲线渲染成 3-panel matplotlib chart(累积收益率叠加 + diff + 日收益率 diff),方便人眼校验。
 
-**输出**: `docs/equity_curve_comparison.png`
+**输出**: `vnpy_ml_strategy/test/result/equity_curve_comparison.png`
 
 **运行**:
 
@@ -323,7 +323,7 @@ F:/Program_Home/vnpy/python.exe -m pytest \
 
 # 7. 出对比图
 F:/Program_Home/vnpy/python.exe vnpy_ml_strategy/test/plot_equity_curve_comparison.py
-# 浏览 docs/equity_curve_comparison.png
+# 浏览 vnpy_ml_strategy/test/result/equity_curve_comparison.png
 
 # 8. 任一测试 FAIL → 跑诊断脚本(均不需要 pytest)
 F:/Program_Home/vnpy/python.exe vnpy_ml_strategy/test/diagnose_holdings_diverge.py
