@@ -97,6 +97,8 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         "replay_start_date",              # 可选 override，空则从 bundle task.json test[0] 推导
         "replay_end_date",                # 可选 override，空则取 today-1
         "replay_skip_existing",           # 跳过已写过 diagnostics.json 的日期（重启续跑友好）
+        # P2-1 双轨架构: 影子策略复用上游 selections.parquet, 不跑自己的推理
+        "signal_source_strategy",         # 上游策略名 (空 = 自己跑推理, 默认行为)
     ]
     variables: List[str] = [
         "last_run_date",
@@ -139,6 +141,10 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     replay_start_date: str = ""
     replay_end_date: str = ""
     replay_skip_existing: bool = True
+
+    # P2-1 双轨架构: signal_source_strategy 非空时本策略不跑推理, 复用
+    # output_root/{signal_source_strategy}/{day}/selections.parquet (NTFS hardlink).
+    signal_source_strategy: str = ""
 
     # Runtime state
     last_run_date: str = ""
@@ -340,6 +346,11 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             ``--live-end`` 也走该日期），让回放循环可以"假装今天是 X 日"逐日跑过历史。
             默认 None → ``date.today()``，保持实盘 trigger_time / 单日手动触发行为不变。
 
+        P2-1 双轨: ``signal_source_strategy`` 非空时本策略**不跑推理**, 复用上游
+        ``output_root/{signal_source_strategy}/{day}/selections.parquet``
+        (NTFS hardlink, 跨盘 fallback 到 copy). 后续 09:26 rebalance 仍按本策略
+        gateway 发单, 撮合走自己的 sim/live gateway → 信号同步而撮合可对照.
+
         try/finally 包整个函数体: 任意 return 路径 (non_trading_day/predict 异常/
         failed/empty/正常完成) 都会触发一次 ``put_strategy_event``, 让 UI variables
         表刷新最新 last_status/last_n_pred/last_error 等. 否则 UI 永远停在初始值.
@@ -353,6 +364,15 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             if not self._is_trade_day(today):
                 self.write_log(f"non-trading day {today}, pipeline skipped")
                 self._emit_heartbeat(reason="non_trading_day")
+                return
+
+            # P2-1: 影子策略复用上游 selections.parquet, 跳过推理 + persist.
+            if self.signal_source_strategy:
+                self._link_selections_from_upstream(today)
+                # 不调 _publish_metrics — 影子的 metrics 应来自上游 (mlearnweb 端
+                # 用 strategy_name 过滤拉到上游的 metrics 即可, 影子自己的 metrics
+                # 永远空白).
+                self.last_status = InferenceStatus.OK.value
                 return
 
             self.last_stage = Stage.PREDICT.value
@@ -451,6 +471,60 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
     def _is_trade_day(self, d: date) -> bool:
         return self.signal_engine.is_trade_day(d)
+
+    def _link_selections_from_upstream(self, day: date) -> None:
+        """P2-1 双轨: 把上游策略当日产物 hardlink 到本策略 output_root.
+
+        上游 = output_root/{signal_source_strategy}/{day}/
+        本策略 = output_root/{strategy_name}/{day}/
+        关键文件: selections.parquet / predictions.parquet / diagnostics.json /
+                  metrics.json (有就 link, 缺也不报错).
+
+        用 NTFS hardlink 而非 copy:
+          * 零额外存储 (同 inode)
+          * 上游产物覆盖 = 影子产物自动同步 (同 inode 无需重新 link)
+          * 同盘场景才能 hardlink (NTFS 单卷限制), 跨盘 fallback 到 shutil.copy2
+        """
+        import os as _os
+        import shutil as _shutil
+        from pathlib import Path as _Path
+
+        day_str = day.strftime("%Y%m%d")
+        src_dir = _Path(self.output_root) / self.signal_source_strategy / day_str
+        dst_dir = _Path(self.output_root) / self.strategy_name / day_str
+
+        if not src_dir.exists():
+            self.write_log(
+                f"[shadow] day {day} 上游 {self.signal_source_strategy!r} "
+                f"产物未就绪 ({src_dir}), 跳过 link. (上游可能还在跑或失败)"
+            )
+            self.last_status = InferenceStatus.EMPTY.value
+            return
+
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        n_linked = 0
+        for fname in ("selections.parquet", "predictions.parquet",
+                      "diagnostics.json", "metrics.json"):
+            src = src_dir / fname
+            if not src.exists():
+                continue
+            dst = dst_dir / fname
+            if dst.exists():
+                try:
+                    dst.unlink()
+                except OSError:
+                    pass
+            try:
+                _os.link(str(src), str(dst))   # NTFS hardlink (同卷)
+            except OSError:
+                # 跨盘或 NTFS 不支持 hardlink → fallback copy
+                _shutil.copy2(str(src), str(dst))
+            n_linked += 1
+
+        self.write_log(
+            f"[shadow] day {day} 已 link {n_linked} 个产物 "
+            f"from {self.signal_source_strategy!r} (output_root: {src_dir.parent})"
+        )
 
     # -----------------------------------------------------------------
     # buy_sell_time cron 入口 (实盘 09:26 — 双 cron 架构)
@@ -1266,36 +1340,45 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
         # Phase A: 批量推理（一次子进程产出所有日 predictions/diagnostics）
         # 跳过已有 batch_mode diagnostics 的窗口（续跑幂等）
-        need_batch_predict = self._need_batch_predict(days)
-        if need_batch_predict:
-            self.write_log(f"[replay] batch predict {start} ~ {end} ({total} 交易日)，spawning 一个推理子进程...")
-            try:
-                stats = self.signal_engine.run_inference_range(
-                    bundle_dir=self.bundle_dir,
-                    range_start=start,
-                    range_end=end,
-                    lookback_days=self.lookback_days,
-                    strategy_name=self.strategy_name,
-                    inference_python=self.inference_python,
-                    output_root=self.output_root,
-                    provider_uri=self.provider_uri,
-                    baseline_path=self.baseline_path or None,
-                    timeout_s=max(3600, total * 30),  # 给充足余量
-                )
-                self.write_log(
-                    f"[replay] batch predict done: {stats.get('n_days_with_data')} days have data "
-                    f"of {stats.get('n_days_total')} total (returncode={stats.get('returncode')})"
-                )
-                if stats.get("returncode") != 0:
-                    err = stats.get("stderr_tail", "")
-                    self.write_log(f"[replay] batch subprocess returned non-zero. stderr tail:\n{err}")
-            except Exception as exc:
-                self.write_log(
-                    f"[replay] batch predict 异常: {type(exc).__name__}: {exc} — "
-                    f"会逐日 fallback 到单日 run_pipeline_now"
-                )
+        # P2-1: 影子策略不跑自己推理, 改成逐日 link 上游产物
+        if self.signal_source_strategy:
+            self.write_log(
+                f"[replay] 影子策略 signal_source={self.signal_source_strategy!r}, "
+                f"跳过 batch predict, 逐日 link 上游 selections.parquet"
+            )
+            for day in days:
+                self._link_selections_from_upstream(day)
         else:
-            self.write_log("[replay] 已有 batch_mode diagnostics 覆盖整个窗口，跳过批量推理（续跑）")
+            need_batch_predict = self._need_batch_predict(days)
+            if need_batch_predict:
+                self.write_log(f"[replay] batch predict {start} ~ {end} ({total} 交易日)，spawning 一个推理子进程...")
+                try:
+                    stats = self.signal_engine.run_inference_range(
+                        bundle_dir=self.bundle_dir,
+                        range_start=start,
+                        range_end=end,
+                        lookback_days=self.lookback_days,
+                        strategy_name=self.strategy_name,
+                        inference_python=self.inference_python,
+                        output_root=self.output_root,
+                        provider_uri=self.provider_uri,
+                        baseline_path=self.baseline_path or None,
+                        timeout_s=max(3600, total * 30),  # 给充足余量
+                    )
+                    self.write_log(
+                        f"[replay] batch predict done: {stats.get('n_days_with_data')} days have data "
+                        f"of {stats.get('n_days_total')} total (returncode={stats.get('returncode')})"
+                    )
+                    if stats.get("returncode") != 0:
+                        err = stats.get("stderr_tail", "")
+                        self.write_log(f"[replay] batch subprocess returned non-zero. stderr tail:\n{err}")
+                except Exception as exc:
+                    self.write_log(
+                        f"[replay] batch predict 异常: {type(exc).__name__}: {exc} — "
+                        f"会逐日 fallback 到单日 run_pipeline_now"
+                    )
+            else:
+                self.write_log("[replay] 已有 batch_mode diagnostics 覆盖整个窗口，跳过批量推理（续跑）")
 
         # Phase B: 逐日推进
         # 真实策略时序：T 日 20:00 推理 → T+1 日 09:30 开盘 rebalance → T+1 日收盘 settle
