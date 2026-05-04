@@ -249,3 +249,59 @@ def test_schema_migration_adds_reference_to_old_db(tmp_path: Path) -> None:
         assert old[1] is None
     finally:
         p.close()
+
+
+# ---------------------------------------------------------------------------
+# P0-5: stale lockfile 检测 + 自动清理
+# ---------------------------------------------------------------------------
+
+
+def test_stale_lockfile_with_dead_pid_auto_cleared(tmp_path: Path) -> None:
+    """[P0-5] lockfile 残留 dead PID 时自动清理 + 新进程拿锁成功.
+
+    Windows msvcrt.locking 锁定 byte 0 → Path.read_text 在持有期会 PermissionError,
+    所以验证 PID 内容必须 close() 后. 这也是最终用户视角 (停服后查 lockfile).
+    """
+    import os
+    lock_path = tmp_path / "sim_X.lock"
+    # 写一个一定不存在的 PID (Linux/Windows 上都用 9999999, psutil.pid_exists False)
+    lock_path.write_text("9999999\n", encoding="utf-8")
+
+    # 不应 raise — stale PID 自动清理
+    p = QmtSimPersistence(account_id="X", root=tmp_path)
+    p.close()
+
+    # close 后读, 应该是当前进程 PID
+    pid_in_file = lock_path.read_text(encoding="utf-8").strip()
+    assert pid_in_file == str(os.getpid())
+
+
+def test_stale_lockfile_with_alive_pid_rejects(tmp_path: Path) -> None:
+    """[P0-5] lockfile PID 是当前进程 (psutil 视为 alive), 不应清理而是 raise."""
+    import os
+    from vnpy_qmt_sim.persistence import AccountAlreadyLockedError
+
+    lock_path = tmp_path / "sim_Y.lock"
+    # 用当前进程 PID — psutil.pid_exists 必返 True
+    lock_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    # 第一个 persistence 实例占用 lock
+    p1 = QmtSimPersistence(account_id="Y", root=tmp_path)
+    try:
+        # 第二个实例同 account_id 应该被拒绝 (进程内 _try_acquire_lock 会失败)
+        with pytest.raises(AccountAlreadyLockedError):
+            QmtSimPersistence(account_id="Y", root=tmp_path)
+    finally:
+        p1.close()
+
+
+def test_lockfile_writes_current_pid(tmp_path: Path) -> None:
+    """[P0-5] 启动后 lockfile 写入当前 PID, 便于运维查谁占用.
+
+    Windows msvcrt.locking 持有期 byte 0 锁定 → 必须 close 后再读.
+    """
+    import os
+    p = QmtSimPersistence(account_id="Z", root=tmp_path)
+    p.close()
+    content = (tmp_path / "sim_Z.lock").read_text(encoding="utf-8").strip()
+    assert content == str(os.getpid())

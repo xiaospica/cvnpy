@@ -46,6 +46,40 @@ def _try_acquire_lock(fd: int) -> bool:
             return False
 
 
+def _read_pid_from_lockfile(lock_path: Path) -> Optional[int]:
+    """读取 lockfile 中持有进程 PID。若内容为空 / 非数字返回 None.
+
+    [P0-5] 用于启动期检测残留 lockfile: 若 PID 不再存在, 视为旧崩溃残留, 清理重建.
+    """
+    try:
+        text = lock_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text:
+        return None
+    try:
+        return int(text.split("\n", 1)[0])
+    except ValueError:
+        return None
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """[P0-5] 用 psutil 判断 PID 是否还活着. psutil 缺失时退化为 True (保守不清理).
+
+    psutil.pid_exists 在 Windows 上看 PID 是否在系统进程表里, 不区分 PID 重用,
+    但对于 vnpy_headless 这种单进程长跑场景, 重用 PID 概率极低. 真正撞上时
+    新进程会直接拿到 lock (旧 PID 已死), 跟着 _try_acquire_lock 还会再 gate 一次.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return True
+    try:
+        return psutil.pid_exists(pid)
+    except Exception:
+        return True
+
+
 def _release_lock(fd: int) -> None:
     if sys.platform == "win32":
         try:
@@ -137,16 +171,42 @@ class QmtSimPersistence:
         self.lock_path = self.root / f"sim_{account_id}.lock"
         self._lock = threading.RLock()
 
+        # [P0-5] 加锁前先做"残留 PID 健康检查":
+        # 上次进程崩溃 (TerminateProcess / Ctrl+Break / OS 重启) 偶尔会残留
+        # 文件锁状态 + lockfile 内容. 通过读 PID + psutil.pid_exists 判定 stale,
+        # 然后删 lockfile 重建 (此时 OS 已经把旧 fd 释放, 新 lockfile 锁可拿).
+        # 真正多进程并发活的 PID 仍能正常被 _try_acquire_lock 拒绝.
+        if self.lock_path.exists():
+            old_pid = _read_pid_from_lockfile(self.lock_path)
+            if old_pid is not None and not _is_pid_alive(old_pid):
+                logger.warning(
+                    "[persistence] 发现 stale lockfile %s (PID=%d 已不存在), 自动清理",
+                    self.lock_path, old_pid,
+                )
+                try:
+                    self.lock_path.unlink()
+                except OSError:
+                    pass
+
         self._lock_fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT)
         if not _try_acquire_lock(self._lock_fd):
+            # 二次 gate: 若 lock 被占, 再读一次 PID 给出有用错误信息.
             os.close(self._lock_fd)
             self._lock_fd = -1
+            current_pid = _read_pid_from_lockfile(self.lock_path)
+            holder_hint = (
+                f"持有进程 PID={current_pid}" if current_pid else "持有进程未写入 PID"
+            )
             raise AccountAlreadyLockedError(
                 f"账户 {account_id!r} 的持久化文件已被另一进程占用 ({self.lock_path})。"
+                f"{holder_hint}; "
                 f"同机多进程使用同一 account_id 会导致数据竞争；请用不同的 account_id "
                 f"（默认 = gateway_name），或确认前一进程已退出后删除 lock 文件。"
             )
         try:
+            # truncate 后写入当前 PID, 覆盖旧值
+            os.ftruncate(self._lock_fd, 0)
+            os.lseek(self._lock_fd, 0, os.SEEK_SET)
             os.write(self._lock_fd, f"{os.getpid()}\n".encode("utf-8"))
         except OSError:
             pass

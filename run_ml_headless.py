@@ -108,6 +108,14 @@ if not _STRATEGIES_YAML.is_absolute():
 _CFG = _load_yaml_config(_STRATEGIES_YAML)
 
 
+# ─── P1-2: loguru 日志滚动 (在加载 yaml 后, 业务模块 import 前) ─────────
+# vnpy / engine / scheduler 都用 loguru. 这里配置 100MB rotation + 14 天
+# retention + zip 压缩, 防止无 rotation 几周后磁盘塞满.
+from vnpy_common.log_setup import setup_logger  # noqa: E402
+
+setup_logger(process_name="vnpy_headless")
+
+
 # ─── 从 yaml 解析 GATEWAYS / STRATEGIES / 共享 base setting ─────────────
 
 def _build_gateways(cfg: dict) -> list:

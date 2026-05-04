@@ -389,16 +389,15 @@ nssm restart mlearnweb_live
 
 (详见 [`docs/deployment_windows.md`](../../docs/deployment_windows.md) P1)
 
-### 5.1 日志无 rotation
+### 5.1 日志 rotation (P1-2 已落地)
 
-loguru 默认不滚动, NSSM stdout/stderr 也不. 几周后磁盘满.
+`vnpy_common/log_setup.py` 在 `run_ml_headless.py` 启动期调一次, loguru 文件
+sink 自动按 100MB / 14 天 / zip 压缩滚动. 输出位于 `${LOG_ROOT}/vnpy_headless_{date}.log`
+(默认 `D:/vnpy_logs/`). NSSM 自身的 AppRotateFiles 也开了, 双层兜底.
 
-**解决 (TODO)**: vnpy 主入口加:
-```python
-from loguru import logger
-logger.add("D:/vnpy_logs/vnpy_headless_{time:YYYY-MM-DD}.log",
-           rotation="100 MB", retention="14 days", compression="zip")
-```
+**仍待加** (P1-2.b): mlearnweb 端 (live_main / app.main) 同样接入 setup_logger,
+当前 mlearnweb 用 stdlib logging 没 rotation. 短期不阻断, 因为 NSSM stdout/stderr
+仍兜底.
 
 ### 5.2 监控告警 (P1-3 Plan A 已落地, SaaS 待升级)
 
@@ -408,25 +407,49 @@ logger.add("D:/vnpy_logs/vnpy_headless_{time:YYYY-MM-DD}.log",
 - 09:26 send_order 拒单率 / 资金不足比例 → alerter 复用其去重框架可加
 - "vnpy + mlearnweb 同时挂" 完全失明 → 接外部 Uptime Kuma 心跳监控覆盖
 
-### 5.3 NTP 时钟漂移
+### 5.3 NTP 时钟同步 (P1-7 已落地)
 
-Windows server 默认 NTP 在某些网段不可靠, A 股 09:26 时间窗严.
+A 股 09:26 时间窗严 (集合竞价 09:25 收盘), 时钟偏差 30s 就可能错挂. 已提供
+`deploy/configure_ntp.ps1` 一次性配置 ntp.ntsc.ac.cn (国家授时中心) + 阿里云
+作 fallback. 执行一次后系统服务 w32time 自动周期同步.
 
-**解决**:
 ```powershell
-w32tm /config /manualpeerlist:"ntp.ntsc.ac.cn,0x9" /syncfromflags:manual /update
-w32tm /resync
-# 监控偏差
-w32tm /query /status
+.\deploy\configure_ntp.ps1   # Administrator
+w32tm /query /status         # 验证 Source / Last Successful Sync Time
 ```
 
-### 5.4 多策略推理并发 OOM
+建议加任务计划程序每日 02:00 跑一次 `w32tm /resync /rediscover`.
 
-P1-1 已加 `_validate_trigger_time_unique` 启动期校验, 但:
-- 错峰 < 10 min 时仍可能撞峰
-- 不限制别的进程跑大事 (mlearnweb / 备份 / 杀毒) 占内存
+### 5.4 多策略推理并发 OOM (P1-1 + P1-5 已落地)
 
-**解决**: 设 NSSM AppPriority `BELOW_NORMAL_PRIORITY_CLASS` 让推理子进程不抢主流程优先级.
+- P1-1: 启动期 `_validate_trigger_time_unique` 拒绝同 trigger_time 多策略
+- P1-5: `qlib_predictor._run_subprocess_monitored` 用 `psutil` 整树 RSS 轮询,
+  超 `memory_limit_mb` (默认 12 GB, 子进程 + 子孙) 自动 kill + 抛 `InferenceOOM`,
+  不会拖崩主进程
+
+**仍可加固**:
+- NSSM AppPriority `BELOW_NORMAL_PRIORITY_CLASS` 让推理子进程不抢主流程优先级
+- 多机分布式: trigger_time 错峰也不够时按节点分摊策略
+
+### 5.5 数据备份 (P1-6 已落地)
+
+`deploy/daily_backup.ps1` 一键备份: replay_history.db / sim_db / vntrader db /
+vt_setting / .env / strategies.yaml + bundle 元数据 → 7zip / zip → 30 天 retention.
+
+```powershell
+# 任务计划程序 02:00 触发
+schtasks /create /tn "vnpy_daily_backup" `
+    /tr "powershell -File F:\Quant\vnpy\vnpy_strategy_dev\deploy\daily_backup.ps1" `
+    /sc daily /st 02:00 /ru SYSTEM
+```
+
+⚠️ **异地备份待加**: 当前仅本地 30 天; 真实生产需 rclone / aws s3 cp 推到 NAS / S3.
+
+### 5.6 SQLite lockfile 健壮性 (P0-5 已落地)
+
+`vnpy_qmt_sim/persistence.py` 启动期检测 lockfile 残留 PID, 用 `psutil.pid_exists`
+判定 stale → 自动清理重建. 进程崩溃 (TerminateProcess / OS 重启) 后再启动不
+需要人工删 .lock.
 
 ---
 

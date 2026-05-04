@@ -51,8 +51,10 @@ fanout 拉策略状态. 不依赖 vnpy_strategy_dev 仓库, 单独项目.
 
 | 文件 | 作用 |
 |---|---|
-| `install_services.ps1` | 一键装 vnpy_headless |
+| `install_services.ps1` | 一键装 vnpy_headless (NSSM) |
 | `uninstall_services.ps1` | 一键卸载 |
+| `configure_ntp.ps1` | [P1-7] 配置 NTP 同步 (国家授时中心 / 阿里云 / Windows 默认 fallback) |
+| `daily_backup.ps1` | [P1-6] 每日备份 vnpy 端关键数据 (replay_history / sim_db / vt_setting / .env / yaml + bundle 元数据) |
 | `README.md` | 本文档 |
 
 ## 前置要求
@@ -62,6 +64,18 @@ fanout 拉策略状态. 不依赖 vnpy_strategy_dev 仓库, 单独项目.
 3. `.env.production` 已配 (拷贝 [`.env.example`](../.env.example) 后填值)
 4. `config/strategies.production.yaml` 已配 (拷贝 [`config/strategies.example.yaml`](../config/strategies.example.yaml))
 5. miniqmt 客户端已装好 (kind=live 必须; kind=sim 跳过)
+
+## 上线一次性配置
+
+```powershell
+# 配置 NTP (Administrator) — 09:26 时间窗准
+.\deploy\configure_ntp.ps1
+
+# 配置每日 02:00 备份 (Administrator)
+schtasks /create /tn "vnpy_daily_backup" `
+    /tr "powershell -File F:\Quant\vnpy\vnpy_strategy_dev\deploy\daily_backup.ps1" `
+    /sc daily /st 02:00 /ru SYSTEM
+```
 
 ## 一键装
 
