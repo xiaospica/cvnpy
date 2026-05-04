@@ -8,6 +8,79 @@
 
 ---
 
+## 0. 部署拓扑总览
+
+### 图 0.1 Windows server 部署拓扑
+
+```mermaid
+flowchart TB
+    classDef proc fill:#3B82F6,stroke:#1E40AF,color:#fff
+    classDef data fill:#F59E0B,stroke:#92400E,color:#fff
+    classDef monitor fill:#10B981,stroke:#065F46,color:#fff
+    classDef external fill:#EF4444,stroke:#991B1B,color:#fff
+
+    subgraph WinServer ["Windows Server (D: 数据盘 / F: 程序盘)"]
+        direction TB
+
+        subgraph Services ["NSSM 服务 × 4"]
+            S1["vnpy_headless<br/>(F:/.../python3.13 run_ml_headless.py)"]:::proc
+            S2["vnpy_webtrader_http<br/>(uvicorn :8001)<br/>由 vnpy_headless spawn"]:::proc
+            S3["mlearnweb_research<br/>(E:/.../python3.11 :8000)"]:::monitor
+            S4["mlearnweb_live<br/>(E:/.../python3.11 :8100)"]:::monitor
+        end
+
+        subgraph Data ["数据盘 D:"]
+            QData[("D:/vnpy_data/<br/>qlib_data_bin/<br/>snapshots/<br/>state/replay_history.db<br/>models/")]:::data
+            MLOut[("D:/ml_output/<br/>{strategy}/{date}/")]:::data
+            Logs[("D:/vnpy_logs/<br/>NSSM stdout/err")]:::data
+        end
+
+        subgraph Config ["F:/Quant/vnpy/vnpy_strategy_dev/"]
+            Code["代码 + run_ml_headless.py"]:::proc
+            SimDB[("vnpy_qmt_sim/.trading_state/<br/>sim_<gateway>.db × N")]:::data
+            VTSet[("C:/Users/.../vt_setting.json<br/>(tushare token / miniqmt 路径)")]:::data
+        end
+
+        subgraph SubProc ["按需 spawn"]
+            Pred["推理子进程<br/>(qlib + lgb)<br/>Python 3.11"]:::proc
+        end
+
+        S1 --> Code
+        S1 --> VTSet
+        S1 -.spawn.-> S2
+        S1 -.spawn.-> Pred
+        S1 --> SimDB
+        Pred --> QData
+        Pred --> MLOut
+        S3 --> MLW[("F:/.../mlearnweb.db<br/>(WAL)")]:::monitor
+        S4 --> MLW
+    end
+
+    Tushare["tushare API"]:::external
+    Broker["券商 miniqmt<br/>(实盘 / 仿真)"]:::external
+    Browser["浏览器<br/>http://server:5173"]
+
+    Tushare -->|"20:00 cron 拉数据"| S1
+    S1 <-->|"实盘 RPC"| Broker
+
+    S4 -.->|"5 min<br/>fanout HTTP"| S2
+    Browser -->|"Vite proxy"| S3
+    Browser -->|"/api/live-trading"| S4
+```
+
+**端口 / 路径占用**:
+| 端口 | 服务 | 说明 |
+|---|---|---|
+| 2014 / 4102 | vnpy_webtrader RPC (zmq) | 内部, 不对外 |
+| 8001 | vnpy_webtrader HTTP REST | mlearnweb fanout 入口 |
+| 8000 | mlearnweb research | /api/training-records 等 |
+| 8100 | mlearnweb live | /api/live-trading |
+| 5173 | mlearnweb 前端 (Vite) | 浏览器访问入口 |
+
+⚠️ 当前 8001 写死, 多机部署需要 reverse proxy 或防火墙限制 (P2-3 待修).
+
+---
+
 ## 1. 服务器规格
 
 | 资源 | 最小要求 | 推荐 | 原因 |

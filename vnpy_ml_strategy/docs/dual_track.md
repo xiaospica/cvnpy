@@ -10,31 +10,47 @@
 **双轨架构 = 同一进程内, 同一份策略信号, 两个 gateway 各自撮合, 两条权益曲线
 对比.**
 
+### 图 0.1 双轨架构核心图
+
+```mermaid
+flowchart TD
+    classDef signal fill:#3B82F6,stroke:#1E40AF,color:#fff
+    classDef live fill:#EF4444,stroke:#991B1B,color:#fff
+    classDef sim fill:#10B981,stroke:#065F46,color:#fff
+    classDef monitor fill:#8B5CF6,stroke:#5B21B6,color:#fff
+
+    Bundle[("bundle/<br/>params.pkl + filter_config.json")]
+    Pred["qlib 推理子进程<br/>(spawn, 60-90s)"]:::signal
+    Sel["selections.parquet<br/>(top-K 选股)"]:::signal
+    Algo["topk_dropout_decision<br/>纯函数算法"]:::signal
+
+    Bundle --> Pred
+    Pred --> Sel
+    Sel --> Algo
+
+    Algo -->|"sells/buys<br/>instrument 集合"| LiveS
+    Algo -->|"信号同步<br/>(NTFS hardlink)"| ShadowS
+
+    subgraph Track1 ["实盘轨"]
+        LiveS["实盘策略<br/>csi300_live"]:::live
+        QMT["真 miniqmt"]:::live
+        BrokerAcct[("真券商账户<br/>(真金白银)")]:::live
+        LiveS --> QMT --> BrokerAcct
+    end
+
+    subgraph Track2 ["影子轨 (signal_source_strategy=csi300_live)"]
+        ShadowS["影子策略<br/>csi300_live_shadow"]:::sim
+        QMTSim["vnpy_qmt_sim 撮合"]:::sim
+        SimDB[("sim_QMT_SIM_shadow.db<br/>(模拟盈亏)")]:::sim
+        ShadowS --> QMTSim --> SimDB
+    end
+
+    BrokerAcct --> MLW["mlearnweb 前端<br/>实盘红 badge / 模拟绿 badge<br/>各自一条权益曲线"]:::monitor
+    SimDB --> MLW
 ```
-            qlib pred         topk_dropout_decision
-               │                         │
-               ▼                         ▼
-       selections.parquet  ────►  sells/buys instrument 集合
-                                         │
-                       ┌─────────────────┼─────────────────┐
-                       │  (信号同步)      │                 │
-                       ▼                                   ▼
-              ┌───────────────────┐         ┌───────────────────────────┐
-              │ 实盘策略           │         │ 影子策略 (signal_source_  │
-              │ csi300_live        │         │  strategy=csi300_live)    │
-              │ gateway = QMT      │         │ gateway = QMT_SIM_shadow  │
-              │ 真 miniqmt 撮合    │         │ vnpy_qmt_sim 撮合         │
-              └───────┬───────────┘         └───────────┬───────────────┘
-                      │                                 │
-                      ▼                                 ▼
-              真券商账户                          sim_QMT_SIM_shadow.db
-              (真金白银盈亏)                       (模拟盈亏, 对照用)
-                      │                                 │
-                      └────────────┬────────────────────┘
-                                   ▼
-                          mlearnweb 前端各自一条曲线
-                          实盘红 badge / 模拟绿 badge
-```
+
+**唯一变量 = 撮合层** (gateway). 信号 / 算法 / 决策完全相同, 两条曲线之间的差就是
+"模拟柜台总误差" — 可定量评估, 可持续监控.
 
 ---
 
@@ -145,6 +161,55 @@ def _link_selections_from_upstream(self, day: date) -> None:
 - 上游产物覆盖 = 影子产物自动同步
 - 跨盘 fallback 到 `shutil.copy2`
 
+### 图 2.2 信号同步时序
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cron as APScheduler
+    participant Live as csi300_live<br/>(实盘策略)
+    participant Sub as 推理子进程<br/>(qlib + lightgbm)
+    participant FS as 文件系统<br/>D:/ml_output/
+    participant Shadow as csi300_live_shadow<br/>(影子策略)
+    participant LGW as QmtGateway<br/>(真 miniqmt)
+    participant SGW as QmtSimGateway<br/>(模拟撮合)
+
+    Note over Cron,Live: T 日 21:00 cron (推理半边)
+
+    Cron->>Live: trigger {name}_predict job
+    Live->>Sub: spawn subprocess (60-90s)
+    Sub->>Sub: 加载 bundle + qlib_data_bin
+    Sub->>FS: 写 predictions.parquet
+    Sub->>FS: 写 selections.parquet (top-K)
+    Sub->>FS: 写 diagnostics.json + metrics.json
+    Sub-->>Live: returncode=0
+    Live->>Live: select_topk + persist_selections
+
+    Cron->>Shadow: trigger {name}_predict job (同时刻或紧随)
+    Shadow->>Shadow: 检查 signal_source_strategy=csi300_live
+    Shadow->>FS: _link_selections_from_upstream(T)
+    Note right of FS: NTFS hardlink (同 inode)<br/>4 个产物全 link
+    Shadow->>Shadow: last_status=ok (跳过推理)
+
+    Note over Cron,LGW: T+1 日 09:26 cron (撮合半边)
+
+    Cron->>Live: trigger {name}_rebalance
+    Live->>FS: 读 selections.parquet (T 日的)
+    Live->>Live: topk_dropout_decision
+    Live->>LGW: send_order × N (sells + buys)
+    LGW->>LGW: miniqmt RPC → 真券商
+    LGW-->>Live: on_order / on_trade
+
+    Cron->>Shadow: trigger {name}_rebalance
+    Shadow->>FS: 读 selections.parquet (link 的, 内容同上游)
+    Shadow->>Shadow: topk_dropout_decision (同算法)
+    Shadow->>SGW: send_order × N (同信号)
+    SGW->>SGW: vnpy_qmt_sim 撮合
+    SGW-->>Shadow: on_order / on_trade
+
+    Note over Live,SGW: 唯一变量 = 撮合层<br/>两条权益曲线对照
+```
+
 ### 2.3 启动期一致性硬校验
 
 `run_ml_headless._validate_signal_source_consistency()`:
@@ -164,6 +229,47 @@ for s in STRATEGIES:
 ```
 
 任一不一致 → `ValueError` 拒绝启动, 避免"信号语义错位"在生产中悄悄发生.
+
+### 图 2.3 启动期硬校验流程
+
+```mermaid
+flowchart TD
+    classDef pass fill:#10B981,stroke:#065F46,color:#fff
+    classDef fail fill:#EF4444,stroke:#991B1B,color:#fff
+    classDef check fill:#3B82F6,stroke:#1E40AF,color:#fff
+
+    Start(["run_ml_headless.py 启动"])
+    A["_validate_startup_config"]:::check
+
+    Start --> A
+
+    A --> B{"GATEWAYS 中<br/>n_live > 1 ?"}:::check
+    B -->|"是 (含 fake_live)"| BF["raise: miniqmt 单进程单账户约束"]:::fail
+    B -->|"否"| C{"每条 GATEWAYS<br/>kind 合法 ?"}:::check
+
+    C -->|"否 (非 live/sim/fake_live)"| CF["raise: 非法 kind"]:::fail
+    C -->|"是"| D{"validate_gateway_name<br/>命名 ↔ kind ?"}:::check
+
+    D -->|"否 (e.g. kind=sim 但名='QMT')"| DF["raise: 命名违反约定"]:::fail
+    D -->|"是"| E{"gateway_name 重复 ?"}:::check
+
+    E -->|"是"| EF["raise: 重复"]:::fail
+    E -->|"否"| F["_validate_trigger_time_unique"]:::check
+
+    F --> G{"非影子策略<br/>trigger_time 冲突 ?"}:::check
+    G -->|"是 (且 ALLOW_TRIGGER_TIME_COLLISION≠1)"| GF["raise: 推理 OOM 风险"]:::fail
+    G -->|"否"| H["_validate_signal_source_consistency"]:::check
+
+    H --> I{"影子策略<br/>signal_source 存在 ?"}:::check
+    I -->|"否"| IF["raise: 上游不存在"]:::fail
+    I -->|"是"| J{"上游也是影子 ?"}:::check
+
+    J -->|"是 (链式)"| JF["raise: 链式依赖"]:::fail
+    J -->|"否"| K{"bundle_dir/topk/n_drop<br/>影子 == 上游 ?"}:::check
+
+    K -->|"否"| KF["raise: 信号语义错位"]:::fail
+    K -->|"是"| OK(["✅ 校验通过<br/>启动 vnpy MainEngine"]):::pass
+```
 
 ### 2.4 命名 validator 双轨支持
 
@@ -260,6 +366,57 @@ STRATEGIES = [
 ## 4. 三层验证 V1 / V2 / V3
 
 不依赖真实盘环境也能验证双轨架构. 三层递进:
+
+### 图 4.0 V1/V2/V3 三模式对比
+
+```mermaid
+flowchart LR
+    classDef sim fill:#10B981,stroke:#065F46,color:#fff
+    classDef fake fill:#F59E0B,stroke:#92400E,color:#fff
+    classDef live fill:#EF4444,stroke:#991B1B,color:#fff
+    classDef strat fill:#3B82F6,stroke:#1E40AF,color:#fff
+
+    subgraph V1 ["V1 · 双 sim gateway (任何研发机能跑)"]
+        direction TB
+        V1A["策略 a<br/>(独立推理)"]:::strat
+        V1B["策略 b<br/>(独立推理)"]:::strat
+        V1GA["QMT_SIM_a<br/>kind=sim"]:::sim
+        V1GB["QMT_SIM_b<br/>kind=sim"]:::sim
+        V1A --> V1GA
+        V1B --> V1GB
+    end
+
+    subgraph V2 ["V2 · FakeQmt + sim shadow (无实盘风险)"]
+        direction TB
+        V2L["实盘策略<br/>(自跑推理)"]:::strat
+        V2S["影子策略<br/>signal_source=实盘"]:::strat
+        V2GL["QMT (FakeQmt)<br/>kind=fake_live"]:::fake
+        V2GS["QMT_SIM_shadow<br/>kind=sim"]:::sim
+        V2L --> V2GL
+        V2S --> V2GS
+        V2L -.->|"信号<br/>hardlink"| V2S
+    end
+
+    subgraph V3 ["V3 · 真 QmtGateway + sim shadow (盘中, 仿真账户)"]
+        direction TB
+        V3L["实盘策略<br/>(自跑推理)"]:::strat
+        V3S["影子策略<br/>signal_source=实盘"]:::strat
+        V3GL["QMT (真 vnpy_qmt)<br/>kind=live"]:::live
+        V3GS["QMT_SIM_shadow<br/>kind=sim"]:::sim
+        V3L --> V3GL
+        V3S --> V3GS
+        V3L -.->|"信号<br/>hardlink"| V3S
+    end
+```
+
+**三层递进**:
+| 层 | 实盘环境 | 测试 | 验证范围 | 用例数 |
+|---|---|---|---|---|
+| V1 | 不需要 | `test_dual_gateway_routing.py` | 多 Gateway 路由 / DB 隔离 / 命名 validator | 5 |
+| V2 | 不需要 | `test_dual_track_with_fake_live.py` | + 启动期校验 + 信号同步 byte-equal | 9 |
+| V3 | 需要券商仿真账户 + 盘中 | `run_dual_track_demo.py --mode v3` | + 真 RPC connect/send_order/回报 | 5 (TODO) |
+
+V1+V2 已经覆盖**架构 + 代码**所有 bug 风险, V3 仅是"接口契约层最后一公里".
 
 ### 4.1 V1 · 双 sim gateway 验证多 Gateway 路由架构
 
