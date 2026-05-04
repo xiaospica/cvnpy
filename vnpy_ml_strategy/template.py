@@ -1398,8 +1398,9 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 except Exception as exc:
                     self.write_log(f"[replay] day {day_iso} settle 失败: {exc}")
 
-            # 4. 写权益快照到 mlearnweb.db (ts=回放逻辑日 15:00)
-            # 否则前端权益曲线 X 轴只会反映 wall-clock 几分钟内的密集点
+            # 4. 写权益快照到本地 replay_history.db (A1/B2 解耦后的新路径,
+            # ts=回放逻辑日 15:00). mlearnweb 端 replay_equity_sync_service
+            # 通过 vnpy_webtrader endpoint 增量 fanout 拉.
             if gateway is not None:
                 self._persist_replay_equity_snapshot(day, gateway)
 
@@ -1407,14 +1408,19 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             self.replay_last_done = day_iso
 
     def _persist_replay_equity_snapshot(self, day: date, gateway: Any) -> None:
-        """从 gateway 当前 cash + 持仓市值算出"按回放日"的权益值，写入 mlearnweb.db。
+        """从 gateway 当前 cash + 持仓市值算出"按回放日"的权益值,写入**本地**
+        replay_history.db (A1/B2 解耦后的新路径).
 
-        与 mlearnweb 端 _resolve_strategy_value 算法一致：
+        mlearnweb 端 replay_equity_sync_service 通过 vnpy_webtrader endpoint
+        增量 fanout 拉, UPSERT 到 mlearnweb.db.strategy_equity_snapshots
+        (source_label=replay_settle).
+
+        与 mlearnweb 端 _resolve_strategy_value 算法一致:
             equity = cash + sum_over_positions(volume × cost_price + pnl)
         """
         try:
             from datetime import datetime as _dt, time as _time
-            from .mlearnweb_writer import write_replay_equity_snapshot
+            from .replay_history import write_snapshot
 
             counter = gateway.td.counter
             cash = float(counter.capital - counter.frozen)
@@ -1432,24 +1438,25 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
             # ts: 当日 15:00（A 股收盘）
             ts = _dt.combine(day, _time(hour=15, minute=0, second=0))
-            ok = write_replay_equity_snapshot(
-                node_id="local",  # 与 mlearnweb vnpy_nodes.yaml 默认节点一致
-                engine="MlStrategy",
+            ok = write_snapshot(
                 strategy_name=self.strategy_name,
                 ts=ts,
                 strategy_value=equity,
                 account_equity=equity,
-                source_label="replay_settle",
                 positions_count=n_positions,
+                raw_variables={
+                    "replay_status": getattr(self, "replay_status", ""),
+                    "replay_progress": getattr(self, "replay_progress", ""),
+                },
             )
             if not ok:
-                # write 返 False 是路径解析问题（已在 writer 内 print 警告）；
-                # 此处无需再吵
                 return
             # 首日成功写入时 log 一条便于 user 确认链路通
             if not getattr(self, "_replay_persist_logged_first", False):
                 self.write_log(
-                    f"[replay] mlearnweb 权益快照已开始写入 (day={day} equity={equity:.0f})"
+                    f"[replay] 本地 replay_history.db 权益快照已开始写入 "
+                    f"(day={day} equity={equity:.0f}); mlearnweb 端 "
+                    f"replay_equity_sync_service 会按 5min 周期 fanout 拉"
                 )
                 self._replay_persist_logged_first = True
         except Exception as exc:
