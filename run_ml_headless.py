@@ -7,7 +7,7 @@
 P2-1 双轨架构: GATEWAYS 中每条自带 kind 字段, 按需混部:
     kind="live"      vnpy_qmt.QmtGateway      (真 miniqmt, ≤1 个, 单账户约束)
     kind="sim"       vnpy_qmt_sim.QmtSimGateway (本地撮合, 任意条数)
-    kind="fake_live" tests.fakes.FakeQmtGateway (开发桩, 仅 V2 验证用)
+    kind="fake_live" vnpy_ml_strategy.test.fakes.FakeQmtGateway (开发桩, 仅 V2 验证用)
 
 典型配置:
     模式 A · 全模拟双策略 (默认):
@@ -90,8 +90,9 @@ QMT_SETTING = {
 # ─── Gateways 列表 (P2-1 双轨架构: 每条 gateway 自带 kind) ────────────
 # kind="live" → vnpy_qmt.QmtGateway (真 miniqmt, 受 miniqmt 单进程单账户约束 ≤1 个)
 # kind="sim"  → vnpy_qmt_sim.QmtSimGateway (本地撮合, 任意条数, 各自独立 sim_<name>.db)
-# kind="fake_live" → tests.fakes.FakeQmtGateway (无实盘环境时模拟 'QMT' 命名 +
-#                    sim 撮合内核的开发桩, 仅 P2-1 V2/V3 验证用, 部署机不安装此目录)
+# kind="fake_live" → vnpy_ml_strategy.test.fakes.FakeQmtGateway (无实盘环境时
+#                    模拟 'QMT' 命名 + sim 撮合内核的开发桩, 仅 P2-1 V2/V3
+#                    验证用, 部署机不安装 vnpy_ml_strategy/test/ 目录)
 #
 # 双轨混部 (实盘 + 影子 + 独立纸面策略):
 #   GATEWAYS = [
@@ -352,7 +353,7 @@ def main() -> int:
             from vnpy_qmt import QmtGateway
             return QmtGateway
         if kind == "fake_live":
-            from tests.fakes.fake_qmt_gateway import FakeQmtGateway
+            from vnpy_ml_strategy.test.fakes.fake_qmt_gateway import FakeQmtGateway
             return FakeQmtGateway
         raise ValueError(f"unknown gateway kind: {kind!r}")
 

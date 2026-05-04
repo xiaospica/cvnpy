@@ -22,7 +22,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# 让 vnpy_ml_strategy.test.fakes / run_ml_headless 在 pytest 上下文可解析
+# (parents[2] = vnpy_strategy_dev repo root)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 # ============================================================================
@@ -239,7 +241,7 @@ def test_signal_source_byte_equal(tmp_path: Path) -> None:
 def test_fake_qmt_gateway_drop_in_replaceable() -> None:
     """FakeQmtGateway 可作为 QmtGateway 的接口替身 (zero-prod-risk)."""
     from vnpy.event import EventEngine
-    from tests.fakes.fake_qmt_gateway import FakeQmtGateway
+    from vnpy_ml_strategy.test.fakes.fake_qmt_gateway import FakeQmtGateway
 
     ee = EventEngine()
     gw = FakeQmtGateway(ee, "QMT")

@@ -21,7 +21,8 @@ def _prepend_sys_path(p: Path) -> None:
         sys.path.insert(0, str(p))
 
 
-# 0. repo root — 让 `from tests.fakes...` / `from run_ml_headless` 等在 pytest 上下文可解析
+# 0. repo root — 让 `from vnpy_ml_strategy.test.fakes...` / `import run_ml_headless` 等
+#    在 pytest 上下文 (例如 test_dual_track_with_fake_live.py 的 importlib.reload) 可解析.
 _ROOT = Path(__file__).resolve().parent
 _prepend_sys_path(_ROOT)
 

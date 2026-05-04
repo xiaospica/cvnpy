@@ -14,7 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# parents[2] = vnpy_strategy_dev repo root (本文件在 vnpy_ml_strategy/test/)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 @pytest.fixture

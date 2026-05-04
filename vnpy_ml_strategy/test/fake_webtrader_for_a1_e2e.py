@@ -24,7 +24,8 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 import uvicorn
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# parents[2] = vnpy_strategy_dev repo root (本文件在 vnpy_ml_strategy/test/)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from vnpy_ml_strategy.replay_history import list_snapshots
 
 
