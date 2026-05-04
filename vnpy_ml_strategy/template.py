@@ -1553,12 +1553,11 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         except Exception as exc:
             self.write_log(f"[replay] day {day_iso} persist_selections 失败: {exc}")
 
-        # 写 ml_metric_snapshots + ml_prediction_daily 到 mlearnweb.db (trade_date=回放日)
-        # 让前端 ML 监控历史回溯能按真实回放日展示，而不是堆在启动时刻
-        try:
-            self._persist_replay_ml_snapshot(day, day_dir, diag, selected)
-        except Exception as exc:
-            self.write_log(f"[replay] day {day_iso} ml metric 快照写入失败: {exc}")
+        # A1/B2 解耦: 不再直接写 mlearnweb.db.ml_metric_snapshots / ml_prediction_daily
+        # 这两张表的数据流改成: vnpy 主进程发 EVENT_ML_METRICS / 暴露 vnpy_webtrader
+        # /api/v1/ml/strategies/{name}/metrics?days=30 endpoint → mlearnweb 端
+        # ml_snapshot_loop + historical_metrics_sync_service 拉取并 UPSERT 本地.
+        # 详见 docs/deployment_a1_p21_plan.md §一. 步骤 1.
 
         self.write_log(
             f"[replay] day {day_idx}/{total} {day_iso}: ok rows={diag.get('rows', 0)} "
@@ -1585,63 +1584,6 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         except Exception as exc:
             self.write_log(f"[replay] day {day_iso} 提取 pred_score 失败: {exc}")
             return None
-
-    def _persist_replay_ml_snapshot(
-        self,
-        day: date,
-        day_dir: "Path",
-        diag: Dict[str, Any],
-        selected: Optional["pd.DataFrame"],
-    ) -> None:
-        """回放每日：写 ml_metric_snapshots + ml_prediction_daily 到 mlearnweb.db
-        trade_date = 当日 15:00（A 股收盘），让前端 ML 监控历史回溯按回放日展示。
-        """
-        from datetime import datetime as _dt, time as _time
-        from .mlearnweb_writer import write_replay_ml_metric_snapshot
-
-        # 拿 metrics.json (如有)
-        metrics_path = day_dir / "metrics.json"
-        metrics: Dict[str, Any] = {}
-        if metrics_path.exists():
-            try:
-                metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-            except Exception:
-                metrics = {}
-        # 把 diag 里的关键字段并入
-        metrics.setdefault("model_run_id", diag.get("model_run_id"))
-        metrics.setdefault("core_version", diag.get("core_version"))
-        metrics.setdefault("status", diag.get("status"))
-        metrics.setdefault("n_predictions", diag.get("rows"))
-
-        # topk summary: 用 selected 行 + diag 里的 score_histogram (若有)
-        topk_list = []
-        if selected is not None and not selected.empty:
-            sel_reset = selected.reset_index()
-            for i, (_, r) in enumerate(sel_reset.iterrows()):
-                topk_list.append({
-                    "rank": i + 1,
-                    "instrument": str(r.get("instrument", "")),
-                    "score": float(r["score"]) if "score" in r and r["score"] is not None else None,
-                })
-        topk_summary = {
-            "topk": topk_list,
-            "score_histogram": metrics.get("score_histogram") or [],
-            "n_symbols": diag.get("rows", 0),
-            "pred_mean": metrics.get("pred_mean"),
-            "pred_std": metrics.get("pred_std"),
-            "model_run_id": diag.get("model_run_id"),
-            "status": diag.get("status"),
-        }
-
-        trade_dt = _dt.combine(day, _time(15, 0, 0))
-        write_replay_ml_metric_snapshot(
-            node_id="local",
-            engine="MlStrategy",
-            strategy_name=self.strategy_name,
-            trade_date=trade_dt,
-            metrics=metrics,
-            topk_summary=topk_summary,
-        )
 
     def _get_own_gateway(self) -> Optional[Any]:
         """从 main_engine 拿本策略的 gateway 实例（用于回放 enable_auto_settle 控制）。"""

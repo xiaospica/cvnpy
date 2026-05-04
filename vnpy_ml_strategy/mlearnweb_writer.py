@@ -125,92 +125,13 @@ def write_replay_equity_snapshot(
     return True
 
 
-def write_replay_ml_metric_snapshot(
-    *,
-    node_id: str,
-    engine: str,
-    strategy_name: str,
-    trade_date: datetime,
-    metrics: Optional[Dict[str, Any]] = None,
-    topk_summary: Optional[Dict[str, Any]] = None,
-) -> bool:
-    """写一行 ml_metric_snapshots（trade_date=回放逻辑日）+ 一行 ml_prediction_daily。
-
-    回放期间 mlearnweb 的 ml_snapshot_loop 拉的是 wall-clock 当前 metrics，
-    所有点都堆在启动时刻。本函数让 vnpy 这边在每个回放日 settle 后**主动按
-    逻辑日**写一行，前端历史回溯就能看到完整时间序列。
-
-    metrics 期望含 ic / rank_ic / psi_mean / psi_max / pred_mean / pred_std / ...
-    topk_summary 期望含 topk(list) / score_histogram / n_symbols ...
-    """
-    db_path = _resolve_db_path()
-    if db_path is None:
-        return False
-
-    metrics = metrics or {}
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        # ml_metric_snapshots: UPSERT 同 (node, engine, strategy, trade_date)
-        conn.execute(
-            """
-            DELETE FROM ml_metric_snapshots
-            WHERE node_id=? AND engine=? AND strategy_name=? AND DATE(trade_date)=DATE(?)
-            """,
-            (node_id, engine, strategy_name, trade_date),
-        )
-        conn.execute(
-            """
-            INSERT INTO ml_metric_snapshots
-                (node_id, engine, strategy_name, trade_date,
-                 ic, rank_ic, psi_mean, psi_max, psi_n_over_0_25,
-                 psi_by_feature_json, ks_by_feature_json,
-                 pred_mean, pred_std, pred_zero_ratio, n_predictions,
-                 feat_missing_json, model_run_id, core_version, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                node_id, engine, strategy_name, trade_date,
-                metrics.get("ic"), metrics.get("rank_ic"),
-                metrics.get("psi_mean"), metrics.get("psi_max"),
-                metrics.get("psi_n_over_0_25"),
-                json.dumps(metrics.get("psi_by_feature") or {}, ensure_ascii=False),
-                json.dumps(metrics.get("ks_by_feature") or {}, ensure_ascii=False),
-                metrics.get("pred_mean"), metrics.get("pred_std"),
-                metrics.get("pred_zero_ratio"), metrics.get("n_predictions"),
-                json.dumps(metrics.get("feat_missing") or {}, ensure_ascii=False),
-                metrics.get("model_run_id"), metrics.get("core_version"),
-                metrics.get("status"),
-            ),
-        )
-
-        if topk_summary:
-            conn.execute(
-                """
-                DELETE FROM ml_prediction_daily
-                WHERE node_id=? AND engine=? AND strategy_name=? AND DATE(trade_date)=DATE(?)
-                """,
-                (node_id, engine, strategy_name, trade_date),
-            )
-            conn.execute(
-                """
-                INSERT INTO ml_prediction_daily
-                    (node_id, engine, strategy_name, trade_date,
-                     topk_json, score_histogram_json, n_symbols, coverage_ratio,
-                     pred_mean, pred_std, model_run_id, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    node_id, engine, strategy_name, trade_date,
-                    json.dumps(topk_summary.get("topk") or [], ensure_ascii=False),
-                    json.dumps(topk_summary.get("score_histogram") or [], ensure_ascii=False),
-                    topk_summary.get("n_symbols"),
-                    topk_summary.get("coverage_ratio"),
-                    topk_summary.get("pred_mean"), topk_summary.get("pred_std"),
-                    topk_summary.get("model_run_id"), topk_summary.get("status"),
-                ),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-    return True
+# A1/B2 解耦 Step 1 已删除 write_replay_ml_metric_snapshot:
+#   ml_metric_snapshots / ml_prediction_daily 两张表已经能从 vnpy_webtrader
+#   /api/v1/ml/strategies/{name}/metrics?days=30 + /prediction/latest/summary
+#   拉到, mlearnweb 端 ml_snapshot_loop + historical_metrics_sync_service
+#   已在每分钟/每 5 分钟拉. 直接写 mlearnweb.db 是冗余的双写 (跨工程紧耦合).
+#
+# 详见 docs/deployment_a1_p21_plan.md §一.1 Step 1.
+#
+# write_replay_equity_snapshot 暂时保留, Step 2 切到 vnpy_ml_strategy/replay_history.py
+# 后整体删除本文件.
