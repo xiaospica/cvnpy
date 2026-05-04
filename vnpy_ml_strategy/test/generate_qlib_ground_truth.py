@@ -2,9 +2,12 @@
 
 用 D:/vnpy_data/qlib_data_bin 作为 provider_uri (与 vnpy 推理同源) 跑 qlib
 TopkDropoutStrategy backtest, 输出 vnpy 实盘回放 E2E 测试需要的 ground truth:
-  - {OUT_DIR}/pred.pkl                  qlib 端推理结果 (与 vnpy bit-equal)
-  - {OUT_DIR}/positions_normal_1day.pkl 每日 Position 对象 (含 amount/price/weight)
-  - {OUT_DIR}/report_normal_1day.pkl    每日 account/return/cash/turnover
+  - {OUT_DIR_BASE}/{strategy_name}/pred.pkl                  qlib 端推理结果
+  - {OUT_DIR_BASE}/{strategy_name}/positions_normal_1day.pkl 每日 Position 对象
+  - {OUT_DIR_BASE}/{strategy_name}/report_normal_1day.pkl    每日 account/return
+
+⚠️ **每个 strategy 独立子目录** — 不同 bundle 的 ground truth 互不覆盖.
+之前共享单一 OUT_DIR 导致两个策略读同一份 pkl, 对比图虚假; 已修复.
 
 被以下 vnpy 测试消费:
   - test_topk_e2e_d_drive.py          (持仓/权重 E2E 等价)
@@ -26,12 +29,17 @@ deal_price="$open" 只用于让 qlib backtest 撮合层与 vnpy_qmt_sim (raw_ope
   - qlib_strategy_dev (factor_factory.alphas.* 跨工程 import)
 
 运行 (用 inference_python 因为有 qlib 重型依赖):
+
+  # 必须显式传 strategy_name + bundle_dir, 不允许默认值 (双 bundle 共存):
   PYTHONPATH="f:/Quant/code/qlib_strategy_dev/vendor/qlib_strategy_core;f:/Quant/code/qlib_strategy_dev" \
-  E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe \
-  f:/Quant/vnpy/vnpy_strategy_dev/vnpy_ml_strategy/test/generate_qlib_ground_truth.py
+    BUNDLE_DIR="f:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/<run_id>" \
+    E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe \
+    f:/Quant/vnpy/vnpy_strategy_dev/vnpy_ml_strategy/test/generate_qlib_ground_truth.py \
+    --strategy-name csi300_lgb_headless
 """
 from __future__ import annotations
 
+import argparse
 import copy
 import pickle
 import sys
@@ -49,18 +57,17 @@ install_finder()
 import qlib  # noqa: E402
 from qlib_strategy_core.inference import predict_from_bundle  # noqa: E402
 
-# BUNDLE_DIR 须与 vnpy 端 run_ml_headless.py 的当前活跃 bundle 一致, 否则 qlib
-# backtest pred 与 vnpy 推理 pred 不同源, e2e 测试无意义。
-# 可通过环境变量 BUNDLE_DIR 覆盖。
+# 默认值仅作 fallback (单 bundle 老用法), 双 bundle 时**必须**显式传
+# --strategy-name + BUNDLE_DIR env 否则两次跑会共用一个子目录互相覆盖.
 import os as _os
-BUNDLE_DIR = Path(
+DEFAULT_BUNDLE_DIR = Path(
     _os.getenv(
         "BUNDLE_DIR",
-        r"f:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/c38e6cfdf549446fbb0d637549e4a245",
+        r"f:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964",
     )
 )
 PROVIDER_URI = r"D:/vnpy_data/qlib_data_bin"
-OUT_DIR = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
+OUT_DIR_BASE = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
 
 # 与训练时 PortAnaRecord config 对齐 (reproduce.stdout.log:76-94)
 BACKTEST_KWARGS = {
@@ -112,7 +119,24 @@ END_TIME = "2026-04-29"  # qlib calendar 末日 4-30 但 backtest 需要 t+1 nex
 
 
 def main() -> int:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(
+        description="为 vnpy E2E 测试生成 qlib backtest ground truth (按 strategy_name 隔离)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--strategy-name",
+        default="csi300_lgb_headless",
+        help="策略名 (决定输出子目录: {OUT_DIR_BASE}/{strategy_name}/). "
+             "双 bundle 时必须传, 否则两次跑会写到同一子目录导致后跑覆盖前跑.",
+    )
+    args = parser.parse_args()
+
+    bundle_dir = DEFAULT_BUNDLE_DIR  # env BUNDLE_DIR 在模块顶部已经解析进来
+    out_dir = OUT_DIR_BASE / args.strategy_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[ground_truth] strategy_name = {args.strategy_name}")
+    print(f"[ground_truth] bundle_dir   = {bundle_dir}")
+    print(f"[ground_truth] out_dir      = {out_dir}")
 
     # 1. 用 D:/vnpy_data/qlib_data_bin 初始化 qlib
     # kernels=2 限制 joblib worker 数量, 避免 30+ worker 各 200MB 拉爆 Windows page file
@@ -125,14 +149,14 @@ def main() -> int:
     # 固化的训练时 filter 截止 2026-01-28 → pred 只覆盖到 1-28 → backtest 只 1 天
     print(f"=== Step 1: predict_from_bundle ({START_TIME} ~ {END_TIME}) ===")
     pred_df, task = predict_from_bundle(
-        bundle_dir=BUNDLE_DIR,
+        bundle_dir=bundle_dir,
         live_end=pd.Timestamp(END_TIME),
         lookback_days=160,  # 160 天回看, 覆盖整个回放区间
         handler_overrides={
             "filter_parquet": r"D:/vnpy_data/snapshots/filtered/csi300_filtered_20260430.parquet",
         },
     )
-    pred_df.to_pickle(OUT_DIR / "pred.pkl")
+    pred_df.to_pickle(out_dir / "pred.pkl")
     print(f"  pred shape={pred_df.shape}, "
           f"date range=[{pred_df.index.get_level_values(0).min()}, "
           f"{pred_df.index.get_level_values(0).max()}]")
@@ -161,11 +185,11 @@ def main() -> int:
     )
 
     # 4. 落盘
-    print(f"\n=== Step 3: dump artifacts → {OUT_DIR} ===")
+    print(f"\n=== Step 3: dump artifacts → {out_dir} ===")
     for freq, (report, positions) in portfolio_metric.items():
-        with open(OUT_DIR / f"report_normal_{freq}.pkl", "wb") as f:
+        with open(out_dir / f"report_normal_{freq}.pkl", "wb") as f:
             pickle.dump(report, f)
-        with open(OUT_DIR / f"positions_normal_{freq}.pkl", "wb") as f:
+        with open(out_dir / f"positions_normal_{freq}.pkl", "wb") as f:
             pickle.dump(positions, f)
         n_dates = len([k for k in positions if isinstance(k, pd.Timestamp)])
         print(f"  positions: {n_dates} dates")
@@ -181,7 +205,7 @@ def main() -> int:
         print(f"  {d.date()}: holdings={list(holdings.keys())}")
 
     print(f"\n[OK] qlib backtest with D:/vnpy_data/qlib_data_bin done.")
-    print(f"     ground truth dir: {OUT_DIR}")
+    print(f"     ground truth dir: {out_dir}")
     return 0
 
 

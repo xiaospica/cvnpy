@@ -25,9 +25,16 @@ _ROOT = Path(__file__).resolve().parents[2]  # vnpy_strategy_dev
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "vendor" / "qlib_strategy_core"))  # qlib (unpickle Position)
 
-QLIB_BT_DIR = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
-VNPY_SIM_DB = Path(r"F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300.db")
-ML_OUTPUT = Path(r"D:/ml_output/csi300_lgb_headless")
+# 切策略: set E2E_STRATEGY_NAME=csi300_lgb_headless_2 (默认 csi300_lgb_headless)
+# Ground truth 按 strategy_name 隔离 (与 generate_qlib_ground_truth.py 同源).
+import os as _os
+_STRATEGY_NAME = _os.environ.get("E2E_STRATEGY_NAME", "csi300_lgb_headless")
+QLIB_BT_DIR = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest") / _STRATEGY_NAME
+VNPY_SIM_DB = Path(_os.environ.get(
+    "E2E_VNPY_SIM_DB",
+    r"F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300.db",
+))
+ML_OUTPUT = Path(_os.environ.get("E2E_ML_OUTPUT", f"D:/ml_output/{_STRATEGY_NAME}"))
 DAILY_MERGED = Path(r"D:/vnpy_data/stock_data/daily_merged_all_new.parquet")
 
 

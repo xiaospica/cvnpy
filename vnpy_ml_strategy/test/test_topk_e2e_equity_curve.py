@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import os
 import pickle
 import sqlite3
 from datetime import date, datetime
@@ -31,7 +32,13 @@ import pandas as pd
 import pytest
 
 
-QLIB_BT_REPORT = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest/report_normal_1day.pkl")
+# E2E 切策略 (默认 csi300_lgb_headless): set E2E_STRATEGY_NAME=...
+_STRATEGY_NAME = os.environ.get("E2E_STRATEGY_NAME", "csi300_lgb_headless")
+# qlib ground truth 按 strategy_name 隔离子目录 (与 generate_qlib_ground_truth.py 同源).
+QLIB_BT_REPORT = (
+    Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
+    / _STRATEGY_NAME / "report_normal_1day.pkl"
+)
 MLEARNWEB_DB = Path(r"f:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db")
 INIT_CASH = 1_000_000.0
 
@@ -54,8 +61,9 @@ def vnpy_equity_curve() -> Dict[date, float]:
     cur = conn.cursor()
     cur.execute(
         """SELECT ts, strategy_value FROM strategy_equity_snapshots
-           WHERE strategy_name='csi300_lgb_headless' AND source_label='replay_settle'
-           ORDER BY ts ASC"""
+           WHERE strategy_name=? AND source_label='replay_settle'
+           ORDER BY ts ASC""",
+        (_STRATEGY_NAME,),
     )
     rows = cur.fetchall()
     conn.close()

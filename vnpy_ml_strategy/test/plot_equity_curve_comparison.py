@@ -1,16 +1,20 @@
 """画 vnpy 回放权益曲线 vs qlib backtest 复利累积收益率对比图.
 
-输出: vnpy_ml_strategy/test/result/equity_curve_comparison{_suffix}.png
+输出: vnpy_ml_strategy/test/result/equity_curve_comparison_{strategy_name}.png
 
 数据源:
   - vnpy: mlearnweb db strategy_equity_snapshots replay_settle
-  - qlib: report_normal_1day.pkl (account 列)
+  - qlib: {QLIB_BT_BASE}/{strategy_name}/report_normal_1day.pkl (account 列)
+
+⚠️ 每个 strategy 读自己的 ground truth 子目录 — 之前所有策略读同一份
+``report_normal_1day.pkl``, 不同 bundle 拿到相同 qlib 曲线虚假对比, 已修复.
+对应的 ground truth 必须先跑:
+    generate_qlib_ground_truth.py --strategy-name {strategy_name}
++ env BUNDLE_DIR=...
 
 CLI:
   python plot_equity_curve_comparison.py [strategy_name]
-  默认 strategy_name=csi300_lgb_headless;若 vnpy 重命名了策略 (e.g. csi300_lgb_headless_2),
-  传入新名即可。注意 qlib ground truth 必须先用对应的 bundle 跑 generate_qlib_ground_truth.py
-  重新生成。
+  默认 strategy_name=csi300_lgb_headless.
 """
 from __future__ import annotations
 
@@ -28,14 +32,28 @@ import pandas as pd
 _ROOT = Path(__file__).resolve().parents[2]  # vnpy_strategy_dev
 sys.path.insert(0, str(_ROOT / "vendor" / "qlib_strategy_core"))  # qlib (unpickle report)
 
-QLIB_BT_REPORT = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest/report_normal_1day.pkl")
+# qlib ground truth 按 strategy_name 隔离的根目录 (与
+# generate_qlib_ground_truth.py OUT_DIR_BASE 同源).
+QLIB_BT_BASE = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
 MLEARNWEB_DB = Path(r"f:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db")
 OUT_DIR = Path(__file__).resolve().parent / "result"
 INIT_CASH = 1_000_000.0
 
 
-def load_qlib_curve():
-    report = pickle.load(open(QLIB_BT_REPORT, "rb"))
+def _qlib_report_path(strategy_name: str) -> Path:
+    """每个 strategy 独立的 ground truth 路径."""
+    return QLIB_BT_BASE / strategy_name / "report_normal_1day.pkl"
+
+
+def load_qlib_curve(strategy_name: str):
+    report_path = _qlib_report_path(strategy_name)
+    if not report_path.exists():
+        raise FileNotFoundError(
+            f"qlib ground truth 不存在: {report_path}\n"
+            f"先跑 generate_qlib_ground_truth.py --strategy-name {strategy_name} "
+            f"(配 env BUNDLE_DIR 指向对应 bundle)."
+        )
+    report = pickle.load(open(report_path, "rb"))
     series = report["account"].copy()
     series.index = pd.to_datetime(series.index)
     return series
@@ -63,7 +81,7 @@ def load_vnpy_curve(strategy_name: str):
 
 
 def main(strategy_name: str = "csi300_lgb_headless"):
-    q = load_qlib_curve()
+    q = load_qlib_curve(strategy_name)
     v = load_vnpy_curve(strategy_name)
     if v.empty:
         raise SystemExit(
@@ -148,11 +166,9 @@ def main(strategy_name: str = "csi300_lgb_headless"):
 
     plt.tight_layout()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    # 默认策略名出 equity_curve_comparison.png 保持向后兼容; 其他策略名加 suffix
-    if strategy_name == "csi300_lgb_headless":
-        out_path = OUT_DIR / "equity_curve_comparison.png"
-    else:
-        out_path = OUT_DIR / f"equity_curve_comparison_{strategy_name}.png"
+    # 文件名按 strategy_name 强隔离 — 不再有"默认策略名 = equity_curve_comparison.png"
+    # 的隐式约定 (那是 ground truth 写死单一目录时代的兼容物). 现在每个策略名 1:1 输出.
+    out_path = OUT_DIR / f"equity_curve_comparison_{strategy_name}.png"
     plt.savefig(out_path, dpi=120, bbox_inches="tight", facecolor="#0A0E1A")
     print(f"saved: {out_path}")
 

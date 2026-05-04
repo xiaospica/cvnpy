@@ -1,12 +1,12 @@
 """Phase 6.4a 严格 E2E 等价测试 — **两端都用 D:/vnpy_data/qlib_data_bin 驱动**.
 
 Ground truth (qlib 端):
-  C:/Users/richard/AppData/Local/Temp/qlib_d_backtest/positions_normal_1day.pkl
-  由 strategy_dev/qlib_backtest_with_d_drive.py 用 D:/vnpy_data/qlib_data_bin
-  跑 qlib TopkDropoutStrategy backtest 产出。
+  {QLIB_BT_BASE}/{strategy_name}/positions_normal_1day.pkl
+  由 vnpy_ml_strategy/test/generate_qlib_ground_truth.py --strategy-name {name}
+  用 D:/vnpy_data/qlib_data_bin 跑 qlib TopkDropoutStrategy backtest 产出.
 
 Test target (vnpy 端):
-  F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300.db
+  F:/.../vnpy_qmt_sim/.trading_state/sim_QMT_SIM_{sandbox}.db
   由 vnpy run_ml_headless.py 用 D:/vnpy_data/qlib_data_bin 推理 + vnpy_qmt_sim
   撮合产出。
 
@@ -18,9 +18,15 @@ Test target (vnpy 端):
 
 由于 qlib 撮合用 hfq close, vnpy_qmt_sim 用 raw open, amount 必然不同 →
 weight 应在 1-2% 偏差内, sell/buy/holdings 集合应严格相等。
+
+E2E 切策略 (默认 csi300_lgb_headless):
+    set E2E_STRATEGY_NAME=csi300_lgb_headless_2
+    set E2E_VNPY_SIM_DB=F:/.../sim_QMT_SIM_csi300_2.db
+    pytest test_topk_e2e_d_drive.py
 """
 from __future__ import annotations
 
+import os
 import pickle
 import sqlite3
 import sys
@@ -35,10 +41,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]  # vnpy_strategy_dev (本文件在 vnpy_ml_strategy/test/)
 sys.path.insert(0, str(ROOT))
 
-QLIB_BT_DIR = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
-VNPY_SIM_DB = Path(
-    r"F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300.db"
-)
+# 与 generate_qlib_ground_truth.py OUT_DIR_BASE / plot_equity_curve_comparison.py
+# QLIB_BT_BASE 同源 — 每个 strategy 独立子目录, 不再共享一份 pkl.
+_STRATEGY_NAME = os.environ.get("E2E_STRATEGY_NAME", "csi300_lgb_headless")
+QLIB_BT_DIR = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest") / _STRATEGY_NAME
+VNPY_SIM_DB = Path(os.environ.get(
+    "E2E_VNPY_SIM_DB",
+    r"F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300.db",
+))
 
 
 def _vt_to_ts(vt: str) -> str:
