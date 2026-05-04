@@ -1644,10 +1644,21 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             self.write_log(f"[replay] day {day_iso} persist_selections 失败: {exc}")
 
         # A1/B2 解耦: 不再直接写 mlearnweb.db.ml_metric_snapshots / ml_prediction_daily
-        # 这两张表的数据流改成: vnpy 主进程发 EVENT_ML_METRICS / 暴露 vnpy_webtrader
-        # /api/v1/ml/strategies/{name}/metrics?days=30 endpoint → mlearnweb 端
-        # ml_snapshot_loop + historical_metrics_sync_service 拉取并 UPSERT 本地.
-        # 详见 docs/deployment_a1_p21_plan.md §一. 步骤 1.
+        # (db684c4 删了 _persist_replay_ml_snapshot 跨工程写库). 但本地 MetricsCache
+        # + EVENT_ML_METRICS 还要更新 — 否则 vnpy_webtrader /metrics/latest 与
+        # /prediction/latest/summary 全 404, 前端 LatestTopkCard / MlMonitorPanel 空白.
+        # 数据流: 读 metrics.json (推理子进程产物) → _publish_metrics 更新本地 cache +
+        #        emit event → mlearnweb ml_snapshot_loop 通过 webtrader endpoint 拉.
+        metrics_path = day_dir / "metrics.json"
+        if metrics_path.exists():
+            try:
+                metrics_dict = json.loads(metrics_path.read_text(encoding="utf-8"))
+                self._publish_metrics(metrics_dict, as_of_date=day)
+            except Exception as exc:
+                self.write_log(
+                    f"[replay] day {day_iso} _publish_metrics 失败 (cache 不更新, "
+                    f"前端 topk/monitor 会空白): {type(exc).__name__}: {exc}"
+                )
 
         self.write_log(
             f"[replay] day {day_idx}/{total} {day_iso}: ok rows={diag.get('rows', 0)} "
