@@ -132,6 +132,14 @@ STRATEGY_BASE_SETTING = {
 # ─── 策略列表 ──────────────────────────────────────────────────────────
 # 每条策略一个 add_strategy 调用。gateway_name 必须在 GATEWAYS 中存在。
 # 实盘模式下所有策略指向同一个 "QMT"；模拟沙盒下各指向自己的 QMT_SIM_*。
+#
+# ⚠️ 多策略 trigger_time 必须错开（推荐间隔 ≥ 10 分钟）
+#   单策略推理峰值 4-5 GB（qlib + lightgbm 加载 alpha158 全量特征）。
+#   同 trigger_time 多策略并发 → 内存峰值 N×5GB → 容易触发 swap / OOM,
+#   把交易主进程和 webtrader 都拖慢。
+#   启动期 _validate_trigger_time_unique() 会硬校验冲突, 不合规直接 raise.
+#   escape hatch: env ALLOW_TRIGGER_TIME_COLLISION=1 跳过校验
+#                 (仅在确认机器内存能扛住的场景下使用)
 
 STRATEGIES = [
     {
@@ -146,6 +154,7 @@ STRATEGIES = [
             ),
             "topk": 7,
             "n_drop": 1,
+            "trigger_time": "21:00",          # 错峰示例:  21:00
             "replay_start_date": "2026-01-27",
         },
     },
@@ -162,6 +171,7 @@ STRATEGIES = [
             ),
             "topk": 7,
             "n_drop": 1,
+            "trigger_time": "21:15",          # 错峰示例: 21:15 (与策略 1 间隔 15 min)
             "replay_start_date": "2026-01-27",
         },
     },
@@ -191,6 +201,38 @@ WEBTRADER_HTTP_PORT = 8001
 # ─── 主函数 ────────────────────────────────────────────────────────────
 
 
+def _validate_trigger_time_unique() -> None:
+    """启动期硬校验: 避免多策略同 trigger_time 触发推理 OOM.
+
+    单策略推理峰值 4-5 GB; 同 trigger_time 多策略并发 → 内存峰值 N×5GB →
+    swap / OOM 把整套系统拖慢. 不合规直接 raise.
+
+    escape hatch: env ALLOW_TRIGGER_TIME_COLLISION=1 跳过校验 (仅在确认
+    机器内存能扛住且实测过并发场景的部署中使用).
+    """
+    if os.getenv("ALLOW_TRIGGER_TIME_COLLISION") == "1":
+        print(
+            "[headless] WARN: ALLOW_TRIGGER_TIME_COLLISION=1, "
+            "跳过 trigger_time 唯一性校验"
+        )
+        return
+    seen: dict[str, str] = {}
+    for s in STRATEGIES:
+        # 优先 setting_override > STRATEGY_BASE_SETTING > 默认 21:00
+        t = (
+            (s.get("setting_override") or {}).get("trigger_time")
+            or STRATEGY_BASE_SETTING.get("trigger_time")
+            or "21:00"
+        )
+        if t in seen:
+            raise ValueError(
+                f"策略 {s['strategy_name']!r} 与 {seen[t]!r} trigger_time={t!r} 冲突; "
+                "推理峰值 4-5GB, 多策略并发会 OOM. 请错开 ≥ 10 min, 或 "
+                "设 env ALLOW_TRIGGER_TIME_COLLISION=1 跳过校验."
+            )
+        seen[t] = s["strategy_name"]
+
+
 def _validate_startup_config() -> None:
     """启动前对 GATEWAYS / STRATEGIES 做命名约定与一致性校验。
 
@@ -215,6 +257,9 @@ def _validate_startup_config() -> None:
                 f"策略 {s['strategy_name']!r} 引用了未注册的 gateway_name={gw!r}。"
                 f"已注册：{sorted(gw_names)}"
             )
+
+    # P1-1: 多策略 trigger_time 错峰硬校验
+    _validate_trigger_time_unique()
 
 
 def main() -> int:
