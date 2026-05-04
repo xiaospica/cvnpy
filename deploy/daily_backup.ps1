@@ -33,7 +33,9 @@ param(
     [string]$VnpyDataRoot = "D:\vnpy_data",
     [string]$ModelsRoot = "D:\vnpy_data\models",
     [switch]$IncludeMlearnweb,                       # 默认 false (mlearnweb 在监控端独立备)
-    [string]$MlearnwebDb = "F:\Quant\code\qlib_strategy_dev\mlearnweb\backend\mlearnweb.db"
+    # 同机部署时若想顺手备 mlearnweb.db, 用 -IncludeMlearnweb -MlearnwebDb <绝对路径>
+    # 跨机部署: 监控端在自己 deploy/daily_backup.ps1 里独立备份, 推理端不应碰
+    [string]$MlearnwebDb = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -106,10 +108,16 @@ if (Test-Path $yamlFile) {
     Write-Host "[backup]   ✓ strategies.production.yaml" -ForegroundColor Green
 }
 
-# 6. 可选: mlearnweb.db (跨机部署时关闭)
-if ($IncludeMlearnweb -and (Test-Path $MlearnwebDb)) {
-    Copy-Item $MlearnwebDb $staging -ErrorAction SilentlyContinue
-    Write-Host "[backup]   ✓ mlearnweb.db" -ForegroundColor Green
+# 6. 可选: mlearnweb.db (跨机部署时关闭; -IncludeMlearnweb -MlearnwebDb 都需指定)
+if ($IncludeMlearnweb) {
+    if (-not $MlearnwebDb) {
+        Write-Warning "[backup]   - -IncludeMlearnweb 但未给 -MlearnwebDb 路径, 跳过"
+    } elseif (-not (Test-Path $MlearnwebDb)) {
+        Write-Warning "[backup]   - MlearnwebDb=$MlearnwebDb 不存在, 跳过"
+    } else {
+        Copy-Item $MlearnwebDb $staging -ErrorAction SilentlyContinue
+        Write-Host "[backup]   ✓ mlearnweb.db ($MlearnwebDb)" -ForegroundColor Green
+    }
 }
 
 # 7. 压缩 (优先 7z, fallback zip)

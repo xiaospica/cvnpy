@@ -176,18 +176,18 @@ setx INFERENCE_PYTHON "E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.
 ### Step 2. 拉代码
 
 ```powershell
-# vnpy 工程 (主仓库 + ml_data_build submodule)
+# vnpy 工程 (主仓库 + ml_data_build + vendor/qlib_strategy_core submodule)
 cd F:\Quant\vnpy
 git clone --recursive <vnpy-strategy-dev-repo-url> vnpy_strategy_dev
 cd vnpy_strategy_dev
 git submodule update --init --recursive
-
-# qlib 工程 (跨工程依赖, vendor + 训练侧)
-cd F:\Quant\code
-git clone --recursive <qlib-strategy-dev-repo-url> qlib_strategy_dev
-cd qlib_strategy_dev
-git submodule update --init --recursive
 ```
+
+⚠️ **不需要 clone qlib_strategy_dev 仓库** — 推理端运行时所有 qlib / qlib_strategy_core
+依赖都从 `vnpy_strategy_dev/vendor/qlib_strategy_core/` submodule 取. 训练侧仓库
+(`qlib_strategy_dev`) 仅训练机需要, 推理服务器**不**需要.
+
+监控端 (`mlearnweb`) 是独立项目, 通常部署在另一台机器, 拉取流程见 mlearnweb 自己的部署文档.
 
 ### Step 3. 安装依赖
 
@@ -197,11 +197,14 @@ cd F:\Quant\vnpy\vnpy_strategy_dev
 .\install.bat F:\Program_Home\vnpy\python.exe
 
 # 推理子进程依赖 (qlib + lightgbm + mlflow + sklearn + pandas + pyarrow)
-E:\ssd_backup\...\python.exe -m pip install -r F:\Quant\code\qlib_strategy_dev\requirements.txt
-# 包括: pyqlib, lightgbm, mlflow, scikit-learn 等
+# bootstrap.ps1 -Apply 会自动 pip install 这些; 手动方式:
+E:\ssd_backup\...\python.exe -m pip install pyqlib lightgbm mlflow scikit-learn pandas pyarrow
 
-# mlearnweb (后端 + 前端)
-cd F:\Quant\code\qlib_strategy_dev\mlearnweb
+# 监控端 mlearnweb 后端 + 前端 — 走 mlearnweb 仓库自己的部署流程, 与本工程独立.
+
+# (legacy) 如果需要在同机 clone mlearnweb 用作开发查阅:
+cd <自定义路径>
+# git clone <mlearnweb-repo-url> mlearnweb
 E:\ssd_backup\...\python.exe -m pip install -r backend/requirements.txt
 cd frontend
 npm install
@@ -391,19 +394,19 @@ F:\Program_Home\vnpy\python.exe F:\Quant\vnpy\vnpy_strategy_dev\run_ml_headless.
 # [headless] 1 个策略已就绪: ['csi300_live']
 ```
 
-### Step 12. 启动 mlearnweb
+### Step 12. 启动 mlearnweb (监控端)
 
-```powershell
-# 默认双进程 (research:8000 + live:8100) + 前端 (5173)
-cd F:\Quant\code\qlib_strategy_dev
-.\start_mlearnweb.bat E:\ssd_backup\...\python.exe
-# 浏览器打开 http://localhost:5173
-```
+监控端 (`mlearnweb`) 是**独立项目**, 通常部署在另一台机器, 启停流程见
+mlearnweb 自己的 `deploy/install_services.ps1`. 单机部署也可以, 但启动命令和
+配置路径都在 mlearnweb 仓库自己的部署文档里, 不在这里复述.
 
-### Step 13. 配置 mlearnweb 节点
+唯一与本仓库相关的是 mlearnweb `vnpy_nodes.yaml` 里要把 `base_url` 指向本机
+`http://127.0.0.1:8001`, 见下:
+
+### Step 13. 配置 mlearnweb 节点 (在监控端的 mlearnweb 仓库内)
 
 ```yaml
-# F:/Quant/code/qlib_strategy_dev/mlearnweb/backend/vnpy_nodes.yaml
+# <mlearnweb-repo-root>/backend/vnpy_nodes.yaml
 nodes:
   - node_id: local
     base_url: http://127.0.0.1:8001
@@ -441,7 +444,8 @@ vnpy_ml_strategy.services.alerter 启动时自动监听:
 **mlearnweb 端 — 走 Python smtplib, 凭据放 backend/.env (P0-1 凭证外置)**:
 
 ```powershell
-notepad F:\Quant\code\qlib_strategy_dev\mlearnweb\backend\.env
+# 在监控端机器 (跑 mlearnweb 的那台) 操作:
+notepad <mlearnweb-repo-root>\backend\.env
 # 加 / 改字段 (.env.example 有完整模板):
 #   SMTP_SERVER=smtp.gmail.com
 #   SMTP_PORT=465

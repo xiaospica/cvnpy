@@ -73,10 +73,9 @@ elif (_HERE / ".env").exists():
     load_dotenv(_HERE / ".env", override=False)
 # 如果都没有, 继续走系统 env / 启动期会因关键 env 缺失而 raise
 
-# qlib source root 是相对 path, .env 加载后才稳定
-_QLIB_SOURCE = Path(os.getenv("QLIB_SOURCE_ROOT", r"F:\Quant\code\qlib_strategy_dev"))
-if (_QLIB_SOURCE / "qlib" / "__init__.py").exists() and str(_QLIB_SOURCE) not in sys.path:
-    sys.path.insert(0, str(_QLIB_SOURCE))
+# vendor/qlib_strategy_core/ 已在 sys.path[0] (line 53-55), 推理子进程也走它.
+# vnpy 主进程不直接 import qlib, 所以这是唯一所需 sys.path. 部署机不需要外部
+# qlib_strategy_dev 仓库.
 
 
 def _load_yaml_config(yaml_path: Path) -> dict:

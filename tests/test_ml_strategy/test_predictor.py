@@ -1,4 +1,8 @@
-"""Phase 2.2 — subprocess predictor 失败/超时语义 (不调真子进程, mock subprocess.run)."""
+"""Phase 2.2 — subprocess predictor 失败/超时语义.
+
+P1-5 后改用 vnpy_ml_strategy.predictors.qlib_predictor._run_subprocess_monitored
+(psutil 整树 RSS + 超时双监控), 测试 mock 此 helper 替代 subprocess.run.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+from vnpy_ml_strategy.predictors import qlib_predictor as qp_module
 from vnpy_ml_strategy.predictors.qlib_predictor import (
     InferenceSchemaError,
     InferenceTimeout,
@@ -18,9 +23,10 @@ from vnpy_ml_strategy.predictors.qlib_predictor import (
 
 
 class _FakeCompleted:
-    def __init__(self, returncode=0, stderr=""):
+    def __init__(self, returncode=0, stderr="", stdout=""):
         self.returncode = returncode
         self.stderr = stderr
+        self.stdout = stdout
 
 
 def _write_diag(out_dir: Path, **kwargs):
@@ -44,7 +50,7 @@ def test_predict_ok_reads_three_files(tmp_path):
     (day_dir / "metrics.json").write_text(json.dumps({"ic": 0.05}))
     _write_diag(day_dir, rows=2)
 
-    with patch.object(subprocess, "run", return_value=_FakeCompleted()):
+    with patch.object(qp_module, "_run_subprocess_monitored", return_value=_FakeCompleted()):
         p = QlibPredictor()
         result = p.predict(
             bundle_dir=str(tmp_path / "fake_bundle"),
@@ -65,8 +71,8 @@ def test_predict_ok_reads_three_files(tmp_path):
 
 def test_predict_timeout_raises(tmp_path):
     def _raise(*a, **kw):
-        raise subprocess.TimeoutExpired(cmd="x", timeout=5)
-    with patch.object(subprocess, "run", side_effect=_raise):
+        raise InferenceTimeout("subprocess exceeded timeout")
+    with patch.object(qp_module, "_run_subprocess_monitored", side_effect=_raise):
         p = QlibPredictor()
         with pytest.raises(InferenceTimeout):
             p.predict(
@@ -83,7 +89,7 @@ def test_predict_timeout_raises(tmp_path):
 
 def test_predict_no_diagnostics_returns_failed(tmp_path):
     """subprocess ran but didn't produce diagnostics.json — treat as failed."""
-    with patch.object(subprocess, "run", return_value=_FakeCompleted(returncode=-9, stderr="killed")):
+    with patch.object(qp_module, "_run_subprocess_monitored", return_value=_FakeCompleted(returncode=-9, stderr="killed")):
         p = QlibPredictor()
         result = p.predict(
             bundle_dir=str(tmp_path / "fake"),
@@ -104,7 +110,7 @@ def test_predict_schema_mismatch_raises(tmp_path):
     day_dir.mkdir(parents=True)
     _write_diag(day_dir, schema_version=99)
 
-    with patch.object(subprocess, "run", return_value=_FakeCompleted()):
+    with patch.object(qp_module, "_run_subprocess_monitored", return_value=_FakeCompleted()):
         p = QlibPredictor()
         with pytest.raises(InferenceSchemaError):
             p.predict(

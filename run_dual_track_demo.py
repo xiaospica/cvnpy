@@ -63,9 +63,6 @@ elif (_HERE / ".env.production").exists():
 elif (_HERE / ".env").exists():
     load_dotenv(_HERE / ".env", override=False)
 
-_QLIB_SOURCE = Path(os.getenv("QLIB_SOURCE_ROOT", r"F:\Quant\code\qlib_strategy_dev"))
-if (_QLIB_SOURCE / "qlib" / "__init__.py").exists() and str(_QLIB_SOURCE) not in sys.path:
-    sys.path.insert(0, str(_QLIB_SOURCE))
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
@@ -189,8 +186,10 @@ def _cleanup_demo_state(strategy_names: List[str], gateway_names: List[str]) -> 
                 print(f"  ⚠️ 删 {p} 失败: {exc}")
 
     # 1d. mlearnweb.db 中 demo strategy 的 replay_settle 行 (避免与上次 demo 数据混淆)
-    mlearnweb_db = Path(r"F:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db")
-    if mlearnweb_db.exists():
+    # 路径走 env override; 缺省时跳过此清理 (demo 单机部署也能用).
+    mlearnweb_db_path = os.getenv("MLEARNWEB_DB")
+    mlearnweb_db = Path(mlearnweb_db_path) if mlearnweb_db_path else None
+    if mlearnweb_db and mlearnweb_db.exists():
         try:
             con = sqlite3.connect(str(mlearnweb_db), timeout=2)
             cur = con.cursor()
@@ -205,6 +204,10 @@ def _cleanup_demo_state(strategy_names: List[str], gateway_names: List[str]) -> 
             print(f"  删 mlearnweb.db replay_settle 行: {n} (strategy in {strategy_names})")
         except Exception as exc:
             print(f"  ⚠️ 清 mlearnweb.db 失败 (非致命): {exc}")
+    elif mlearnweb_db_path:
+        print(f"  ⚠️ MLEARNWEB_DB={mlearnweb_db_path} 不存在, 跳过清理")
+    else:
+        print("  - 未设 MLEARNWEB_DB env, 跳过 mlearnweb.db 清理")
 
     print("[cleanup] done\n")
 
@@ -460,8 +463,8 @@ def _print_mlearnweb_hint(strategy_names: List[str]) -> None:
     print("Step 5 · 启动 mlearnweb 后端 + 前端 (另开终端)")
     print("=" * 60)
     print("# 1. 启 mlearnweb 双 uvicorn (research:8000 + live:8100) + 前端 (5173):")
-    print("    cd /f/Quant/code/qlib_strategy_dev")
-    print("    start_mlearnweb.bat E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe")
+    print("    cd <mlearnweb-repo-root>   # 视部署机布局而定, 与本仓库无关")
+    print("    start_mlearnweb.bat <python-3.11>")
     print()
     print("# 2. 等待 ~5 min 让 replay_equity_sync_loop 拉到回放数据后, 浏览器访问:")
     print("    http://localhost:5173/live-trading")
@@ -505,9 +508,10 @@ def _print_verification(mode: str, strategy_names: List[str], gateway_names: Lis
     print(f"    \"SELECT strategy_name, COUNT(*), MIN(ts), MAX(ts) FROM replay_equity_snapshots GROUP BY strategy_name\"")
 
     print("\n# (d) mlearnweb 拉到 (启 mlearnweb 等 5 min 后):")
-    print(f"  sqlite3 F:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db \\")
+    print(f"  sqlite3 $MLEARNWEB_DB \\")
     print(f"    \"SELECT strategy_name, COUNT(*) FROM strategy_equity_snapshots WHERE source_label='replay_settle' GROUP BY strategy_name\"")
     print(f"  # 期望: 每个策略各 ~60 行 (回放 64 个交易日)")
+    print(f"  # 提示: $MLEARNWEB_DB 路径取决于 mlearnweb 部署位置, 跨机部署时在监控端查")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
