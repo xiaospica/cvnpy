@@ -19,7 +19,7 @@ from vnpy.trader.engine import BaseEngine, MainEngine
 
 from vnpy_common.scheduler import DailyTimeTaskScheduler
 
-from .base import APP_NAME, EVENT_ML_METRICS, EVENT_ML_STRATEGY
+from .base import APP_NAME, EVENT_ML_METRICS, EVENT_ML_METRICS_ALERT, EVENT_ML_STRATEGY
 from .monitoring.cache import MetricsCache
 from .monitoring.publisher import publish_metrics as _publish_metrics
 from .predictors.qlib_predictor import QlibPredictor
@@ -83,6 +83,13 @@ class MLEngine(BaseEngine):
             self.event_engine.register(EVENT_DAILY_INGEST_FAILED, self._on_ingest_failed)
         except ImportError:
             pass  # TushareProApp 未加载时 skip
+
+        # P1-3 方案 A — 邮件告警器 (vt_setting email.* 配齐才生效, 否则仅 log)
+        # 长期可升级到 SaaS (Uptime Kuma 等), 详见 services/alerter.py docstring.
+        from .services.alerter import Alerter
+        self.alerter = Alerter(self.main_engine)
+        self.alerter.register_listeners(self.event_engine)
+
         self._initialized = True
 
     def _on_ingest_failed(self, event: Event) -> None:
@@ -636,15 +643,21 @@ class MLEngine(BaseEngine):
             self._metrics_cache.update(strategy_name, metrics)
 
         # EVENT_ML_METRICS always emitted from main process EventEngine
-        self.put_event(
-            EVENT_ML_METRICS + strategy_name,
-            {
-                "strategy": strategy_name,
-                "trade_date": trade_date.isoformat(),
-                "status": status,
-                "metrics": metrics,
-            },
-        )
+        payload = {
+            "strategy": strategy_name,
+            "trade_date": trade_date.isoformat(),
+            "status": status,
+            "metrics": metrics,
+        }
+        self.put_event(EVENT_ML_METRICS + strategy_name, payload)
+
+        # P1-3 方案 A — status=failed 时额外发不带 strategy 后缀的 alert topic,
+        # alerter (按单一 topic 监听, 不能前缀匹配 EVENT_ML_METRICS+name) 用此发邮件.
+        # 仅 failed 触发, ok / empty 不触发避免刷屏.
+        if status == "failed":
+            alert_payload = dict(payload)
+            alert_payload["error_message"] = (metrics or {}).get("error_message", "")
+            self.put_event(EVENT_ML_METRICS_ALERT, alert_payload)
 
         # 方案 §2.4.5 — 当日推理产出后顺手触发一次 IC 回填扫描. 后台线程跑,
         # debounce 60s. 失败仅 log, 不影响主流程.

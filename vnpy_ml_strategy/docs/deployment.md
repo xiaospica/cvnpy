@@ -342,6 +342,57 @@ nodes:
 
 mode 字段决定前端 mode badge 颜色 (live 红 / sim 绿). 改动需重启 mlearnweb live_main.
 
+### Step 13b. 配置告警邮件 (P1-3 Plan A)
+
+vnpy 端 + mlearnweb 端各自独立发邮件 (互补兜底):
+
+**vnpy 端 — 走 vnpy 框架自带 EmailEngine, 凭据放 vt_setting.json**:
+
+```powershell
+notepad C:\Users\$env:USERNAME\.vntrader\vt_setting.json
+# 加 / 改字段:
+#   "email.server":   "smtp.gmail.com"
+#   "email.port":     465
+#   "email.username": "your_alert@gmail.com"
+#   "email.password": "<app password>"  # Gmail 必须用 app password, 不是登录密码
+#   "email.sender":   "your_alert@gmail.com"
+#   "email.receiver": "you@example.com"
+```
+
+vnpy_ml_strategy.services.alerter 启动时自动监听:
+- `EVENT_DAILY_INGEST_FAILED` — 20:00 拉数据 / dump qlib bin 失败 (vnpy_tushare_pro 触发)
+- `EVENT_ML_METRICS_ALERT` — 21:00 推理 status='failed' 时 (engine.publish_metrics 触发)
+
+去重: 60 min 内同 (event_kind, identifier) 只发 1 封.
+
+**mlearnweb 端 — 走 Python smtplib, 凭据放 backend/.env (P0-1 凭证外置)**:
+
+```powershell
+notepad F:\Quant\code\qlib_strategy_dev\mlearnweb\backend\.env
+# 加 / 改字段 (.env.example 有完整模板):
+#   SMTP_SERVER=smtp.gmail.com
+#   SMTP_PORT=465
+#   SMTP_USERNAME=your_alert@gmail.com
+#   SMTP_PASSWORD=<app password>
+#   SMTP_SENDER=your_alert@gmail.com
+#   SMTP_RECEIVER=you@example.com
+#   SMTP_USE_SSL=true
+#
+#   WATCHDOG_PROBE_INTERVAL_SECONDS=60
+#   WATCHDOG_OFFLINE_THRESHOLD=3       # 连续 3 次 offline 才发邮件 (~3 min 防抖)
+```
+
+watchdog_service 启动时自动周期 probe `vnpy_nodes.yaml` 里所有节点 `/api/v1/node/health`:
+- 节点连续 N 次 offline → 发 `[mlearnweb 告警] vnpy 节点离线` 邮件 (一次)
+- 节点恢复 online → 发 `[mlearnweb 恢复] vnpy 节点重新上线` 邮件 (一次)
+
+⚠️ **两端都不强制要求 SMTP**: 凭据缺失时只 log warn, 业务流不阻断. 但生产建议都填.
+两端凭据可以**共用一个发件人 / 应用密码**, 区别仅在配置文件位置不同.
+
+⚠️ **TODO 长期升级**: 接 Uptime Kuma (自托管, 免费) / Healthchecks.io (海外 SaaS) 让外部
+监控同时 ping vnpy 主进程 + mlearnweb, 才能覆盖"两端都挂"的场景. 详见
+[operations.md §1.3 告警体系](operations.md).
+
 ### Step 14. 服务化 (Windows Service)
 
 详见 [operations.md §服务化](operations.md). 推荐 NSSM:

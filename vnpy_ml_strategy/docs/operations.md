@@ -80,18 +80,50 @@ print('last_settle_date =', row[0])
 sqlite3 F:\Quant\code\qlib_strategy_dev\mlearnweb\backend\mlearnweb.db "SELECT strategy_name, COUNT(*) FROM strategy_equity_snapshots WHERE DATE(ts)=DATE('now') GROUP BY strategy_name"
 ```
 
-### 1.3 推荐监控告警 (尚未实现)
+### 1.3 告警体系
 
-以下还没有现成实现, 强烈建议接入:
+**当前已实现 (P1-3 Plan A) — 两端互补的事件触发邮件**:
 
-- 20:00 daily_ingest 失败 → 邮件 / 微信告警 (event `EVENT_DAILY_INGEST_FAILED` 已发, 缺出口)
-- 21:00 推理 raise → 同上 (`last_status='failed'` 在 strategy variables)
-- 09:26 send_order 拒单率 > 阈值 → 同上
-- 磁盘剩余 < 50 GB → 系统监控
-- 内存峰值 > 28 GB → swap 风险
+| 出口 | 实现位置 | 监听事件 | 触发条件 | 凭据来源 |
+|---|---|---|---|---|
+| vnpy 端 Alerter | `vnpy_ml_strategy/services/alerter.py` | `EVENT_DAILY_INGEST_FAILED` / `EVENT_ML_METRICS_ALERT` | 20:00 daily_ingest 失败 / 21:00 推理 status=failed | `vt_setting.json` `email.*` (vnpy EmailEngine) |
+| mlearnweb 端 Watchdog | `mlearnweb/backend/app/services/vnpy/watchdog_service.py` | `probe_nodes()` 每 60s 一次 | 节点连续 N 次 offline / 重新 online | `mlearnweb/backend/.env` `SMTP_*` (Python smtplib) |
 
-接入路径: mlearnweb 加 `/api/health` 端点 + Healthchecks.io / Uptime Kuma 5 min
-心跳. 详见 [`docs/deployment_windows.md`](../../docs/deployment_windows.md) §P1-3.
+**互补设计**: vnpy 进程挂了 → 业务事件邮件发不出, 但 mlearnweb watchdog 兜底发"节点离线"邮件;
+mlearnweb 挂了 → 失去 watchdog, 但 vnpy 端 daily_ingest 失败仍能正常发邮件.
+
+**去重逻辑**:
+- vnpy 端: 60 min 内同 `(kind, identifier)` 只发 1 封 (kind = `ingest_failed` / `ml_metrics_failed`,
+  identifier 含 trade_date / strategy:trade_date)
+- mlearnweb watchdog: 状态机式去重 — 同节点 offline 邮件每次 outage cycle 只发 1 封,
+  online 后才会重新计数 (无时间冷却)
+
+**未实现 (TODO)**:
+
+- 09:26 send_order 拒单率 > 阈值 (rebalance 入口可加 EVENT, alerter 已有去重框架可复用)
+- 磁盘剩余 < 50 GB / 内存峰值 > 28 GB → 走 OS 级监控
+
+**长期升级路径 — SaaS 监控 (待业务需求触发再实施)**:
+
+⚠️ 当前方案缺点:
+1. mlearnweb + vnpy **同时挂**时两端都发不出邮件 → 完全失明
+2. 邮件易被忽略, 紧急程度低 (无 push / SMS / dashboard)
+3. 没有历史告警 / SLA 趋势
+
+候选 SaaS 方案 (优先级 = 推荐度):
+
+| 方案 | 形态 | 成本 | 检测窗 | 适用场景 |
+|---|---|---|---|---|
+| **Uptime Kuma** | 自托管 Docker | 0 元 (机器成本) | 20s ~ 5min | 推荐: 完全免费, 自己掌握, dashboard 友好 |
+| Healthchecks.io | 海外 SaaS | 免费版 25 checks × 5min | 5min | 海外网络稳定, 不适合大陆 |
+| BetterStack | 海外 SaaS | $24/mo (Pro) | 30s | 含 incident.io 风格 escalation |
+| Cronitor | 海外 SaaS | $19/mo | 1min | cron job 健康监控特化 |
+
+接入路径 (Uptime Kuma 推荐):
+1. 在另一台机器 (或 docker on 部署机) `docker run -p 3001:3001 louislam/uptime-kuma`
+2. 在 mlearnweb / vnpy_webtrader 加 `/health` 心跳端点 (mlearnweb 已有, vnpy_webtrader 已有 `/api/v1/node/health`)
+3. Kuma UI 配 monitor 每 60s 拉一次 + 失败 N 次发邮件 / Telegram / Slack
+4. 与现有 Plan A 邮件互补, 不冲突 (Kuma 关注"机器死活", Plan A 关注"业务事件失败")
 
 ---
 
@@ -368,12 +400,13 @@ logger.add("D:/vnpy_logs/vnpy_headless_{time:YYYY-MM-DD}.log",
            rotation="100 MB", retention="14 days", compression="zip")
 ```
 
-### 5.2 监控告警空白
+### 5.2 监控告警 (P1-3 Plan A 已落地, SaaS 待升级)
 
-EVENT_DAILY_INGEST_FAILED / EVENT_ML_METRICS / 拒单率没出口.
+**已实现** (详见 §1.3): vnpy 端 Alerter (业务事件邮件) + mlearnweb 端 Watchdog (节点存活邮件) 两路互补.
 
-**解决 (TODO)**: mlearnweb 加 `/api/health` 端点 + Healthchecks.io / Uptime Kuma
-心跳每 5 min ping.
+**仍待升级 (TODO)**:
+- 09:26 send_order 拒单率 / 资金不足比例 → alerter 复用其去重框架可加
+- "vnpy + mlearnweb 同时挂" 完全失明 → 接外部 Uptime Kuma 心跳监控覆盖
 
 ### 5.3 NTP 时钟漂移
 

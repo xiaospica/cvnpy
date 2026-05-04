@@ -25,6 +25,11 @@ EVENT_ML_HEARTBEAT = "eMlHeartbeat."    # 主进程周期心跳, 不依赖子进
 EVENT_ML_LOG = "eMlLog."                # 结构化日志转发
 EVENT_ML_STRATEGY = "eMlStrategy"       # 策略实例状态 (init/start/stop 后发, UI 消费)
 
+# P1-3 方案 A: 单一 topic 让 alerter 监听 (EVENT_ML_METRICS 是 per-strategy
+# topic 'eMlMetrics.<name>', alerter 不能前缀匹配, 故 publish_metrics 时统一
+# 再发一个不带 strategy_name 后缀的 EVENT_ML_METRICS_ALERT 给 alerter 消费.
+EVENT_ML_METRICS_ALERT = "eMlMetricsAlert"
+
 
 # ---------------------------------------------------------------------------
 # pipeline 阶段枚举 — 用于日志结构化
