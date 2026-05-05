@@ -66,7 +66,7 @@ param(
     # Get-DeployContext). 显式给则跳过解析直接用. 部署机一般只需编辑
     # .env.production 一处, 不需要在每个脚本上改命令行.
     [string]$VnpyPython = "",
-    [string]$InferencePython = "",
+    [string]$InferencePython = "C:/Users/Administrator/Downloads/software/python-3.11.0-amd64/python.exe",
     [string]$QsDataRoot = "",
     [string]$MlOutputRoot = "",
     [string]$LogRoot = "",
