@@ -154,7 +154,11 @@ ENABLE_WEBTRADER = True
 # - 与 web_engine.start_server(tcp://2014, tcp://4102) 不同：那个是 RPC，不能给 mlearnweb 用
 # 默认 True：开箱即用让 mlearnweb 能直接看到节点和策略
 SPAWN_WEBTRADER_HTTP = True
-WEBTRADER_HTTP_PORT = 8001
+WEBTRADER_HTTP_PORT = int(os.getenv("WEBTRADER_HTTP_PORT", "8001"))
+# 默认 127.0.0.1 = 仅本机 (mlearnweb 同机部署 OK).
+# 跨机部署: 在 .env 设 WEBTRADER_HTTP_HOST=0.0.0.0, 同时 Defender Firewall
+# 加规则限定 mlearnweb 监控机 IP 入站 (避免 8001 暴露公网).
+WEBTRADER_HTTP_HOST = os.getenv("WEBTRADER_HTTP_HOST", "127.0.0.1")
 
 
 # ─── 主函数 ────────────────────────────────────────────────────────────
@@ -341,7 +345,7 @@ def main() -> int:
                 [
                     sys.executable, "-u", "-m", "uvicorn",
                     "vnpy_webtrader.web:app",
-                    "--host", "127.0.0.1",
+                    "--host", WEBTRADER_HTTP_HOST,
                     "--port", str(WEBTRADER_HTTP_PORT),
                 ],
                 cwd=str(_HERE),
@@ -349,7 +353,7 @@ def main() -> int:
             )
             print(
                 f"[headless] webtrader HTTP server (uvicorn) spawned pid={webtrader_http_proc.pid} "
-                f"on http://127.0.0.1:{WEBTRADER_HTTP_PORT} "
+                f"on http://{WEBTRADER_HTTP_HOST}:{WEBTRADER_HTTP_PORT} "
                 f"— mlearnweb 通过此端点拉数据"
             )
             time.sleep(2)  # 给 uvicorn 启动时间
