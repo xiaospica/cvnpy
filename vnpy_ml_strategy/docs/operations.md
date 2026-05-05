@@ -54,8 +54,8 @@ Get-Content C:\Users\$env:USERNAME\.vntrader\log\vt_*.log | Select-Object -Last 
 09:30 开盘后 (确认 09:26 cron 跑了 + 撮合 OK):
 
 ```powershell
-# 1. 看今天发单情况
-sqlite3 F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state\sim_QMT_SIM_csi300.db "SELECT COUNT(*), MIN(insert_time), MAX(insert_time) FROM sim_orders WHERE DATE(insert_time)=DATE('now')"
+# 1. 看今天发单情况 (路径假设按 .env.production: QS_DATA_ROOT=D:\vnpy_data)
+sqlite3 D:\vnpy_data\state\sim_QMT_SIM_csi300.db "SELECT COUNT(*), MIN(insert_time), MAX(insert_time) FROM sim_orders WHERE DATE(insert_time)=DATE('now')"
 
 # 2. 实盘端: miniqmt 客户端看委托 + 成交
 
@@ -67,17 +67,19 @@ sqlite3 F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state\sim_QMT_SIM_
 15:00 收盘后:
 
 ```powershell
-# 1. 看 settle 是否成功
-F:\Program_Home\vnpy\python.exe -c "
+# 1. 看 settle 是否成功 (sim_db 在 ${QS_DATA_ROOT}/state/, A2 已统一)
+$py = (Get-Content .env.production | Select-String "^VNPY_PYTHON=").Line.Split('=')[1].Trim()
+& $py -c "
 import sqlite3
-con = sqlite3.connect(r'F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300.db')
+con = sqlite3.connect(r'D:/vnpy_data/state/sim_QMT_SIM_csi300.db')
 row = con.execute('SELECT last_settle_date FROM sim_accounts').fetchone()
 print('last_settle_date =', row[0])
 "
 # 期望: 今日日期
 
-# 2. 看 mlearnweb 拉到数据
-sqlite3 F:\Quant\code\qlib_strategy_dev\mlearnweb\backend\mlearnweb.db "SELECT strategy_name, COUNT(*) FROM strategy_equity_snapshots WHERE DATE(ts)=DATE('now') GROUP BY strategy_name"
+# 2. 看 mlearnweb 拉到数据 (在监控端机器, 路径取决于 mlearnweb 部署位置)
+# 跨机部署: ssh 监控机后查; 同机:
+sqlite3 <mlearnweb-repo-root>\backend\mlearnweb.db "SELECT strategy_name, COUNT(*) FROM strategy_equity_snapshots WHERE DATE(ts)=DATE('now') GROUP BY strategy_name"
 ```
 
 ### 1.3 告警体系
@@ -238,11 +240,12 @@ token = r.json()['access_token']
 sqlite3.OperationalError: database is locked
 ```
 
-→ 异常退出后 lockfile 残留. 当前 `vnpy_qmt_sim/persistence.py` 用
-`msvcrt.locking` 自动 OS 释放, 一般重启后好. 如果不行:
+→ 异常退出后 lockfile 残留. P0-5 后 `vnpy_qmt_sim/persistence.py` 启动期会用
+`psutil.pid_exists` 检测 stale PID 自动清理, 一般无需人工干预. 如果仍报错:
 ```powershell
 nssm stop vnpy_headless
-del F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state\*.lock
+# A2 后 sim_*.lock 在 ${QS_DATA_ROOT}/state/ (默认 D:\vnpy_data\state\)
+del D:\vnpy_data\state\*.lock
 nssm start vnpy_headless
 ```
 
@@ -254,39 +257,29 @@ nssm start vnpy_headless
 
 ### 3.1 关键数据 (按重要度)
 
+> 路径假设按 .env.production 默认: `QS_DATA_ROOT=D:\vnpy_data` `BACKUP_ROOT=D:\backups`.
+> 用 `Get-DeployContext` 解析的脚本(`deploy/daily_backup.ps1`)自动跟随 .env 改变.
+
 | 数据 | 路径 | 损失影响 |
 |---|---|---|
-| **bundle** | `D:/vnpy_data/models/{run_id}/` | 必须能从训练机重新 rsync 恢复; 否则需要重训 |
-| **mlearnweb.db** | `F:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db` | 训练记录 + 回放历史 + 权益曲线; 损失 → 前端图表空白 |
-| **sim_<gateway>.db** | `vnpy_qmt_sim/.trading_state/` | 模拟柜台状态; 损失 → 模拟权益曲线断档, 但实盘不受影响 |
-| **replay_history.db** | `D:/vnpy_data/state/replay_history.db` | 回放权益历史 (A1/B2); mlearnweb 端可重新 sync, 但要等 5 min 周期 |
+| **bundle** | `${VNPY_MODEL_ROOT}/{run_id}/` (默认 `D:/vnpy_data/models/`) | 必须能从训练机重新 rsync 恢复; 否则需要重训 |
+| **mlearnweb.db** | 在监控端机器 `<mlearnweb-repo>/backend/mlearnweb.db` | 训练记录 + 部署元数据 + 权益曲线; 损失 → 前端图表空白. **跨机部署时由监控端独立备份, 推理端不碰** |
+| **sim_<gateway>.db** | `${QS_DATA_ROOT}/state/sim_*.db` (A2 已统一) | 模拟柜台状态; 损失 → 模拟权益曲线断档, 但实盘不受影响 |
+| **replay_history.db** | `${QS_DATA_ROOT}/state/replay_history.db` | 回放权益历史 (A1/B2); mlearnweb 端可重新 sync, 但要等 5 min 周期 |
 | **.vntrader/database.db** | `C:/Users/{user}/.vntrader/database.db` | vnpy bar database; 损失 → 历史 K 线缺 |
 | **vt_setting.json** | `C:/Users/{user}/.vntrader/vt_setting.json` | 包含 tushare token / 节点路径; 必须重新填 |
+| **.env.production** | `<repo>/.env.production` (P0-1) | 含 tushare token / miniqmt 资金账号; 丢了得重新填. **应同步备份** |
 
-### 3.2 推荐备份方案
+### 3.2 推荐备份方案 (P1-6 已落地)
 
+`deploy/daily_backup.ps1` 已实现, 由 `bootstrap.ps1 -Apply` 自动注册任务计划程序
+每日 02:00 跑. 备份范围与策略详见 [§5.5 数据备份](#55-数据备份-p1-6-已落地).
+
+手动运行:
 ```powershell
-# deploy/daily_backup.ps1 (任务计划程序 02:00 触发)
-$today = Get-Date -Format "yyyyMMdd"
-$backup_root = "D:\backups\$today"
-mkdir $backup_root -Force
-
-# 1. 数据库
-copy F:\Quant\code\qlib_strategy_dev\mlearnweb\backend\mlearnweb.db $backup_root\
-copy D:\vnpy_data\state\*.db $backup_root\
-copy F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state\*.db $backup_root\
-copy C:\Users\$env:USERNAME\.vntrader\database.db $backup_root\
-copy C:\Users\$env:USERNAME\.vntrader\vt_setting.json $backup_root\
-
-# 2. bundle 元数据 (params.pkl 太大跳过, 训练机有备份)
-Get-ChildItem D:\vnpy_data\models\*\manifest.json,filter_config.json,task.json | Copy-Item -Destination $backup_root -Force
-
-# 3. 压缩 + 上传 NAS / S3
-7z a -t7z -mx9 D:\backups\daily_$today.7z $backup_root
-# rclone copy D:\backups\daily_$today.7z my-s3:vnpy-backup/
-
-# 4. 保留 30 天, 老备份清理
-Get-ChildItem D:\backups\*.7z | Where { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } | Remove-Item
+.\deploy\daily_backup.ps1                          # 默认从 .env 取所有路径
+.\deploy\daily_backup.ps1 -IncludeMlearnweb -MlearnwebDb <path>   # 同机部署可顺手备 mlearnweb.db
+.\deploy\daily_backup.ps1 -Retention 14            # 保留期改 14 天
 ```
 
 ### 3.3 恢复流程
@@ -294,22 +287,18 @@ Get-ChildItem D:\backups\*.7z | Where { $_.LastWriteTime -lt (Get-Date).AddDays(
 ```powershell
 # 1. 先停所有服务
 nssm stop vnpy_headless
-nssm stop mlearnweb_research
-nssm stop mlearnweb_live
 
-# 2. 解压备份
-7z x D:\backups\daily_<yyyymmdd>.7z -oD:\backups\restore
+# 2. 解压备份 ($BackupRoot 默认 D:\backups)
+7z x D:\backups\vnpy_daily_<yyyymmdd>.7z -oD:\backups\restore
 
-# 3. 选择性恢复 (按需)
-# 实盘机数据:
-copy D:\backups\restore\<yyyymmdd>\mlearnweb.db F:\Quant\code\qlib_strategy_dev\mlearnweb\backend\
-copy D:\backups\restore\<yyyymmdd>\sim_*.db F:\Quant\vnpy\vnpy_strategy_dev\vnpy_qmt_sim\.trading_state\
-copy D:\backups\restore\<yyyymmdd>\vt_setting.json C:\Users\$env:USERNAME\.vntrader\
+# 3. 选择性恢复 (按需) — 路径走 .env.production 单一来源
+copy D:\backups\restore\<yyyymmdd>\replay_history.db D:\vnpy_data\state\
+copy D:\backups\restore\<yyyymmdd>\sim_*.db          D:\vnpy_data\state\
+copy D:\backups\restore\<yyyymmdd>\vt_setting.json   C:\Users\$env:USERNAME\.vntrader\
+copy D:\backups\restore\<yyyymmdd>\.env.production   <repo-root>\
 
-# 4. 启动
+# 4. 启动 (mlearnweb 在监控端, 这里只管推理端)
 nssm start vnpy_headless
-nssm start mlearnweb_research
-nssm start mlearnweb_live
 ```
 
 ---
@@ -364,21 +353,23 @@ nssm start vnpy_headless
 # 5. 验证策略恢复 (sim 模式 sim_db 持久化自动 restore, live 模式 miniqmt 重连)
 ```
 
-### 4.3 mlearnweb 升级
+### 4.3 mlearnweb 升级 (在监控端机器)
+
+mlearnweb 是独立项目, 部署 / 升级走 mlearnweb 仓库自己的 `deploy/`. 与本仓库
+(vnpy_strategy_dev) 解耦. 概要:
 
 ```powershell
-cd F:\Quant\code\qlib_strategy_dev\mlearnweb
+# 在监控端登录后:
+cd <mlearnweb-repo-root>
 git pull
 
-# 后端依赖
-E:\ssd_backup\...\python.exe -m pip install -r backend\requirements.txt
+# 后端依赖 (mlearnweb 用的 Python 通常是 3.11)
+<mlearnweb-python> -m pip install -r backend\requirements.txt
 
 # 前端
-cd frontend
-npm install
-npm run build
+cd frontend; npm install; npm run build
 
-# 重启
+# 重启 (mlearnweb 自己的 NSSM 服务)
 nssm restart mlearnweb_research
 nssm restart mlearnweb_live
 ```

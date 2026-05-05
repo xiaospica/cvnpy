@@ -45,7 +45,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-
+sys.path.append('.')
 
 # ─── sys.path 注入 ─────────────────────────────────────────────────────
 os.environ["VNPY_DOCK_BACKEND"] = "ads"

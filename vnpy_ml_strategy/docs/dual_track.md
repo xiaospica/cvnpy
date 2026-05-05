@@ -573,9 +573,9 @@ F:/Program_Home/vnpy/python.exe run_ml_headless.py
 # 或 demo:
 F:/Program_Home/vnpy/python.exe run_dual_track_demo.py --mode c
 
-# 3. 启 mlearnweb 双 uvicorn + 前端
-cd /f/Quant/code/qlib_strategy_dev
-start_mlearnweb.bat E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe
+# 3. 启 mlearnweb 双 uvicorn + 前端 (在监控端机器, 走 mlearnweb 自己的 deploy)
+cd <mlearnweb-repo-root>
+.\deploy\install_services.ps1   # 或 start_mlearnweb.bat <python-3.11>
 
 # 4. 浏览器访问
 http://localhost:5173/live-trading
@@ -587,8 +587,8 @@ http://localhost:5173/live-trading
 启动 ~5 分钟后 (sync_loop 至少跑 1 次):
 
 ```bash
-# (a) sim_db 物理隔离
-sqlite3 F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300_shadow.db \
+# (a) sim_db 物理隔离 (A2 后 sim_*.db 在 ${QS_DATA_ROOT}/state/)
+sqlite3 D:/vnpy_data/state/sim_QMT_SIM_csi300_shadow.db \
   "SELECT COUNT(*) FROM sim_trades"
 
 # (b) 信号同步字节级 (模式 C)
@@ -602,8 +602,8 @@ for d in days:
 "
 # 期望: 全部 EQUAL
 
-# (c) mlearnweb.db 拉到 replay 数据 (回放模式)
-sqlite3 F:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db \
+# (c) mlearnweb.db 拉到 replay 数据 (回放模式) — 在监控端机器查
+sqlite3 <mlearnweb-repo>/backend/mlearnweb.db \
   "SELECT strategy_name, COUNT(*) FROM strategy_equity_snapshots WHERE source_label='replay_settle' GROUP BY strategy_name"
 # 期望: 两策略各自有行
 

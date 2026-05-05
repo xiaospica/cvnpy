@@ -52,10 +52,12 @@ fanout 拉策略状态. 不依赖 vnpy_strategy_dev 仓库, 单独项目.
 | 文件 | 作用 |
 |---|---|
 | `bootstrap.ps1` | [P2-2] 一键 IaC: 前置检查 + 数据目录 + Python 依赖 + NTP + NSSM + 备份计划 + dry-run 验证 |
+| `_lib.ps1` | 共享 helper (Read-EnvFile / Find-PythonExe / Get-DeployContext) — 单一 .env 路径来源 |
 | `install_services.ps1` | 一键装 vnpy_headless (NSSM) — `bootstrap.ps1 -Apply` 内部会调 |
 | `uninstall_services.ps1` | 一键卸载 |
 | `configure_ntp.ps1` | [P1-7] 配置 NTP 同步 (国家授时中心 / 阿里云 / Windows 默认 fallback) |
 | `daily_backup.ps1` | [P1-6] 每日备份 vnpy 端关键数据 (replay_history / sim_db / vt_setting / .env / yaml + bundle 元数据) |
+| `initial_ingest.ps1` + `initial_ingest.py` | [P2-2] 首次部署 / 灾备恢复时一次性历史数据回填 (从 strategies.production.yaml 读 bundle filter_config 自动推导 specs) |
 | `README.md` | 本文档 |
 
 ## 一键 bootstrap (P2-2 推荐)

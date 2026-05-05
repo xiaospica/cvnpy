@@ -36,10 +36,11 @@ flowchart TB
         end
 
         subgraph Config ["F:/Quant/vnpy/vnpy_strategy_dev/"]
-            Code["代码 + run_ml_headless.py"]:::proc
-            SimDB[("vnpy_qmt_sim/.trading_state/<br/>sim_<gateway>.db × N")]:::data
+            Code["代码 + run_ml_headless.py + .env.production"]:::proc
             VTSet[("C:/Users/.../vt_setting.json<br/>(tushare token / miniqmt 路径)")]:::data
         end
+
+        SimDB[("D:/vnpy_data/state/<br/>sim_<gateway>.db × N<br/>+ replay_history.db (A2)")]:::data
 
         subgraph SubProc ["按需 spawn"]
             Pred["推理子进程<br/>(qlib + lgb)<br/>Python 3.11"]:::proc
@@ -303,30 +304,34 @@ CSI300 成分股动态变化, 需要带历史调入调出的 CSV. 默认路径
 
 ### Step 7. 首次拉数据 + dump qlib bin
 
+> **必须先做 Step 8** (rsync bundle), 这一步要从 bundle 的 `filter_config.json`
+> 反向推导 filter_chain_specs.
+
+P2-2 提供了 `deploy/initial_ingest.ps1` 一键脚本, 自动从 strategies.production.yaml
+找 bundle, 读 filter_config.json, 调 `TushareDatafeedPro.ingest_today` — 用户**不需要**
+手敲 filter_chain_specs:
+
 ```powershell
-# 手动跑一次 daily ingest (而不是等 20:00 cron)
-F:\Program_Home\vnpy\python.exe -c "
-from vnpy_tushare_pro import TushareDatafeedPro
-dp = TushareDatafeedPro()
-dp.daily_ingest_pipeline.set_filter_chain_specs({
-    'csi300_no_suspend_min_90_days_in_csi300': {
-        'schema_version': 1,
-        'universe': 'csi300',
-        'filter_id': 'csi300_no_suspend_min_90_days_in_csi300',
-        'filter_chain': [
-            {'name': 'no_suspend',  'class': 'SuspendFilter',          'params': {}},
-            {'name': 'min_90_days', 'class': 'NewStockFilter',         'params': {'min_days': 90}},
-            {'name': 'in_csi300',   'class': 'IndexConstituentFilter', 'params': {'index_code': '000300.SH'}},
-        ],
-        'training_filter_parquet_basename': 'csi300_custom_filtered.parquet',
-    }
-})
-result = dp.daily_ingest_pipeline.ingest_today('20260430')
-print(result)
-"
-# 期望: stages_done = ['fetch', 'filter', 'by_stock', 'dump']
-# 检查 D:/vnpy_data/qlib_data_bin/calendars/day.txt 末尾日期
+# 单日 (今天 / 指定):
+.\deploy\initial_ingest.ps1
+.\deploy\initial_ingest.ps1 -Date 20260505
+
+# 范围回填 (上线场景: 推荐拉模型 test 区间起始至今, 让回放有完整数据):
+.\deploy\initial_ingest.ps1 -From 20260101 -To 20260505
+
+# 强制覆盖已有 merged 快照
+.\deploy\initial_ingest.ps1 -Date 20260505 -Force
 ```
+
+期望输出: 每日 `stages={'fetch', 'filter', 'by_stock', 'dump'}` + qlib_calendar_last
+推进到当日. 跑完后:
+```powershell
+Get-Content D:\vnpy_data\qlib_data_bin\calendars\day.txt -Tail 3
+ls D:\vnpy_data\snapshots\filtered\*_$(Get-Date -Format yyyyMMdd).parquet
+```
+
+⚠️ **凭据要求**: vt_setting.json 的 `datafeed.password` (tushare token) 必须填,
+否则 ingest 第一阶段 `fetch` 直接 raise. 见 Step 4c.
 
 ### Step 8. rsync bundle 到部署机
 
