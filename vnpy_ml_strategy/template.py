@@ -36,6 +36,7 @@ from __future__ import annotations
 from abc import ABC
 from datetime import date, datetime, timedelta
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -1132,6 +1133,77 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     #   3. 后台线程跑 + 暂停本策略 cron + 禁本 gateway 自动 settle，
     #      避免与 trigger_time 实时任务并发或被 timer 自然日切换污染
     #   4. 用 output_root/{name}/{day_str}/diagnostics.json 做 idempotency
+
+    # Pattern matches qlib N 日 forward return label expressions like
+    #   "Ref($close, -11) / Ref($close, -1) - 1"
+    # 抽出 group(1) = forward window 整数 (11). 不支持其他类型的 label
+    # (lookback / volume / 复合表达式), 解析失败 raise.
+    _IC_FORWARD_LABEL_PATTERN = re.compile(
+        r"^\s*Ref\(\$close,\s*-(\d+)\)\s*/\s*Ref\(\$close,\s*-1\)\s*-\s*1\s*$"
+    )
+
+    @property
+    def ic_forward_window(self) -> int:
+        """从 ``bundle_dir/task.json`` 解析 IC 计算用的 forward 窗口交易日数.
+
+        数据流:
+          训练时 qlib 把 dataset.kwargs.handler.kwargs.label[0] 写到 task.json,
+          典型值 ``"Ref($close, -11) / Ref($close, -1) - 1"`` (forward=11d).
+          推理时 vnpy 把这个 task.json 复制到 bundle_dir, 本属性按需读 + 解析.
+
+        缓存: 一旦解析成功结果存到 ``self._cached_ic_forward_window``;
+        策略实例生命周期内 label 不会变, 不必每次重新读盘.
+
+        失败 raise:
+          - ``bundle_dir`` 未配置 / task.json 不存在 → FileNotFoundError
+          - task.json 格式错 / 缺 label 字段 → KeyError / ValueError
+          - label 表达式不匹配 ``Ref($close, -N)/Ref($close, -1)-1`` 模板 → ValueError
+
+        调用方 (MLEngine._resolve_ic_forward_window) 应捕获异常 + log + skip
+        IC backfill, **绝不沉默用错误默认值**算出错误的 IC.
+        """
+        cached = getattr(self, "_cached_ic_forward_window", None)
+        if cached is not None:
+            return cached
+
+        bundle_dir = getattr(self, "bundle_dir", "") or ""
+        if not bundle_dir:
+            raise FileNotFoundError(
+                f"策略 {getattr(self, 'strategy_name', '?')} bundle_dir 未配置, "
+                f"无法解析 IC forward window"
+            )
+
+        task_path = Path(bundle_dir) / "task.json"
+        if not task_path.exists():
+            raise FileNotFoundError(f"bundle task.json 不存在: {task_path}")
+
+        task_json = json.loads(task_path.read_text(encoding="utf-8"))
+        try:
+            label_list = task_json["dataset"]["kwargs"]["handler"]["kwargs"]["label"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError(
+                f"task.json 缺 dataset.kwargs.handler.kwargs.label 字段: {task_path}"
+            ) from exc
+        if not isinstance(label_list, (list, tuple)) or not label_list:
+            raise ValueError(
+                f"task.json label 字段非列表或空: {label_list!r} ({task_path})"
+            )
+        # 与 qlib 框架行为一致: dataset.label[0] 作主 label
+        primary = label_list[0]
+        if not isinstance(primary, str):
+            raise ValueError(
+                f"label[0] 非字符串: {primary!r} ({task_path})"
+            )
+
+        match = self._IC_FORWARD_LABEL_PATTERN.match(primary)
+        if not match:
+            raise ValueError(
+                f"label 表达式不匹配 Ref($close, -N)/Ref($close, -1)-1 模板: "
+                f"{primary!r} ({task_path})"
+            )
+        forward = int(match.group(1))
+        self._cached_ic_forward_window = forward
+        return forward
 
     def _resolve_replay_window(self) -> Optional[Tuple[date, date]]:
         """从 setting + bundle task.json 推导回放起止日期。返回 None 表示跳过。"""

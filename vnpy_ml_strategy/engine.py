@@ -14,6 +14,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Callable, Dict, Optional
 
+from loguru import logger
+
 from vnpy.event import EventEngine, Event
 from vnpy.trader.engine import BaseEngine, MainEngine
 
@@ -21,6 +23,7 @@ from vnpy_common.scheduler import DailyTimeTaskScheduler
 
 from .base import APP_NAME, EVENT_ML_METRICS, EVENT_ML_METRICS_ALERT, EVENT_ML_STRATEGY
 from .monitoring.cache import MetricsCache
+from .monitoring.cache_loader import reload_history_from_disk
 from .monitoring.publisher import publish_metrics as _publish_metrics
 from .predictors.qlib_predictor import QlibPredictor
 from .predictors.model_registry import ModelRegistry
@@ -664,8 +667,76 @@ class MLEngine(BaseEngine):
         if status == "ok" and output_root:
             self._trigger_ic_backfill(strategy_name, output_root)
 
+    def _resolve_ic_forward_window(self, strat: Any, strategy_name: str) -> Optional[int]:
+        """读 ``strat.ic_forward_window`` (策略侧 property, 从 bundle/task.json 解析).
+
+        失败 (策略没实现 / bundle 缺失 / label 表达式不匹配模板) 返 None,
+        调用方应跳过 IC backfill — **绝不沉默用错误默认值**算出错误的 IC.
+        """
+        try:
+            value = getattr(strat, "ic_forward_window")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ic_backfill][%s] ic_forward_window 解析失败, skip backfill: %s",
+                strategy_name, exc,
+            )
+            return None
+        if value is None:
+            logger.warning(
+                "[ic_backfill][%s] ic_forward_window=None, skip backfill",
+                strategy_name,
+            )
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "[ic_backfill][%s] ic_forward_window=%r 不是整数, skip backfill",
+                strategy_name, value,
+            )
+            return None
+
+    def _on_ic_backfill_complete(
+        self,
+        strategy_name: str,
+        output_root: str,
+        result: IcBackfillResult,
+    ) -> None:
+        """IcBackfillService 子进程跑完磁盘 metrics.json 重写后的回调.
+
+        子进程在 ``{output_root}/{strategy}/{day}/metrics.json`` 上 in-place 改 IC
+        字段, 但主进程 MetricsCache 是上次 publish_metrics 时的旧值. 这里把磁盘
+        最近 max_history 天 metrics.json 重新 reload 到 cache, 让 webtrader
+        REST 端点返回最新 (含已 backfill IC) 数据.
+
+        失败仅 log warn, 不抛 — 已在后台线程, 抛了也没人接.
+        """
+        if not result.success:
+            return
+        if result.computed == 0:
+            return  # 没有新 IC 写入, cache 不需要刷
+        try:
+            n = reload_history_from_disk(
+                self._metrics_cache,
+                strategy_name=strategy_name,
+                output_root=output_root,
+                max_days=self._metrics_cache._max_history,
+            )
+            logger.info(
+                "[ic_backfill][%s] reloaded %d days metrics into cache (computed=%d)",
+                strategy_name, n, result.computed,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ic_backfill][%s] reload cache failed: %s", strategy_name, exc,
+            )
+
     def _trigger_ic_backfill(self, strategy_name: str, output_root: str) -> None:
-        """从策略实例读 provider_uri / inference_python, lazy 起 service 后异步触发."""
+        """从策略实例读 provider_uri / inference_python, lazy 起 service 后异步触发.
+
+        on_complete 回调把磁盘 metrics.json 重写后 reload 到 MetricsCache,
+        让 webtrader 端读到最新 IC.
+        """
         strat = self.strategies.get(strategy_name)
         if strat is None:
             return
@@ -673,6 +744,9 @@ class MLEngine(BaseEngine):
         inference_python = getattr(strat, "inference_python", None)
         if not provider_uri or not inference_python:
             return  # 策略没配齐, 跳过
+        forward_window = self._resolve_ic_forward_window(strat, strategy_name)
+        if forward_window is None:
+            return  # forward_window 无法可靠解析, 不算错误的 IC
         svc = self._ic_backfill_services.get(strategy_name)
         if svc is None:
             svc = IcBackfillService(
@@ -680,8 +754,11 @@ class MLEngine(BaseEngine):
                 output_root=output_root,
                 provider_uri=provider_uri,
                 inference_python=inference_python,
-                forward_window=int(getattr(strat, "ic_forward_window", 2)),
+                forward_window=forward_window,
                 scan_days=int(getattr(strat, "ic_backfill_scan_days", 30)),
+                on_complete=lambda r: self._on_ic_backfill_complete(
+                    strategy_name, output_root, r,
+                ),
             )
             self._ic_backfill_services[strategy_name] = svc
         svc.run_async()
@@ -689,7 +766,11 @@ class MLEngine(BaseEngine):
     def run_ic_backfill_now(
         self, strategy_name: str, *, scan_days: Optional[int] = None,
     ) -> Optional[IcBackfillResult]:
-        """手动触发 IC 回填 (绕过 debounce, 同步阻塞返回结果). 给 REST/手动调用用."""
+        """手动触发 IC 回填 (绕过 debounce, 同步阻塞返回结果). 给 REST/手动调用用.
+
+        同步路径下 cache reload 在 run_sync 返回之前完成 — 让调用方拿到的
+        result 已经是 cache 也刷新过的状态.
+        """
         strat = self.strategies.get(strategy_name)
         if strat is None:
             return None
@@ -698,15 +779,21 @@ class MLEngine(BaseEngine):
         inference_python = getattr(strat, "inference_python", None)
         if not (output_root and provider_uri and inference_python):
             return None
+        forward_window = self._resolve_ic_forward_window(strat, strategy_name)
+        if forward_window is None:
+            return None
         svc = IcBackfillService(
             strategy_name=strategy_name,
             output_root=output_root,
             provider_uri=provider_uri,
             inference_python=inference_python,
-            forward_window=int(getattr(strat, "ic_forward_window", 2)),
+            forward_window=forward_window,
             scan_days=int(scan_days if scan_days is not None else getattr(strat, "ic_backfill_scan_days", 30)),
         )
-        return svc.run_sync()
+        result = svc.run_sync()
+        # run_sync 不走 _worker, 不会自动调 on_complete; 手动调用 reload
+        self._on_ic_backfill_complete(strategy_name, output_root, result)
+        return result
 
     def get_latest_metrics(self, strategy_name: str) -> Optional[Dict[str, Any]]:
         """供 webtrader adapter 查询 (Phase 2.6)."""
