@@ -448,16 +448,21 @@ if (-not $SkipBackupSchedule) {
         Write-Warning "daily_backup.ps1 不存在, 跳过任务计划"
     } else {
         $taskName = "vnpy_daily_backup"
-        $existing = schtasks /query /tn $taskName 2>$null
-        if ($LASTEXITCODE -eq 0) {
+        # 用 Get-ScheduledTask cmdlet 而非 'schtasks /query' — 后者在任务
+        # 不存在时写 stderr 报"系统找不到指定的文件", PS5.1 + 父脚本
+        # $ErrorActionPreference=Stop 会被包装成 NativeCommandError 终止.
+        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existing) {
             Write-Host "  ✓ task '$taskName' 已存在 (skip)" -ForegroundColor DarkGreen
         } else {
             $tr = "powershell -ExecutionPolicy Bypass -File `"$backupScript`""
-            schtasks /create /tn $taskName /tr $tr /sc daily /st 02:00 /ru SYSTEM /f | Out-Null
+            # /Create 在任务不存在时 OK; 我们已 gate 走到这分支说明确实不存在,
+            # 所以不需要 /F 强覆盖. /F 留着也无妨, 出意外仍能覆盖.
+            $createOut = & schtasks /create /tn $taskName /tr $tr /sc daily /st 02:00 /ru SYSTEM /f
             if ($LASTEXITCODE -eq 0) {
                 Write-Host "  + task '$taskName' 已创建 (每日 02:00 跑)" -ForegroundColor Green
             } else {
-                Write-Warning "schtasks 创建失败, 手动: schtasks /create /tn $taskName /tr `"$tr`" /sc daily /st 02:00 /ru SYSTEM"
+                Write-Warning "schtasks 创建失败 (rc=$LASTEXITCODE): $createOut`n手动: schtasks /create /tn $taskName /tr `"$tr`" /sc daily /st 02:00 /ru SYSTEM /F"
             }
         }
     }
