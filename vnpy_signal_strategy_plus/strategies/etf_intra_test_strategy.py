@@ -335,7 +335,7 @@ class EtfIntraTestStrategy(MySQLSignalStrategyPlus):
         return gw
 
     def _settle_day(self, sim_gw, day: date) -> None:
-        """触发 sim 日终结算并清 _replay_now。"""
+        """触发 sim 日终结算 + 写入回放权益快照（mlearnweb 前端权益曲线数据源）。"""
         try:
             sim_gw.td.counter.settle_end_of_day(day)
             self.write_log(
@@ -343,6 +343,47 @@ class EtfIntraTestStrategy(MySQLSignalStrategyPlus):
             )
         except Exception as exc:
             self.write_log(f"[replay] settle_end_of_day({day}) 异常: {exc}")
+            return
+
+        # 写回放逻辑日权益快照到 D:/vnpy_data/state/replay_history.db。mlearnweb
+        # 端 replay_equity_sync_loop（每 5 分钟）从 vnpy_webtrader 的
+        # /api/v1/ml/strategies/.../replay/equity_snapshots fanout 拉到自己的
+        # strategy_equity_snapshots(source_label='replay_settle')，前端 curve 字段
+        # 就是这些点。算法与 vnpy_ml_strategy._persist_replay_equity_snapshot 一致。
+        try:
+            from datetime import time as _time
+            from vnpy_ml_strategy.replay_history import write_snapshot
+
+            counter = sim_gw.td.counter
+            cash = float(counter.capital - counter.frozen)
+            market_value = 0.0
+            n_positions = 0
+            for pos in counter.positions.values():
+                vol = float(getattr(pos, "volume", 0) or 0)
+                if vol <= 0:
+                    continue
+                price = float(getattr(pos, "price", 0) or 0)
+                pnl = float(getattr(pos, "pnl", 0) or 0)
+                market_value += vol * price + pnl
+                n_positions += 1
+            equity = cash + market_value
+            ts = datetime.combine(day, _time(hour=15, minute=0, second=0))
+            ok = write_snapshot(
+                strategy_name=self.strategy_name,
+                ts=ts,
+                strategy_value=equity,
+                account_equity=equity,
+                positions_count=n_positions,
+                raw_variables={"replay_day": str(day)},
+            )
+            if ok and not getattr(self, "_replay_persist_logged_first", False):
+                self.write_log(
+                    f"[replay] replay_history.db 权益快照已写入 (day={day} equity={equity:.0f})"
+                    "; mlearnweb 后端 replay_equity_sync_loop ~5min fanout 同步"
+                )
+                self._replay_persist_logged_first = True
+        except Exception as exc:
+            self.write_log(f"[replay] day {day} 权益快照写入失败: {type(exc).__name__}: {exc}")
 
     def run_polling(self) -> None:
         """覆盖父类：按 remark 升序的"虚拟交易日"回放控制器。
