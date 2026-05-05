@@ -147,7 +147,28 @@ F:/Program_Home/vnpy/python.exe `
 [seed] 注入 14 个持仓; 占用资金 997,248; 剩余 capital=2,752; OMS 已同步
 ```
 
-可选 `--no-webtrader` 跳过 WebTrader 启动（纯后台 sim+strategy）。
+**常用参数**：
+
+| 参数 | 用途 |
+|---|---|
+| `--no-webtrader` | 跳过 WebTrader 启动（纯后台 sim+strategy） |
+| `--use-production-ports` | 让 sim_e2e 占用生产端口 (2014/4102/8001)，**前端 5173 能看到测试策略卡片**。前提：先停掉常驻 webtrader，否则启动前端口冲突预检会 `sys.exit(2)` 退出。 |
+
+**让 mlearnweb 前端 5173 显示测试策略**（需要前端可视化测试时）：
+
+```powershell
+# 1) 停掉常驻 webtrader（找占用 2014/4102/8001 的 python 进程，Stop-Process）
+Get-NetTCPConnection -LocalPort 2014, 4102, 8001 -State Listen |
+    Select-Object -Unique OwningProcess |
+    ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+
+# 2) 用生产端口启动 sim_e2e（前端会立刻看到 etf_intra_test 卡片）
+F:/Program_Home/vnpy/python.exe `
+  F:\Quant\vnpy\vnpy_strategy_dev\vnpy_signal_strategy_plus\test\run_sim_e2e.py `
+  --use-production-ports
+```
+
+测试完毕 Ctrl+C 关停 sim_e2e 后，重启你的常驻 webtrader 即可恢复生产视图。
 
 ### 5.3 跑端到端编排器
 

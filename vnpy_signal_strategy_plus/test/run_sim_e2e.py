@@ -191,6 +191,37 @@ def boot(setting_path: Path, logger: logging.Logger):
     return main_engine, web_proc
 
 
+def _check_production_ports_free(logger: logging.Logger) -> None:
+    """``--use-production-ports`` 启动前的护栏：若 2014/4102/8001 仍在监听，
+    打印占用进程信息后 sys.exit(2)，避免和生产常驻 webtrader 端口冲突。"""
+    try:
+        import psutil
+    except ImportError:
+        logger.warning("[port-check] psutil 未安装，跳过端口冲突预检")
+        return
+
+    target_ports = {2014, 4102, 8001}
+    holders: list[tuple[int, int, str]] = []
+    for c in psutil.net_connections(kind="inet"):
+        if c.status != psutil.CONN_LISTEN:
+            continue
+        if c.laddr and c.laddr.port in target_ports and c.pid:
+            try:
+                proc = psutil.Process(c.pid)
+                holders.append((c.laddr.port, c.pid, proc.name()))
+            except psutil.NoSuchProcess:
+                continue
+    if not holders:
+        logger.info("[port-check] 2014/4102/8001 全部空闲，可占用")
+        return
+
+    logger.error("[port-check] 生产端口被占用，--use-production-ports 启动取消：")
+    for port, pid, name in holders:
+        logger.error(f"  port={port} PID={pid} name={name}")
+    logger.error("请先停掉常驻 webtrader（PowerShell: Stop-Process -Id <PID> -Force），再重试。")
+    sys.exit(2)
+
+
 def _drain_proc_output(
     proc: subprocess.Popen, logger: logging.Logger, prefix: str
 ) -> None:
@@ -223,16 +254,38 @@ def main() -> None:
         action="store_true",
         help="不启动 WebTrader 服务（纯后台 sim+strategy）",
     )
+    parser.add_argument(
+        "--use-production-ports",
+        action="store_true",
+        help=(
+            "覆盖 test_setting.webtrader 的端口为生产默认 (2014/4102/8001)，"
+            "让 mlearnweb 前端 5173 能看到测试策略卡片。"
+            "启动前需先停掉常驻 webtrader（否则端口冲突报错退出）。"
+        ),
+    )
     args = parser.parse_args()
 
     logger = _setup_logger()
     setting_path = Path(args.config)
 
-    if args.no_webtrader:
-        # 临时覆盖 setting 中的 enable 标志
+    # 处理 --no-webtrader / --use-production-ports：写入临时 setting 文件
+    setting_overrides_needed = args.no_webtrader or args.use_production_ports
+    if setting_overrides_needed:
         with open(setting_path, "r", encoding="utf-8") as f:
             setting = json.load(f)
-        setting.setdefault("webtrader", {})["enable"] = False
+        web = setting.setdefault("webtrader", {})
+        if args.no_webtrader:
+            web["enable"] = False
+        if args.use_production_ports:
+            # 启动前检查 2014/4102/8001 是否被占（多半是生产 webtrader）
+            _check_production_ports_free(logger)
+            web["rep_address"] = "tcp://127.0.0.1:2014"
+            web["pub_address"] = "tcp://127.0.0.1:4102"
+            web["http_port"] = "8001"
+            logger.warning(
+                "[main] --use-production-ports：覆盖 webtrader 端口为生产默认 "
+                "(2014/4102/8001)；前端 5173 现在会显示本测试策略"
+            )
         tmp = setting_path.with_name(f".tmp_{setting_path.name}")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(setting, f, ensure_ascii=False, indent=2)
