@@ -31,12 +31,15 @@ class SignalTemplatePlus(ABC):
     ):
         """"""
         self.signal_engine: "SignalEnginePlus" = signal_engine
-        
+
         if not self.strategy_name:
             self.strategy_name = self.__class__.__name__
 
         self.inited: bool = False
         self.trading: bool = False
+        # 订单序号：与 vnpy_ml_strategy.MlTemplate 保持一致，每次 send_order 自增；
+        # 用于 get_order_reference 生成 ``{strategy_name}:{seq}`` 格式 reference。
+        self._order_seq: int = 0
 
     def update_setting(self, setting: Dict[str, Any]) -> None:
         """
@@ -93,11 +96,20 @@ class SignalTemplatePlus(ABC):
         return class_parameters
 
     def get_order_reference(self) -> str:
+        """生成订单 reference - 与 vnpy_ml_strategy.MlTemplate 完全对齐，
+        格式 ``{strategy_name}:{seq}``（重挂时尾部追加 ``R``）。
+
+        关键：mlearnweb 后端 ``list_strategy_trades`` 用
+        ``prefix = f"{strategy_name}:"`` 做 ``startswith`` 过滤把成交归到策略
+        卡片。早期版本用 ``{APP_NAME}_{strategy_name}``（无冒号无序号）会被
+        过滤掉，导致前端 5173 的 TradesCard 永远显示空。
+
+        AutoResubmitMixin 可读 ``self._is_resubmitting`` 判断当前是否处于
+        重挂语境，与 MlTemplate 行为一致。
         """
-        获取委托的 reference 标识。
-        默认格式: {APP_NAME}_{strategy_name}
-        """
-        return f"{APP_NAME}_{self.strategy_name}"
+        self._order_seq += 1
+        suffix = "R" if getattr(self, "_is_resubmitting", False) else ""
+        return f"{self.strategy_name}:{self._order_seq}{suffix}"
 
     @abstractmethod
     def on_init(self) -> None:
