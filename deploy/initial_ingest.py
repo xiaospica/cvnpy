@@ -36,6 +36,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+sys.path.append('..')
 
 _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parent  # deploy/.. → repo root
@@ -165,12 +166,12 @@ def main() -> int:
 
     print("[ingest] 初始化 TushareDatafeedPro (vt_setting.json datafeed.password)...")
     try:
-        from vnpy_tushare_pro import TushareDatafeedPro
+        from vnpy_tushare_pro import Datafeed
     except Exception as exc:
         print(f"[ingest] ❌ import vnpy_tushare_pro 失败: {exc}")
         print("        检查: vnpy 主 Python 是否装了 vnpy + vnpy_tushare_pro")
         return 2
-    dp = TushareDatafeedPro()
+    dp = Datafeed()
     pipeline = getattr(dp, "daily_ingest_pipeline", None)
     if pipeline is None:
         print("[ingest] ❌ TushareDatafeedPro.daily_ingest_pipeline 未启用; "
