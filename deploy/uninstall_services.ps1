@@ -27,11 +27,15 @@ if (-not $nssmExe) {
 # 推理端只装一个服务 (mlearnweb 在另一项目, 不在这里管理)
 $services = @("vnpy_headless")
 foreach ($svc in $services) {
-    & $nssmExe.Source status $svc 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "─── 卸载 $svc ───" -ForegroundColor Cyan
-        & $nssmExe.Source stop $svc | Out-Null
-        Start-Sleep -Seconds 2
+    # 用 Get-Service 静默判断, 避免 'nssm status' 在服务不存在时写 stderr +
+    # PS5.1 + 父脚本 $ErrorActionPreference=Stop 导致的 NativeCommandError.
+    $existing = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Host "─── 卸载 $svc (status=$($existing.Status)) ───" -ForegroundColor Cyan
+        if ($existing.Status -eq 'Running') {
+            & $nssmExe.Source stop $svc | Out-Null
+            Start-Sleep -Seconds 2
+        }
         & $nssmExe.Source remove $svc confirm | Out-Null
         Write-Host "✓ $svc 已卸载"
     } else {

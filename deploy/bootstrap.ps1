@@ -55,9 +55,17 @@ param(
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$NoAutoInstallNssm,
 
+    # 默认开启 Python 自动装. 关闭时若 .env / 自动检测都拿不到 Python 则 raise.
+    # 检测顺序: 显式 -VnpyPython/-InferencePython > .env.production > py launcher >
+    # 常见安装位置 > 注册表; 仍找不到时 -Apply 自动 'winget install Python.Python.X'
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$NoAutoInstallPython,
+
     [string]$VnpyRoot = (Split-Path -Parent (Split-Path -Parent $PSCommandPath)),
-    [string]$VnpyPython = "F:\Program_Home\vnpy\python.exe",
-    [string]$InferencePython = "E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.exe",
+    # 留空 = 自动检测 (.env > py launcher > 常见位置 > 注册表 > winget 自动装)
+    # 显式给路径则跳过检测直接用
+    [string]$VnpyPython = "",
+    [string]$InferencePython = "",
     [string]$QsDataRoot = "D:\vnpy_data",
     [string]$MlOutputRoot = "D:\ml_output",
     [string]$LogRoot = "D:\vnpy_logs",
@@ -98,6 +106,94 @@ function Require-Admin() {
         Write-Error "Apply 模式必须以 Administrator 运行 (NSSM 装服务 / 任务计划程序 / NTP 配置 都需要)."
         exit 1
     }
+}
+
+function Read-EnvFile($path) {
+    <#
+    .SYNOPSIS
+        读 .env 文件解析为 hashtable. 不带 dotenv 的所有花哨语法 (插值 / 多行)
+        — 部署脚本只关心简单 KEY=VALUE 行.
+    #>
+    if (-not (Test-Path $path)) { return @{} }
+    $envMap = @{}
+    Get-Content $path -ErrorAction SilentlyContinue | ForEach-Object {
+        $line = $_.Trim()
+        if (-not $line -or $line.StartsWith('#')) { return }
+        if ($line -match '^([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$') {
+            $val = $matches[2].Trim()
+            # 去掉两端引号
+            if ($val -match '^"(.*)"$' -or $val -match "^'(.*)'$") {
+                $val = $matches[1]
+            }
+            $envMap[$matches[1]] = $val
+        }
+    }
+    return $envMap
+}
+
+function Find-PythonExe($majorMinor) {
+    <#
+    .SYNOPSIS
+        在常见位置找 Python X.Y. 顺序: py launcher > 常见安装目录 > 注册表.
+        都找不到返回 $null.
+    #>
+    # 1. py launcher (Win 上 Python 装好默认会注册)
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        try {
+            $exe = (& py "-$majorMinor" -c "import sys; print(sys.executable)" 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $exe) {
+                $exe = $exe.ToString().Trim()
+                if ($exe -and (Test-Path $exe)) { return $exe }
+            }
+        } catch {}
+    }
+
+    # 2. 常见安装位置
+    $tag = $majorMinor.Replace('.', '')   # 3.13 → 313
+    $candidates = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python$tag\python.exe",
+        "C:\Python$tag\python.exe",
+        "C:\Program Files\Python$tag\python.exe",
+        "C:\Program Files (x86)\Python$tag\python.exe"
+    )
+    foreach ($p in $candidates) {
+        if (Test-Path $p) { return $p }
+    }
+
+    # 3. 注册表 — Python 官方 installer 写 HKLM:\SOFTWARE\Python\PythonCore\X.Y\InstallPath
+    $regKey = "HKLM:\SOFTWARE\Python\PythonCore\$majorMinor\InstallPath"
+    if (Test-Path $regKey) {
+        $installDir = (Get-ItemProperty $regKey -ErrorAction SilentlyContinue).'(default)'
+        if ($installDir -and (Test-Path "$installDir\python.exe")) {
+            return "$installDir\python.exe"
+        }
+    }
+    # HKCU 也试一下 (per-user 装)
+    $regKey = "HKCU:\SOFTWARE\Python\PythonCore\$majorMinor\InstallPath"
+    if (Test-Path $regKey) {
+        $installDir = (Get-ItemProperty $regKey -ErrorAction SilentlyContinue).'(default)'
+        if ($installDir -and (Test-Path "$installDir\python.exe")) {
+            return "$installDir\python.exe"
+        }
+    }
+
+    return $null
+}
+
+function Install-Python($majorMinor) {
+    <#
+    .SYNOPSIS
+        winget 装 Python X.Y. 装完重新 Find-PythonExe 取路径.
+        winget 不可用时 throw, 让用户自己装.
+    #>
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "winget 不可用 — 手动装 Python $majorMinor (https://www.python.org/downloads/)"
+    }
+    Write-Host "  [py$majorMinor] 走 winget 装 Python.Python.$majorMinor..." -ForegroundColor DarkGray
+    & winget install --id "Python.Python.$majorMinor" --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Host
+    # 刷新 PATH (winget 装的解释器可能新加 PATH 项)
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    return Find-PythonExe $majorMinor
 }
 
 function Install-Nssm() {
@@ -181,14 +277,40 @@ function Install-Nssm() {
 
 Section "Step 1 · 前置检查 (binaries + paths)"
 
-# Python 解释器
-$vpyOk = Test-Path $VnpyPython
-$detail = if ($vpyOk) { (& $VnpyPython --version 2>&1) -join " " } else { "缺失 $VnpyPython — 自己装 vnpy 用的 Python 3.13 (winget install Python.Python.3.13)" }
-Add-Check "vnpy Python" $vpyOk $detail
+# Python 解释器 — 解析顺序: 显式参数 > .env.production > Find-PythonExe 自动检测
+# Apply 模式下检测仍失败时, 后面 Step 1.5b 调 Install-Python 走 winget
+$envFile = Join-Path $VnpyRoot ".env.production"
+$envVars = Read-EnvFile $envFile
 
-$ipyOk = Test-Path $InferencePython
-$detail = if ($ipyOk) { (& $InferencePython --version 2>&1) -join " " } else { "缺失 $InferencePython — 推理子进程用的 Python 3.11" }
-Add-Check "inference Python" $ipyOk $detail
+if (-not $VnpyPython) { $VnpyPython = $envVars['VNPY_PYTHON'] }
+if (-not $VnpyPython -or -not (Test-Path $VnpyPython)) {
+    $detected = Find-PythonExe "3.13"
+    if ($detected) { $VnpyPython = $detected }
+}
+$vpyOk = $VnpyPython -and (Test-Path $VnpyPython)
+$vpyAutoInstall = (-not $vpyOk) -and ((-not $IsApplyMode) -or (-not $NoAutoInstallPython))
+if ($vpyOk) {
+    Add-Check "vnpy Python (3.13)" $true ((& $VnpyPython --version 2>&1) -join " " + " @ $VnpyPython")
+} elseif ($vpyAutoInstall) {
+    Add-Check "vnpy Python (3.13)" $false "未检测到 — Apply 时自动 'winget install Python.Python.3.13'" -IsWarning
+} else {
+    Add-Check "vnpy Python (3.13)" $false "未检测到, 且 -NoAutoInstallPython 已设. 手动: winget install Python.Python.3.13"
+}
+
+if (-not $InferencePython) { $InferencePython = $envVars['INFERENCE_PYTHON'] }
+if (-not $InferencePython -or -not (Test-Path $InferencePython)) {
+    $detected = Find-PythonExe "3.11"
+    if ($detected) { $InferencePython = $detected }
+}
+$ipyOk = $InferencePython -and (Test-Path $InferencePython)
+$ipyAutoInstall = (-not $ipyOk) -and ((-not $IsApplyMode) -or (-not $NoAutoInstallPython))
+if ($ipyOk) {
+    Add-Check "inference Python (3.11)" $true ((& $InferencePython --version 2>&1) -join " " + " @ $InferencePython")
+} elseif ($ipyAutoInstall) {
+    Add-Check "inference Python (3.11)" $false "未检测到 — Apply 时自动 'winget install Python.Python.3.11'" -IsWarning
+} else {
+    Add-Check "inference Python (3.11)" $false "未检测到, 且 -NoAutoInstallPython 已设. 手动: winget install Python.Python.3.11"
+}
 
 # NSSM — 装在 PATH 里; 没装时 Apply 模式会自动装 (除非 -NoAutoInstallNssm)
 $nssm = Get-Command nssm -ErrorAction SilentlyContinue
@@ -247,14 +369,56 @@ if (-not $IsApplyMode) {
 
 Require-Admin
 
-# ---- step 1.5: NSSM 自动安装 ---------------------------------------------
+# ---- step 1.5a: Python 自动安装 ------------------------------------------
+
+if (-not $vpyOk) {
+    if ($NoAutoInstallPython) {
+        Write-Error "[bootstrap] vnpy Python (3.13) 未检测到, 且 -NoAutoInstallPython 已设. abort."
+        exit 1
+    }
+    Section "Step 1.5a · 自动安装 vnpy Python (3.13)"
+    try {
+        $installed = Install-Python "3.13"
+        if (-not $installed -or -not (Test-Path $installed)) {
+            throw "winget install 完成但 Find-PythonExe 仍找不到"
+        }
+        $VnpyPython = $installed
+        Write-Host "  ✓ Python 3.13 现在可用: $VnpyPython" -ForegroundColor Green
+    }
+    catch {
+        Write-Error "[bootstrap] 自动装 Python 3.13 失败: $_`n手动: 下 https://www.python.org/downloads/release/python-3138/"
+        exit 1
+    }
+}
+
+if (-not $ipyOk) {
+    if ($NoAutoInstallPython) {
+        Write-Error "[bootstrap] inference Python (3.11) 未检测到, 且 -NoAutoInstallPython 已设. abort."
+        exit 1
+    }
+    Section "Step 1.5a · 自动安装 inference Python (3.11)"
+    try {
+        $installed = Install-Python "3.11"
+        if (-not $installed -or -not (Test-Path $installed)) {
+            throw "winget install 完成但 Find-PythonExe 仍找不到"
+        }
+        $InferencePython = $installed
+        Write-Host "  ✓ Python 3.11 现在可用: $InferencePython" -ForegroundColor Green
+    }
+    catch {
+        Write-Error "[bootstrap] 自动装 Python 3.11 失败: $_`n手动: 下 https://www.python.org/downloads/release/python-3119/"
+        exit 1
+    }
+}
+
+# ---- step 1.5b: NSSM 自动安装 --------------------------------------------
 
 if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
     if ($NoAutoInstallNssm) {
         Write-Error "[bootstrap] NSSM 未装且 -NoAutoInstallNssm 已设, abort. 手动装后重试."
         exit 1
     }
-    Section "Step 1.5 · 自动安装 NSSM"
+    Section "Step 1.5b · 自动安装 NSSM"
     try {
         Install-Nssm | Out-Null
         # 二次校验

@@ -93,12 +93,18 @@ Write-Host ""
 Write-Host "─── 安装服务: $svc ───" -ForegroundColor Cyan
 
 # 已存在 → 先 stop + remove (重装)
-& $nssmExe.Source status $svc 2>&1 | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "  [!] $svc 已存在, 先 stop + remove"
-    & $nssmExe.Source stop $svc | Out-Null
-    Start-Sleep -Seconds 2
+# 不用 'nssm status' 检查 — 服务不存在时它写 stderr "Can't open service!",
+# PS5.1 + 父脚本 $ErrorActionPreference=Stop 会被包装成 NativeCommandError.
+# 改用 Get-Service 静默判断, 不触发原生 stderr.
+$existing = Get-Service -Name $svc -ErrorAction SilentlyContinue
+if ($existing) {
+    Write-Host "  [!] $svc 已存在 (status=$($existing.Status)), 先 stop + remove"
+    if ($existing.Status -eq 'Running') {
+        & $nssmExe.Source stop $svc | Out-Null
+        Start-Sleep -Seconds 2
+    }
     & $nssmExe.Source remove $svc confirm | Out-Null
+    Start-Sleep -Seconds 1
 }
 
 # install
