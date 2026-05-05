@@ -45,6 +45,15 @@ _QLIB_CORE = _PROJECT_ROOT / "vendor" / "qlib_strategy_core"
 if _QLIB_CORE.exists() and str(_QLIB_CORE) not in sys.path:
     sys.path.insert(0, str(_QLIB_CORE))
 
+# 关键：把项目根注入 sys.path 之首，确保 ``import vnpy_webtrader`` 加载工程版
+# (F:\Quant\vnpy\vnpy_strategy_dev\vnpy_webtrader\，含 list_strategies / get_node_health
+# 等 37 个方法的新版本)，而不是 site-packages 的 vnpy_webtrader 1.1.0 老版本（只有
+# 5 个方法，会导致前端 5173 调 /api/v1/strategy 报 KeyError 500）。
+# 这也保证 vnpy_qmt_sim / vnpy_signal_strategy_plus / vnpy_qmt 等工程内子包都
+# 走工程版而非（如果有的话）site-packages 旧版。
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 os.environ.setdefault("VNPY_DOCK_BACKEND", "ads")
 
 from vnpy.event import EventEngine  # noqa: E402
@@ -94,6 +103,16 @@ def boot(setting_path: Path, logger: logging.Logger):
     main_engine.add_app(SignalStrategyPlusApp)
     main_engine.add_app(WebTraderApp)
     logger.info(f"[boot] gateway/app 注册完成 gateway={gateway_name}")
+
+    # vnpy_webtrader 来源校验：必须是工程版（37+ 方法）。site-packages 1.1.0 老
+    # 版本只有 5 个方法，会导致前端 5173 调 /api/v1/strategy 报 KeyError 500。
+    import vnpy_webtrader.engine as _vwe
+    if "Quant" not in _vwe.__file__:
+        logger.warning(
+            f"[boot] ⚠️ vnpy_webtrader.engine 加载自 {_vwe.__file__}，"
+            "可能是 site-packages 老版本！前端策略卡片会失败。"
+            "检查 sys.path 是否包含项目根。"
+        )
 
     # 1) connect sim gateway —— 内部会启动 md / td / persistence
     main_engine.connect(connect_setting, gateway_name)
@@ -154,6 +173,13 @@ def boot(setting_path: Path, logger: logging.Logger):
                 web_engine.start_server(rep, pub)
                 rpc_started = True
                 logger.info(f"[boot] WebEngine RpcServer 启动 REP={rep} PUB={pub}")
+                # 诊断：列出 RpcServer 实际注册的函数（曾出现 list_strategies/
+                # get_node_health 注册不上、前端调 /api/v1/strategy 报 500 的问题）
+                try:
+                    funcs = sorted(getattr(web_engine.server, "_functions", {}).keys())
+                    logger.info(f"[boot] RpcServer 已注册 {len(funcs)} 个 RPC: {funcs}")
+                except Exception:
+                    pass
             except Exception as exc:
                 logger.error(f"[boot] start_server 失败: {exc}; webtrader 不可用，主流程继续")
 
