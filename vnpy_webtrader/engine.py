@@ -96,6 +96,8 @@ class WebEngine(BaseEngine):
         self.server.register(self.get_ml_metrics_latest)
         self.server.register(self.get_ml_metrics_history)
         self.server.register(self.get_ml_prediction_summary)
+        self.server.register(self.get_ml_prediction_dates)
+        self.server.register(self.get_ml_prediction_summary_by_date)
         self.server.register(self.get_ml_health)
         self.server.register(self.get_ml_replay_equity_snapshots)
 
@@ -328,6 +330,25 @@ class WebEngine(BaseEngine):
         summary = adapter.get_prediction_summary(name)
         if summary is None:
             return self._err(f"策略无最新预测: {name}", 404)
+        return {"ok": True, "message": "", "data": summary}
+
+    def get_ml_prediction_dates(self, name: str) -> Dict[str, Any]:
+        """Phase 3.2: 列出策略所有有 metrics+selections 落盘的交易日 (升序)."""
+        adapter = self._ml_adapter()
+        if adapter is None:
+            return self._err("MlStrategy 引擎未注册", 404)
+        return {"ok": True, "message": "", "data": adapter.list_prediction_dates(name)}
+
+    def get_ml_prediction_summary_by_date(
+        self, name: str, yyyymmdd: str,
+    ) -> Dict[str, Any]:
+        """Phase 3.2: 按日 YYYYMMDD 读 metrics.json + selections.parquet 拼 summary."""
+        adapter = self._ml_adapter()
+        if adapter is None:
+            return self._err("MlStrategy 引擎未注册", 404)
+        summary = adapter.get_prediction_summary_by_date(name, yyyymmdd)
+        if summary is None:
+            return self._err(f"{name}@{yyyymmdd} 无落盘预测", 404)
         return {"ok": True, "message": "", "data": summary}
 
     def get_ml_health(self) -> Dict[str, Any]:

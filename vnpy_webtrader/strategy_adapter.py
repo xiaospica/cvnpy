@@ -465,6 +465,100 @@ class MLStrategyAdapter(StrategyEngineAdapter):
             ]
         return []
 
+    # ---- 历史预测 (Phase 3.2) ----
+
+    def list_prediction_dates(self, name: str) -> List[str]:
+        """扫 {output_root}/{name}/ 下 YYYYMMDD 子目录, 返回升序日期列表 (YYYY-MM-DD).
+
+        仅返回同时含 ``metrics.json`` 和 ``selections.parquet`` 的天 — 缺一个
+        说明当天 pipeline 异常, 暴露给前端 DatePicker 没意义.
+        """
+        from pathlib import Path
+
+        strat = getattr(self.engine, "strategies", {}).get(name)
+        if strat is None:
+            return []
+        output_root = getattr(strat, "output_root", None)
+        if not output_root:
+            return []
+        strat_dir = Path(output_root) / name
+        if not strat_dir.exists():
+            return []
+        out: List[str] = []
+        for d in strat_dir.iterdir():
+            if not d.is_dir() or not d.name.isdigit() or len(d.name) != 8:
+                continue
+            if not (d / "metrics.json").exists():
+                continue
+            if not (d / "selections.parquet").exists():
+                continue
+            out.append(f"{d.name[:4]}-{d.name[4:6]}-{d.name[6:8]}")
+        out.sort()
+        return out
+
+    def get_prediction_summary_by_date(
+        self, name: str, yyyymmdd: str,
+    ) -> Optional[Dict[str, Any]]:
+        """按日组装预测 summary — 与 get_prediction_summary (latest) 同构,
+        但读 ``{output_root}/{name}/{yyyymmdd}/`` 下的 metrics.json + selections.parquet
+        而不是 MetricsCache. 给 mlearnweb historical_predictions_sync 用.
+        """
+        import json
+        import pandas as pd
+        from pathlib import Path
+
+        if len(yyyymmdd) != 8 or not yyyymmdd.isdigit():
+            return None
+        strat = getattr(self.engine, "strategies", {}).get(name)
+        if strat is None:
+            return None
+        output_root = getattr(strat, "output_root", None)
+        if not output_root:
+            return None
+        day_dir = Path(output_root) / name / yyyymmdd
+        if not day_dir.is_dir():
+            return None
+
+        metrics_path = day_dir / "metrics.json"
+        if not metrics_path.exists():
+            return None
+        try:
+            with open(metrics_path, "r", encoding="utf-8") as f:
+                metrics = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(metrics, dict):
+            return None
+
+        topk: List[Dict[str, Any]] = []
+        sel_path = day_dir / "selections.parquet"
+        if sel_path.exists():
+            try:
+                df = pd.read_parquet(sel_path)
+                topk = [
+                    {
+                        "rank": int(r.get("rank", i + 1)) if pd.notna(r.get("rank", i + 1)) else i + 1,
+                        "instrument": str(r.get("instrument", "")),
+                        "name": (str(r.get("name")) if pd.notna(r.get("name")) else None),
+                        "score": float(r.get("score")) if pd.notna(r.get("score")) else None,
+                        "weight": float(r.get("weight")) if pd.notna(r.get("weight")) else None,
+                    }
+                    for i, (_, r) in enumerate(df.iterrows())
+                ]
+            except Exception:
+                topk = []
+
+        return {
+            "strategy": name,
+            "trade_date": metrics.get("trade_date"),
+            "model_run_id": metrics.get("model_run_id"),
+            "n_symbols": metrics.get("n_predictions", 0),
+            "score_histogram": metrics.get("score_histogram", []),
+            "pred_mean": metrics.get("pred_mean"),
+            "pred_std": metrics.get("pred_std"),
+            "topk": topk,
+        }
+
     def get_replay_equity_snapshots(
         self,
         name: str,

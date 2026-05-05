@@ -57,20 +57,33 @@ def ml_prediction_latest_summary(
     return unwrap_result(get_rpc_client().get_ml_prediction_summary(name))
 
 
-@router.get("/strategies/{name}/prediction/{yyyymmdd}")
-def ml_prediction_by_date(
+@router.get("/strategies/{name}/prediction/dates")
+def ml_prediction_dates(
+    name: str,
+    access: bool = Depends(get_access),
+) -> List[str]:
+    """列出策略可用预测日期 (升序 YYYY-MM-DD).
+
+    Phase 3.2: 给 mlearnweb ``historical_predictions_sync`` 用 — 它会拿到这个
+    列表后逐天 fetch_summary 灌进 SQLite, 解决 prediction/{yyyymmdd}/summary
+    端点过去仅返最新一天的限制.
+    """
+    return unwrap_result(get_rpc_client().get_ml_prediction_dates(name))
+
+
+@router.get("/strategies/{name}/prediction/{yyyymmdd}/summary")
+def ml_prediction_summary_by_date(
     name: str,
     yyyymmdd: str,
     access: bool = Depends(get_access),
 ) -> Dict[str, Any]:
-    """按日查询预测 summary.
+    """按日查询预测 summary (Phase 3.2 — 替代 2.7 的 501 stub).
 
-    Phase 2.6: 从磁盘读 ``{output_root}/{name}/{yyyymmdd}/metrics.json``. 当前
-    走 rpc_client 的 get_ml_prediction_summary 兜底返回 latest (非按日);
-    按日查询留待 Phase 2.7 接入磁盘扫描.
+    数据源: ``{output_root}/{name}/{yyyymmdd}/metrics.json`` + ``selections.parquet``,
+    与 ``prediction/latest/summary`` 同结构 (含 topk + score_histogram +
+    pred_mean/std + n_symbols + model_run_id).
     """
-    # TODO Phase 2.7: via get_rpc_client().get_ml_prediction_by_date(name, yyyymmdd)
-    raise HTTPException(status_code=501, detail="按日查询待 Phase 2.7 实现")
+    return unwrap_result(get_rpc_client().get_ml_prediction_summary_by_date(name, yyyymmdd))
 
 
 @router.get("/strategies/{name}/replay/equity_snapshots")
