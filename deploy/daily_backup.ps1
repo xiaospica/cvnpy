@@ -26,12 +26,14 @@
 # 依赖: 7zip 可执行文件 (默认在 PATH 找 7z; 没装则降级 zip)
 
 param(
-    [string]$VnpyRoot = "F:\Quant\vnpy\vnpy_strategy_dev",
-    [string]$BackupRoot = "D:\backups",
+    # 留空 = 从 .env.production / 自动检测取 (见 deploy/_lib.ps1 Get-DeployContext).
+    # 显式给路径则跳过解析直接用.
+    [string]$VnpyRoot = "",
+    [string]$BackupRoot = "",
+    [string]$VnpyDataRoot = "",
+    [string]$ModelsRoot = "",
     [int]$Retention = 30,                            # 保留 30 天
     [string]$VntraderRoot = "$env:USERPROFILE\.vntrader",
-    [string]$VnpyDataRoot = "D:\vnpy_data",
-    [string]$ModelsRoot = "D:\vnpy_data\models",
     [switch]$IncludeMlearnweb,                       # 默认 false (mlearnweb 在监控端独立备)
     # 同机部署时若想顺手备 mlearnweb.db, 用 -IncludeMlearnweb -MlearnwebDb <绝对路径>
     # 跨机部署: 监控端在自己 deploy/daily_backup.ps1 里独立备份, 推理端不应碰
@@ -39,6 +41,17 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# 共享 deploy helper
+. (Join-Path $PSScriptRoot "_lib.ps1")
+
+# ─── 路径解析 (.env.production 单一来源) ──────────────────────────────────
+
+if (-not $VnpyRoot) { $VnpyRoot = Resolve-RepoRootFromScript $PSScriptRoot }
+$ctx = Get-DeployContext -RepoRoot $VnpyRoot
+if (-not $BackupRoot)    { $BackupRoot    = $ctx.BackupRoot }
+if (-not $VnpyDataRoot)  { $VnpyDataRoot  = $ctx.QsDataRoot }
+if (-not $ModelsRoot)    { $ModelsRoot    = $ctx.VnpyModelRoot }
 $today = Get-Date -Format "yyyyMMdd"
 $staging = Join-Path $BackupRoot "staging_$today"
 $archive = Join-Path $BackupRoot "vnpy_daily_$today.7z"

@@ -62,14 +62,15 @@ param(
     [switch]$NoAutoInstallPython,
 
     [string]$VnpyRoot = (Split-Path -Parent (Split-Path -Parent $PSCommandPath)),
-    # 留空 = 自动检测 (.env > py launcher > 常见位置 > 注册表 > winget 自动装)
-    # 显式给路径则跳过检测直接用
+    # 所有路径留空 = 从 .env.production / 自动检测 取 (见 deploy/_lib.ps1
+    # Get-DeployContext). 显式给则跳过解析直接用. 部署机一般只需编辑
+    # .env.production 一处, 不需要在每个脚本上改命令行.
     [string]$VnpyPython = "",
     [string]$InferencePython = "",
-    [string]$QsDataRoot = "D:\vnpy_data",
-    [string]$MlOutputRoot = "D:\ml_output",
-    [string]$LogRoot = "D:\vnpy_logs",
-    [string]$BackupRoot = "D:\backups",
+    [string]$QsDataRoot = "",
+    [string]$MlOutputRoot = "",
+    [string]$LogRoot = "",
+    [string]$BackupRoot = "",
     # NSSM 直下载 fallback 用. 默认装到 C:\Program Files\nssm\, 加系统 PATH.
     [string]$NssmInstallDir = "C:\Program Files\nssm",
     [string]$NssmDownloadUrl = "https://nssm.cc/release/nssm-2.24.zip"
@@ -77,6 +78,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $IsApplyMode = $PSCmdlet.ParameterSetName -eq 'Apply'
+
+# 共享 deploy helper (Read-EnvFile / Find-PythonExe / Get-DeployContext)
+. (Join-Path $PSScriptRoot "_lib.ps1")
 
 # ---- helper ---------------------------------------------------------------
 
@@ -108,82 +112,10 @@ function Require-Admin() {
     }
 }
 
-function Read-EnvFile($path) {
-    <#
-    .SYNOPSIS
-        读 .env 文件解析为 hashtable. 不带 dotenv 的所有花哨语法 (插值 / 多行)
-        — 部署脚本只关心简单 KEY=VALUE 行.
-    #>
-    if (-not (Test-Path $path)) { return @{} }
-    $envMap = @{}
-    Get-Content $path -ErrorAction SilentlyContinue | ForEach-Object {
-        $line = $_.Trim()
-        if (-not $line -or $line.StartsWith('#')) { return }
-        if ($line -match '^([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$') {
-            $val = $matches[2].Trim()
-            # 去掉两端引号
-            if ($val -match '^"(.*)"$' -or $val -match "^'(.*)'$") {
-                $val = $matches[1]
-            }
-            $envMap[$matches[1]] = $val
-        }
-    }
-    return $envMap
-}
-
-function Find-PythonExe($majorMinor) {
-    <#
-    .SYNOPSIS
-        在常见位置找 Python X.Y. 顺序: py launcher > 常见安装目录 > 注册表.
-        都找不到返回 $null.
-    #>
-    # 1. py launcher (Win 上 Python 装好默认会注册)
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        try {
-            $exe = (& py "-$majorMinor" -c "import sys; print(sys.executable)" 2>$null)
-            if ($LASTEXITCODE -eq 0 -and $exe) {
-                $exe = $exe.ToString().Trim()
-                if ($exe -and (Test-Path $exe)) { return $exe }
-            }
-        } catch {}
-    }
-
-    # 2. 常见安装位置
-    $tag = $majorMinor.Replace('.', '')   # 3.13 → 313
-    $candidates = @(
-        "$env:LOCALAPPDATA\Programs\Python\Python$tag\python.exe",
-        "C:\Python$tag\python.exe",
-        "C:\Program Files\Python$tag\python.exe",
-        "C:\Program Files (x86)\Python$tag\python.exe"
-    )
-    foreach ($p in $candidates) {
-        if (Test-Path $p) { return $p }
-    }
-
-    # 3. 注册表 — Python 官方 installer 写 HKLM:\SOFTWARE\Python\PythonCore\X.Y\InstallPath
-    $regKey = "HKLM:\SOFTWARE\Python\PythonCore\$majorMinor\InstallPath"
-    if (Test-Path $regKey) {
-        $installDir = (Get-ItemProperty $regKey -ErrorAction SilentlyContinue).'(default)'
-        if ($installDir -and (Test-Path "$installDir\python.exe")) {
-            return "$installDir\python.exe"
-        }
-    }
-    # HKCU 也试一下 (per-user 装)
-    $regKey = "HKCU:\SOFTWARE\Python\PythonCore\$majorMinor\InstallPath"
-    if (Test-Path $regKey) {
-        $installDir = (Get-ItemProperty $regKey -ErrorAction SilentlyContinue).'(default)'
-        if ($installDir -and (Test-Path "$installDir\python.exe")) {
-            return "$installDir\python.exe"
-        }
-    }
-
-    return $null
-}
-
 function Install-Python($majorMinor) {
     <#
     .SYNOPSIS
-        winget 装 Python X.Y. 装完重新 Find-PythonExe 取路径.
+        winget 装 Python X.Y. 装完用 _lib.Find-PythonExe 取路径.
         winget 不可用时 throw, 让用户自己装.
     #>
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -193,7 +125,7 @@ function Install-Python($majorMinor) {
     & winget install --id "Python.Python.$majorMinor" --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Host
     # 刷新 PATH (winget 装的解释器可能新加 PATH 项)
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-    return Find-PythonExe $majorMinor
+    return Find-PythonExe -MajorMinor $majorMinor
 }
 
 function Install-Nssm() {
@@ -277,16 +209,20 @@ function Install-Nssm() {
 
 Section "Step 1 · 前置检查 (binaries + paths)"
 
-# Python 解释器 — 解析顺序: 显式参数 > .env.production > Find-PythonExe 自动检测
-# Apply 模式下检测仍失败时, 后面 Step 1.5b 调 Install-Python 走 winget
-$envFile = Join-Path $VnpyRoot ".env.production"
-$envVars = Read-EnvFile $envFile
+# 路径单一来源 (.env.production via Get-DeployContext). 所有未显式给的 param
+# 都从 ctx 填充 — 部署机用户只需编辑 .env.production 即可.
+$ctx = Get-DeployContext -RepoRoot $VnpyRoot
+if (-not $VnpyPython)      { $VnpyPython      = $ctx.VnpyPython }
+if (-not $InferencePython) { $InferencePython = $ctx.InferencePython }
+if (-not $QsDataRoot)      { $QsDataRoot      = $ctx.QsDataRoot }
+if (-not $MlOutputRoot)    { $MlOutputRoot    = $ctx.MlOutputRoot }
+if (-not $LogRoot)         { $LogRoot         = $ctx.LogRoot }
+if (-not $BackupRoot)      { $BackupRoot      = $ctx.BackupRoot }
 
-if (-not $VnpyPython) { $VnpyPython = $envVars['VNPY_PYTHON'] }
-if (-not $VnpyPython -or -not (Test-Path $VnpyPython)) {
-    $detected = Find-PythonExe "3.13"
-    if ($detected) { $VnpyPython = $detected }
-}
+# Python 检测兜底 — Get-DeployContext 已尝试 Find-PythonExe, 这里仅记录
+# 当前是否找到 (用于 Step 1.5a 决策是否走 winget 自动装)
+if ($VnpyPython -and -not (Test-Path $VnpyPython)) { $VnpyPython = "" }
+if ($InferencePython -and -not (Test-Path $InferencePython)) { $InferencePython = "" }
 $vpyOk = $VnpyPython -and (Test-Path $VnpyPython)
 $vpyAutoInstall = (-not $vpyOk) -and ((-not $IsApplyMode) -or (-not $NoAutoInstallPython))
 if ($vpyOk) {
@@ -297,11 +233,6 @@ if ($vpyOk) {
     Add-Check "vnpy Python (3.13)" $false "未检测到, 且 -NoAutoInstallPython 已设. 手动: winget install Python.Python.3.13"
 }
 
-if (-not $InferencePython) { $InferencePython = $envVars['INFERENCE_PYTHON'] }
-if (-not $InferencePython -or -not (Test-Path $InferencePython)) {
-    $detected = Find-PythonExe "3.11"
-    if ($detected) { $InferencePython = $detected }
-}
 $ipyOk = $InferencePython -and (Test-Path $InferencePython)
 $ipyAutoInstall = (-not $ipyOk) -and ((-not $IsApplyMode) -or (-not $NoAutoInstallPython))
 if ($ipyOk) {

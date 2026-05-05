@@ -43,10 +43,22 @@
 [CmdletBinding()]
 param(
     [string]$NssmPath   = "nssm",
-    [string]$VnpyRoot   = "F:\Quant\vnpy\vnpy_strategy_dev",
-    [string]$VnpyPython = "F:\Program_Home\vnpy\python.exe",
-    [string]$LogRoot    = "D:\vnpy_logs"
+    # 留空 = 从 .env.production / 自动检测 取 (见 deploy/_lib.ps1 Get-DeployContext)
+    # 显式给路径则跳过解析直接用
+    [string]$VnpyRoot   = "",
+    [string]$VnpyPython = "",
+    [string]$LogRoot    = ""
 )
+
+# 共享 deploy helper (Read-EnvFile / Find-PythonExe / Get-DeployContext)
+. (Join-Path $PSScriptRoot "_lib.ps1")
+
+# ─── 路径解析 (.env.production 单一来源) ──────────────────────────────────
+
+if (-not $VnpyRoot) { $VnpyRoot = Resolve-RepoRootFromScript $PSScriptRoot }
+$ctx = Get-DeployContext -RepoRoot $VnpyRoot
+if (-not $VnpyPython) { $VnpyPython = $ctx.VnpyPython }
+if (-not $LogRoot)    { $LogRoot    = $ctx.LogRoot }
 
 # ─── 前置检查 ─────────────────────────────────────────────────────────────
 
@@ -72,6 +84,10 @@ Write-Host "[OK] nssm = $($nssmExe.Source)"
 
 # 2. 关键路径 + .env / yaml 配置 (P0-1 + P0-2)
 Test-PathOrFail $VnpyRoot "VnpyRoot"
+if (-not $VnpyPython) {
+    Write-Error "[X] VnpyPython 未指定且无法自动检测; 在 .env.production 加 'VNPY_PYTHON=...', 或 -VnpyPython <路径> 显式给"
+    exit 1
+}
 Test-PathOrFail $VnpyPython "VnpyPython"
 Test-PathOrFail "$VnpyRoot\run_ml_headless.py" "run_ml_headless.py"
 Test-PathOrFail "$VnpyRoot\.env.production" ".env.production (P0-1, 拷贝 .env.example 后填值)"
