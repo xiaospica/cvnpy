@@ -30,6 +30,12 @@ import redis
 from sqlalchemy import create_engine, text
 
 
+def resolve_setting_path(template_path: Path) -> Path:
+    """优先 ``.local.json`` 副本（含真实密码、加 .gitignore），fallback 到模板。"""
+    local = template_path.with_name(template_path.stem + ".local.json")
+    return local if local.exists() else template_path
+
+
 def load_setting(path: Path) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -130,7 +136,7 @@ def main() -> None:
     parser.add_argument(
         "--config",
         default=str(
-            Path(__file__).resolve().parent / "test_setting.json"
+            resolve_setting_path(Path(__file__).resolve().parent / "test_setting.json")
         ),
     )
     parser.add_argument("--skip-mysql", action="store_true")

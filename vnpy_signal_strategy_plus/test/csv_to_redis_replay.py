@@ -41,6 +41,12 @@ import pandas as pd
 import redis
 
 
+def resolve_setting_path(template_path: Path) -> Path:
+    """优先 ``.local.json`` 副本，fallback 到模板。"""
+    local = template_path.with_name(template_path.stem + ".local.json")
+    return local if local.exists() else template_path
+
+
 CN_COLS = {
     "日期": "trade_date",
     "委托时间": "order_time",
@@ -318,8 +324,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--config",
-        required=True,
-        help="test_setting.json 路径",
+        default=str(
+            resolve_setting_path(Path(__file__).resolve().parent / "test_setting.json")
+        ),
+        help="test_setting.json 路径（默认优先 .local.json 副本）",
     )
     parser.add_argument(
         "--dry-run",

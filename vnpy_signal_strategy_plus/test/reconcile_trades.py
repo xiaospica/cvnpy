@@ -35,6 +35,12 @@ from typing import Optional
 import pandas as pd
 
 
+def resolve_setting_path(template_path: Path) -> Path:
+    """优先 ``.local.json`` 副本，fallback 到模板。"""
+    local = template_path.with_name(template_path.stem + ".local.json")
+    return local if local.exists() else template_path
+
+
 JQ_TO_VNPY_EXCHANGE = {
     "XSHG": "SSE",
     "XSHE": "SZSE",
@@ -489,7 +495,13 @@ def reconcile(setting_path: Path, logger: Optional[logging.Logger] = None) -> in
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="sim 网关 vs 原始 CSV 对账")
-    parser.add_argument("--config", required=True, help="test_setting.json 路径")
+    parser.add_argument(
+        "--config",
+        default=str(
+            resolve_setting_path(Path(__file__).resolve().parent / "test_setting.json")
+        ),
+        help="test_setting.json 路径（默认优先 .local.json 副本）",
+    )
     args = parser.parse_args()
     code = reconcile(Path(args.config))
     sys.exit(code)

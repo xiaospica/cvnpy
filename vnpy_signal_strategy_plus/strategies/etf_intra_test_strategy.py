@@ -53,7 +53,13 @@ _JQ_TO_VNPY = {"XSHG": "SSE", "XSHE": "SZSE"}
 # 测试配置文件路径：strategies/etf_intra_test_strategy.py
 #   .parent       = strategies/
 #   .parent.parent = vnpy_signal_strategy_plus/
-TEST_SETTING_PATH = (
+# 优先用 test_setting.local.json（含真实密码、加 .gitignore），fallback 到模板。
+def _resolve_setting_path(template_path: Path) -> Path:
+    local = template_path.with_name(template_path.stem + ".local.json")
+    return local if local.exists() else template_path
+
+
+TEST_SETTING_PATH = _resolve_setting_path(
     Path(__file__).resolve().parent.parent / "test" / "test_setting.json"
 )
 

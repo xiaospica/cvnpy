@@ -39,6 +39,12 @@ from sqlalchemy import (Boolean, Column, DateTime, Float, Integer, String,
                         create_engine)
 from sqlalchemy.orm import declarative_base, sessionmaker
 
+
+def resolve_setting_path(template_path: Path) -> Path:
+    """优先 ``.local.json`` 副本（含真实密码、加 .gitignore），fallback 到模板。"""
+    local = template_path.with_name(template_path.stem + ".local.json")
+    return local if local.exists() else template_path
+
 Base = declarative_base()
 
 
@@ -438,8 +444,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--config",
-        required=True,
-        help="redis_bridge_setting.json 路径",
+        default=str(
+            resolve_setting_path(
+                Path(__file__).resolve().parent / "redis_bridge_setting.json"
+            )
+        ),
+        help="redis_bridge_setting.json 路径（默认优先 .local.json 副本）",
     )
     parser.add_argument(
         "--dry-run",

@@ -58,6 +58,12 @@ import redis
 from sqlalchemy import create_engine, text
 
 
+def resolve_setting_path(template_path: Path) -> Path:
+    """优先 ``.local.json`` 副本，fallback 到模板。"""
+    local = template_path.with_name(template_path.stem + ".local.json")
+    return local if local.exists() else template_path
+
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # vnpy_strategy_dev/
 PYTHON_EXE = sys.executable  # 用当前解释器，正常情况就是 F:\Program_Home\vnpy\python.exe
 
@@ -360,9 +366,11 @@ def main() -> None:
     parser.add_argument(
         "--config",
         default=str(
-            PROJECT_ROOT / "vnpy_signal_strategy_plus" / "test" / "test_setting.json"
+            resolve_setting_path(
+                PROJECT_ROOT / "vnpy_signal_strategy_plus" / "test" / "test_setting.json"
+            )
         ),
-        help="test_setting.json 路径",
+        help="test_setting.json 路径（默认优先 .local.json 副本）",
     )
     parser.add_argument(
         "--skip-cleanup",
