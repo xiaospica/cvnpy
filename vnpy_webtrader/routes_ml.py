@@ -41,7 +41,7 @@ def ml_metrics_latest(
 @router.get("/strategies/{name}/metrics")
 def ml_metrics_history(
     name: str,
-    days: int = Query(30, ge=1, le=365),
+    days: int = Query(30, ge=1, le=1000),
     access: bool = Depends(get_access),
 ) -> List[Dict[str, Any]]:
     """最近 N 日指标列表 (ring buffer 按插入顺序返回)."""

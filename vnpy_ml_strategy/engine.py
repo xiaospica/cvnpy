@@ -46,8 +46,11 @@ class MLEngine(BaseEngine):
         # 策略类注册表 {class_name: Type} — UI 从下拉框选择类时用
         self.strategy_classes: Dict[str, type] = {}
 
-        # MetricsCache (Phase 2.5) — thread-safe 最新值 + 最近 30 日 ring buffer
-        self._metrics_cache = MetricsCache(max_history_days=30)
+        # MetricsCache (Phase 2.5) — thread-safe 最新值 + 最近 N 个交易日 ring buffer.
+        # 500 ≈ 2 个交易年; 单条 ~10KB, 5 策略 ~25MB 内存可接受. 这个值同时是
+        # init_strategy 启动期 reload_history_from_disk 的 max_days, 以及
+        # IcBackfillService on_complete 回调 reload 用的窗口.
+        self._metrics_cache = MetricsCache(max_history_days=500)
 
         # IC 回填 service (方案 §2.4.5) — 每只策略一个实例, 在 publish_metrics
         # 后台线程触发, 不阻塞主线程. lazy 创建 (需要策略实例上的路径参数).
@@ -205,6 +208,28 @@ class MLEngine(BaseEngine):
         except Exception as exc:
             print(f"[MLEngine] init_strategy({strategy_name}) failed: {exc}")
             return False
+        # 启动期把磁盘 metrics.json 灌进 cache, 让 webtrader 第一次查询就能拿到
+        # 完整历史; 不依赖 IcBackfillService on_complete 才 reload (后者只在 IC
+        # 真有新值要写时才触发, 冷启动后到首次回填之间 cache 为空).
+        output_root = getattr(strat, "output_root", None)
+        if output_root:
+            try:
+                n = reload_history_from_disk(
+                    self._metrics_cache,
+                    strategy_name=strategy_name,
+                    output_root=output_root,
+                    max_days=self._metrics_cache._max_history,
+                )
+                if n > 0:
+                    logger.info(
+                        "[MLEngine][%s] seeded %d days metrics into cache on init",
+                        strategy_name, n,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[MLEngine][%s] cache seed on init failed: %s",
+                    strategy_name, exc,
+                )
         self.put_strategy_event(strat)
         return True
 

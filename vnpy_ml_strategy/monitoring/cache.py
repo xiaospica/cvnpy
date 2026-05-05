@@ -28,7 +28,23 @@ class MetricsCache:
             self._latest[strategy_name] = dict(metrics)
             if strategy_name not in self._history:
                 self._history[strategy_name] = deque(maxlen=self._max_history)
-            self._history[strategy_name].append(dict(metrics))
+            # Upsert by trade_date — 同一个 trade_date 应只有一条最新值. 否则
+            # init_strategy 启动期 reload_history_from_disk + 当日 replay
+            # publish_metrics 会让同日有 2 条; mlearnweb 端 _diff_and_apply
+            # 用 (node_id, engine, strategy, trade_date) UNIQUE 约束 INSERT
+            # 时第二条会 IntegrityError.
+            buf = self._history[strategy_name]
+            new_td = metrics.get("trade_date")
+            if new_td is not None:
+                # 倒序删旧值 — deque.remove 删第一个匹配, 我们要确保所有同日重复都清掉
+                # (deque 长度 ≤ 500, O(N) 扫描可忽略).
+                stale = [m for m in buf if m.get("trade_date") == new_td]
+                for s in stale:
+                    try:
+                        buf.remove(s)
+                    except ValueError:
+                        pass
+            buf.append(dict(metrics))
 
     def get_latest(self, strategy_name: str) -> Optional[Dict[str, Any]]:
         with self._lock:

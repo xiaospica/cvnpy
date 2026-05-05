@@ -36,7 +36,7 @@ def reload_history_from_disk(
     *,
     strategy_name: str,
     output_root: str,
-    max_days: int = 30,
+    max_days: int = 500,
 ) -> int:
     """重新加载磁盘上最近 ``max_days`` 个交易日的 metrics.json 到 cache。
 
@@ -52,8 +52,9 @@ def reload_history_from_disk(
     output_root : str
         策略输出根目录。
     max_days : int
-        最多 reload 多少天 (从今天往前数自然日)。默认 30，与 IcBackfillService
-        ``scan_days`` 默认值一致。
+        最多 reload 多少天 (从今天往前数自然日)。默认 500 (~2 个交易年), 与
+        ``MLEngine._metrics_cache`` 的 ``max_history_days`` 对齐。早期默认
+        30 是对齐 IcBackfillService.scan_days, 但启动期 seed 应灌全部历史。
 
     Returns
     -------
