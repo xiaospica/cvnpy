@@ -1,0 +1,78 @@
+{
+    "_doc": "vnpy_signal_strategy_plus 端到端回归测试配置。strategy_name 必须三处一致：(1) Redis stream_key，(2) bridge target_stg / mysql stock_trade.stg，(3) vnpy 中加载的策略实例 strategy_name。",
+
+    "strategy_name": "etf_intra_test",
+    "initial_capital": 1000000.0,
+
+    "csv": {
+        "transaction_path": "C:/Users/richard/Downloads/etf_intra_jq/_extracted/transaction.csv",
+        "position_path": "C:/Users/richard/Downloads/etf_intra_jq/_extracted/position.csv",
+        "encoding": "gbk",
+        "_doc_path": "用户已重新解压 transaction (1).zip / position (2).zip 到 _extracted/"
+    },
+
+    "redis": {
+        "host": "106.54.63.204",
+        "port": 6888,
+        "password": "REPLACE_ME",
+        "db": 0,
+        "stream_key": "etf_intra_test",
+        "trim_before_replay": true
+    },
+
+    "replay": {
+        "_doc": "回放模式 + 持仓引导：date_range=['2026-04-15','2026-04-29'] 只回放该范围内 19 笔信号增量；EtfIntraTestStrategy.on_init 自动用 csv 的前一日（4/14）持仓快照初始化 sim（注入 14 个持仓 + 扣减现金），让 sim 4/29 累计 = csv 4/14 起始 + 增量 = csv 4/29 终态。该范围 sim 命中 merged_parquet 真实历史行情，价格/股数/占比都精确。",
+        "rebase_remark_to_today": false,
+        "date_range": ["2026-04-15", "2026-04-29"],
+        "idle_settle_seconds": 30
+    },
+
+    "mysql": {
+        "host": "106.54.63.204",
+        "port": 3306,
+        "user": "root",
+        "password": "REPLACE_ME",
+        "db": "mysql",
+        "purge_before_replay": true
+    },
+
+    "sim": {
+        "_doc": "sim db 路径; account_id 默认=gateway_name=QMT_SIM; 文件名固定 sim_{account_id}.db。connect_setting 会被传给 QmtSimGateway.connect()，未列出的字段使用网关默认值。",
+        "account_id": "QMT_SIM",
+        "gateway_name": "QMT_SIM",
+        "db_dir": "D:/vnpy_data/state",
+        "delete_db_before_replay": false,
+        "connect_setting": {
+            "模拟资金": 1000000.0,
+            "行情源": "merged_parquet",
+            "merged_parquet_merged_root": "D:/vnpy_data/snapshots/merged",
+            "merged_parquet_reference_kind": "today_open",
+            "merged_parquet_fallback_days": 10,
+            "启用持久化": "是",
+            "持久化目录": "D:/vnpy_data/state"
+        }
+    },
+
+    "webtrader": {
+        "_doc": "WebTrader 服务配置。⚠️ 端口与生产 .vntrader/web_trader_setting.json 默认值（2014/4102/8001）刻意错开 +10000，避免抢占用户常驻 webtrader 进程的端口（曾出现过 sim_e2e 残留进程顶替生产服务的事故）。enable=true 时 run_sim_e2e 启动独立的 ZMQ RpcServer + uvicorn 子进程。",
+        "enable": true,
+        "rep_address": "tcp://127.0.0.1:12014",
+        "pub_address": "tcp://127.0.0.1:14102",
+        "http_host": "127.0.0.1",
+        "http_port": "18001",
+        "node_id": "e2e-sim"
+    },
+
+    "reconcile": {
+        "_doc": "对账容差。volume_tolerance=股数维度容差（绝对值，单位股）；ratio_tolerance=市值占比维度容差（小数，如 0.01 = ±1%）。市值占比是 fallback 价场景下唯一可靠的对账口径，作为 PASS/FAIL 的主判定。",
+        "volume_tolerance": 100,
+        "ratio_tolerance": 0.01,
+        "output_dir": "F:/Quant/vnpy/vnpy_strategy_dev/vnpy_signal_strategy_plus/test/output"
+    },
+
+    "wait": {
+        "_doc": "回放后等待 bridge+strategy 消化的最长秒数；轮询 stock_trade.processed 比例 ≥99% 提前结束。",
+        "max_seconds": 120,
+        "poll_interval": 2
+    }
+}

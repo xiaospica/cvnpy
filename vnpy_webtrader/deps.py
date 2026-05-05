@@ -32,8 +32,16 @@ SETTING_FILEPATH = get_file_path(SETTING_FILENAME)
 _setting: dict = load_json(SETTING_FILEPATH) or {}
 USERNAME: str = _setting.get("username", "vnpy")
 PASSWORD: str = _setting.get("password", "vnpy")
-REQ_ADDRESS: str = _setting.get("req_address", "tcp://127.0.0.1:2014")
-SUB_ADDRESS: str = _setting.get("sub_address", "tcp://127.0.0.1:4102")
+# 端口支持环境变量覆盖（向后兼容：env 未设时回退到 setting.json，再回退到默认值）。
+# 用途：同一台机器上可能同时跑生产 webtrader（默认 2014/4102）和 e2e 测试 sim
+# （test_setting.json 用 12014/14102），通过 env 把测试 uvicorn 子进程指向测试 RpcServer，
+# 不污染 .vntrader/web_trader_setting.json。
+REQ_ADDRESS: str = os.environ.get("VNPY_WEB_REQ_ADDRESS") or _setting.get(
+    "req_address", "tcp://127.0.0.1:2014"
+)
+SUB_ADDRESS: str = os.environ.get("VNPY_WEB_SUB_ADDRESS") or _setting.get(
+    "sub_address", "tcp://127.0.0.1:4102"
+)
 NODE_ID: str = _setting.get("node_id", "") or os.environ.get("VNPY_NODE_ID", "unnamed")
 NODE_DISPLAY: str = _setting.get("display_name", "") or NODE_ID
 

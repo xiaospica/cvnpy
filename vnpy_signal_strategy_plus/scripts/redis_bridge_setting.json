@@ -1,0 +1,30 @@
+{
+    "_doc": "Redis Stream -> MySQL stock_trade 中转配置。生产环境请勿提交真实密码到 git；建议复制为 redis_bridge_setting.local.json 并加入 .gitignore。",
+    "redis": {
+        "host": "106.54.63.204",
+        "port": 6888,
+        "password": "REPLACE_ME",
+        "db": 0,
+        "consumer_group": "order_group",
+        "consumer_name": "bridge-1",
+        "block_ms": 60000,
+        "count": 3
+    },
+    "mysql": {
+        "host": "106.54.63.204",
+        "port": 3306,
+        "user": "root",
+        "password": "REPLACE_ME",
+        "db": "mysql"
+    },
+    "subscriptions": [
+        {
+            "stream_key": "etf_rotation_basic",
+            "target_stg": "etf_rotation_basic"
+        }
+    ],
+    "log": {
+        "dir": "logs/redis_bridge",
+        "level": "INFO"
+    }
+}

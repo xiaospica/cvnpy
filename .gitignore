@@ -77,3 +77,17 @@ vnpy_signal_strategy
 vnpy_xt-main
 vnpy_webtrader-main
 .trading_state
+
+# Claude Code 工具配置 / 运行时日志 / sim 持久化 / 测试输出
+.claude/
+logs/
+sim_QMT_*.db
+sim_QMT_*.db-shm
+sim_QMT_*.db-wal
+sim_QMT_*.lock
+*.zip
+vnpy_signal_strategy_plus/test/output/
+
+# vnpy_signal_strategy_plus e2e 测试本地配置（含真实密码，不提交）
+vnpy_signal_strategy_plus/test/test_setting.local.json
+vnpy_signal_strategy_plus/scripts/redis_bridge_setting.local.json

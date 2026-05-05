@@ -152,7 +152,11 @@ class QmtSimGateway(BaseGateway):
         kwargs = {k[len(prefix):]: v for k, v in setting.items() if k.startswith(prefix)}
         try:
             self.md.source = build_bar_source(source_name, **kwargs)
-            self.write_log(f"行情源装配成功: {source_name} {kwargs}")
+            # 注意：kwargs 直接用 f-string 拼接出来的 dict repr 含 ``{'k': v}``，
+            # 会被 vnpy LogEngine -> loguru 的 message.format() 当成 placeholder
+            # 解析、抛 KeyError。这里展平成 ``k=v`` 列表，避免无害但刺眼的 traceback。
+            kw_str = ", ".join(f"{k}={v}" for k, v in kwargs.items())
+            self.write_log(f"行情源装配成功: {source_name} ({kw_str})")
         except Exception as exc:
             self.md.source = None
             self.write_log(f"行情源装配失败 ({source_name}): {exc}，使用合成 tick")
