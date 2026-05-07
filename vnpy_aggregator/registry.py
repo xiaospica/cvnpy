@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+import httpx
 
 from .client import NodeClient
 from .config import AggregatorConfig, NodeConfig
@@ -101,15 +103,22 @@ class NodeRegistry:
     # 扇出
     # ------------------------------------------------------------------
 
-    async def fanout_get(self, path: str) -> List[Dict[str, Any]]:
+    async def fanout_get(
+        self,
+        path: str,
+        *,
+        timeout: Optional[httpx.Timeout] = None,
+    ) -> List[Dict[str, Any]]:
         """对所有在线节点并发执行 GET, 返回 ``[{node_id, ok, data}]``."""
         async def _one(client: NodeClient) -> Dict[str, Any]:
             if not client.state.online:
                 return {"node_id": client.config.node_id, "ok": False, "data": None, "error": "offline"}
             try:
-                data = await client.get_json(path)
+                data = await client.get_json(path, timeout=timeout)
                 return {"node_id": client.config.node_id, "ok": True, "data": data}
             except Exception as exc:
+                client.state.consecutive_failures += 1
+                client.mark_offline_if_needed(max(1, self.config.heartbeat_fail_threshold - 1))
                 return {"node_id": client.config.node_id, "ok": False, "error": str(exc)}
 
         tasks = [_one(c) for c in self._clients.values()]

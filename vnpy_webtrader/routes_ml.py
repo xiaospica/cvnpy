@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from .deps import get_access, get_rpc_client, unwrap_result
+from .deps import get_access, get_fast_rpc_client, unwrap_result
 
 
 router = APIRouter(prefix="/api/v1/ml", tags=["ml"])
@@ -35,7 +35,7 @@ def ml_metrics_latest(
     access: bool = Depends(get_access),
 ) -> Dict[str, Any]:
     """最新一日监控指标 (来自 MetricsCache 内存缓存 + 子进程 metrics.json)."""
-    return unwrap_result(get_rpc_client().get_ml_metrics_latest(name))
+    return unwrap_result(get_fast_rpc_client().get_ml_metrics_latest(name))
 
 
 @router.get("/strategies/{name}/metrics")
@@ -45,7 +45,7 @@ def ml_metrics_history(
     access: bool = Depends(get_access),
 ) -> List[Dict[str, Any]]:
     """最近 N 日指标列表 (ring buffer 按插入顺序返回)."""
-    return unwrap_result(get_rpc_client().get_ml_metrics_history(name, days))
+    return unwrap_result(get_fast_rpc_client().get_ml_metrics_history(name, days))
 
 
 @router.get("/strategies/{name}/prediction/latest/summary")
@@ -54,7 +54,7 @@ def ml_prediction_latest_summary(
     access: bool = Depends(get_access),
 ) -> Dict[str, Any]:
     """最新一日预测 summary: topk + histogram + n_symbols + coverage."""
-    return unwrap_result(get_rpc_client().get_ml_prediction_summary(name))
+    return unwrap_result(get_fast_rpc_client().get_ml_prediction_summary(name))
 
 
 @router.get("/strategies/{name}/prediction/dates")
@@ -68,7 +68,7 @@ def ml_prediction_dates(
     列表后逐天 fetch_summary 灌进 SQLite, 解决 prediction/{yyyymmdd}/summary
     端点过去仅返最新一天的限制.
     """
-    return unwrap_result(get_rpc_client().get_ml_prediction_dates(name))
+    return unwrap_result(get_fast_rpc_client().get_ml_prediction_dates(name))
 
 
 @router.get("/strategies/{name}/prediction/{yyyymmdd}/summary")
@@ -83,7 +83,7 @@ def ml_prediction_summary_by_date(
     与 ``prediction/latest/summary`` 同结构 (含 topk + score_histogram +
     pred_mean/std + n_symbols + model_run_id).
     """
-    return unwrap_result(get_rpc_client().get_ml_prediction_summary_by_date(name, yyyymmdd))
+    return unwrap_result(get_fast_rpc_client().get_ml_prediction_summary_by_date(name, yyyymmdd))
 
 
 @router.get("/strategies/{name}/replay/equity_snapshots")
@@ -104,10 +104,10 @@ def ml_replay_equity_snapshots(
 
     返回空列表 = 该策略当前未发生过回放, 不算错误.
     """
-    return unwrap_result(get_rpc_client().get_ml_replay_equity_snapshots(name, since, limit))
+    return unwrap_result(get_fast_rpc_client().get_ml_replay_equity_snapshots(name, since, limit))
 
 
 @router.get("/health")
 def ml_health(access: bool = Depends(get_access)) -> Dict[str, Any]:
     """所有 ML 策略的最新存活/运行状态汇总."""
-    return unwrap_result(get_rpc_client().get_ml_health())
+    return unwrap_result(get_fast_rpc_client().get_ml_health())

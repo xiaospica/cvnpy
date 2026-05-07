@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
@@ -144,8 +145,11 @@ async def delete_node(node_id: str, user: str = Depends(require_user)) -> Dict[s
 # ---------------------------------------------------------------------------
 
 
+_FAST_FANOUT_TIMEOUT = httpx.Timeout(connect=1.5, read=3.0, write=3.0, pool=3.0)
+
+
 async def _fanout(path: str) -> List[Dict[str, Any]]:
-    return await _reg().fanout_get(path)
+    return await _reg().fanout_get(path, timeout=_FAST_FANOUT_TIMEOUT)
 
 
 @app.get("/agg/accounts", response_model=List[FanoutItem])
@@ -197,7 +201,12 @@ async def proxy(
     # 直接转发 - 简化版: 由前端构造完整 sub-path
     target = f"/api/v1/{path}"
     try:
-        status_code, body = await client.forward("POST" if payload else "GET", target, payload)
+        status_code, body = await client.forward(
+            "POST" if payload else "GET",
+            target,
+            payload,
+            timeout=httpx.Timeout(connect=3.0, read=8.0, write=8.0, pool=8.0),
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     if status_code >= 400:

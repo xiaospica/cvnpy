@@ -40,7 +40,9 @@ class NodeClient:
         self.state = NodeState(node_id=config.node_id, base_url=config.base_url)
         self._token: Optional[str] = None
         self._http = httpx.AsyncClient(
-            base_url=config.base_url, verify=config.verify_tls, timeout=10.0
+            base_url=config.base_url,
+            verify=config.verify_tls,
+            timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=5.0),
         )
         self._ws_handler = ws_handler
         self._ws_task: Optional[asyncio.Task] = None
@@ -87,14 +89,27 @@ class NodeClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def post_json(self, path: str, json_body: Optional[dict] = None) -> Any:
-        resp = await self._request("POST", path, json=json_body)
+    async def post_json(
+        self,
+        path: str,
+        json_body: Optional[dict] = None,
+        *,
+        timeout: Optional[httpx.Timeout] = None,
+    ) -> Any:
+        resp = await self._request("POST", path, json=json_body, timeout=timeout)
         resp.raise_for_status()
         return resp.json() if resp.content else None
 
-    async def forward(self, method: str, path: str, json_body: Any = None) -> Any:
+    async def forward(
+        self,
+        method: str,
+        path: str,
+        json_body: Any = None,
+        *,
+        timeout: Optional[httpx.Timeout] = None,
+    ) -> Any:
         """透传任意方法/路径, 返回 (status_code, json|text)."""
-        resp = await self._request(method, path, json=json_body)
+        resp = await self._request(method, path, json=json_body, timeout=timeout)
         try:
             body = resp.json()
         except Exception:
@@ -107,8 +122,9 @@ class NodeClient:
 
     async def heartbeat(self) -> bool:
         try:
-            info = await self.get_json("/api/v1/node/info")
-            health = await self.get_json("/api/v1/node/health")
+            fast_timeout = httpx.Timeout(connect=1.0, read=2.0, write=2.0, pool=2.0)
+            info = await self.get_json("/api/v1/node/info", timeout=fast_timeout)
+            health = await self.get_json("/api/v1/node/health", timeout=fast_timeout)
             self.state.info = info
             self.state.health = health
             self.state.last_heartbeat = time.time()

@@ -151,6 +151,25 @@ def _encode_value(v: Any) -> Any:
 _rpc_client: Optional[RpcClient] = None
 
 
+class RpcTimeoutProxy:
+    """Wrap RpcClient so readonly routes can override the default RPC timeout."""
+
+    def __init__(self, client: RpcClient, timeout_ms: int) -> None:
+        self._client = client
+        self._timeout_ms = timeout_ms
+
+    def __getattr__(self, name: str) -> Any:
+        target = getattr(self._client, name)
+        if not callable(target):
+            return target
+
+        def _call(*args: Any, **kwargs: Any) -> Any:
+            kwargs.setdefault("timeout", self._timeout_ms)
+            return target(*args, **kwargs)
+
+        return _call
+
+
 def set_rpc_client(client: RpcClient) -> None:
     global _rpc_client
     _rpc_client = client
@@ -160,6 +179,11 @@ def get_rpc_client() -> RpcClient:
     if _rpc_client is None:
         raise HTTPException(status_code=503, detail="RPC client not initialized")
     return _rpc_client
+
+
+def get_fast_rpc_client(timeout_ms: int = 5000) -> RpcClient:
+    """Readonly routes use a shorter timeout to fail fast when vnpy disconnects."""
+    return RpcTimeoutProxy(get_rpc_client(), timeout_ms)
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from .deps import get_access, get_rpc_client, unwrap_result
+from .deps import get_access, get_fast_rpc_client, get_rpc_client, unwrap_result
 
 
 router = APIRouter(prefix="/api/v1/strategy", tags=["strategy"])
@@ -65,31 +65,31 @@ class OpResultModel(BaseModel):
 
 @router.get("/engines", response_model=List[EngineDescription])
 def list_engines(access: bool = Depends(get_access)) -> List[Dict[str, Any]]:
-    return get_rpc_client().list_strategy_engines()
+    return get_fast_rpc_client().list_strategy_engines()
 
 
 @router.get("/engines/{engine}/classes")
 def list_classes(engine: str, access: bool = Depends(get_access)) -> List[str]:
-    return unwrap_result(get_rpc_client().list_strategy_classes(engine))
+    return unwrap_result(get_fast_rpc_client().list_strategy_classes(engine))
 
 
 @router.get("/engines/{engine}/classes/{class_name}/params")
 def get_class_params(
     engine: str, class_name: str, access: bool = Depends(get_access)
 ) -> Dict[str, Any]:
-    return unwrap_result(get_rpc_client().get_strategy_class_params(engine, class_name))
+    return unwrap_result(get_fast_rpc_client().get_strategy_class_params(engine, class_name))
 
 
 @router.get("", response_model=List[StrategyInfoModel])
 def list_all_strategies(access: bool = Depends(get_access)) -> List[Dict[str, Any]]:
-    return unwrap_result(get_rpc_client().list_strategies(""))
+    return unwrap_result(get_fast_rpc_client().list_strategies(""))
 
 
 @router.get("/engines/{engine}", response_model=List[StrategyInfoModel])
 def list_engine_strategies(
     engine: str, access: bool = Depends(get_access)
 ) -> List[Dict[str, Any]]:
-    return unwrap_result(get_rpc_client().list_strategies(engine))
+    return unwrap_result(get_fast_rpc_client().list_strategies(engine))
 
 
 @router.get(
@@ -98,7 +98,7 @@ def list_engine_strategies(
 def get_strategy(
     engine: str, name: str, access: bool = Depends(get_access)
 ) -> Dict[str, Any]:
-    return unwrap_result(get_rpc_client().get_strategy(engine, name))
+    return unwrap_result(get_fast_rpc_client().get_strategy(engine, name))
 
 
 # ---------------------------------------------------------------------------
