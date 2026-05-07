@@ -25,6 +25,23 @@ from typing import Any, Callable, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
+def _decode_subprocess_bytes(payload: Optional[bytes]) -> str:
+    """Best-effort decode for child-process output on Windows.
+
+    ``run_ic_backfill`` may emit Chinese logs through libraries using the active
+    console code page. Capturing with ``text=True, encoding='utf-8'`` can cause
+    ``subprocess`` reader threads to crash before we even parse the JSON summary.
+    """
+    if not payload:
+        return ""
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return payload.decode("utf-8", errors="replace")
+
+
 @dataclass
 class IcBackfillResult:
     """子进程执行汇总. ``success`` 表示子进程 exit=0; computed/skipped 字段照搬 stdout JSON."""
@@ -166,8 +183,6 @@ class IcBackfillService:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
                 timeout=self.timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
@@ -189,9 +204,12 @@ class IcBackfillService:
                 error_message=f"{type(exc).__name__}: {exc}",
             )
 
+        stdout_text = _decode_subprocess_bytes(proc.stdout)
+        stderr_text = _decode_subprocess_bytes(proc.stderr)
+
         # 子进程把 summary 一行 JSON 打到 stdout (成功时), stderr 打 fatal (失败时)
         raw: Optional[Dict[str, Any]] = None
-        target = proc.stdout if proc.returncode == 0 else (proc.stderr or proc.stdout)
+        target = stdout_text if proc.returncode == 0 else (stderr_text or stdout_text)
         for line in (target or "").strip().splitlines()[::-1]:
             line = line.strip()
             if line.startswith("{") and line.endswith("}"):
@@ -205,7 +223,7 @@ class IcBackfillService:
         if not success:
             logger.warning(
                 f"[ic_backfill][{self.strategy_name}] subprocess exit={proc.returncode}, "
-                f"stderr_tail={(proc.stderr or '')[-500:]}"
+                f"stderr_tail={stderr_text[-500:]}"
             )
 
         result = IcBackfillResult(
