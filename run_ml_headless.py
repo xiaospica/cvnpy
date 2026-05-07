@@ -436,14 +436,30 @@ def main() -> int:
         except Exception as exc:
             print(f"[headless] 注入 filter_chain_specs 失败: {exc}")
 
-    # 第三轮: start_strategy + 可选立即触发. 此时 filter_chain_specs 已就绪.
+    # 第三轮: start_strategy. 回放中的 sim 策略会在后台线程推进历史窗口，不能在这里
+    # 立刻同步 run_pipeline_now，否则：
+    #   1) 第一个策略会长时间阻塞，拖住第二个策略启动；
+    #   2) 回放尚未完成时强行跑 today pipeline，会与 stale calendar / 历史窗口推进打架。
+    # 对此类策略，改由策略自身在回放完成后按需补跑今日 pipeline。
     for name in inited:
         if not ml_engine.start_strategy(name):
             print(f"[headless] start_strategy({name}) 失败")
             continue
 
         started.append(name)
-        if TRIGGER_ON_STARTUP:
+
+    # 第四轮: 可选立即触发 today pipeline。仅对“未在跑回放”的策略执行，避免串行阻塞
+    # 其它策略启动，也避免 sim replay 场景下 today pipeline 与历史回放并发。
+    if TRIGGER_ON_STARTUP:
+        for name in started:
+            strat = ml_engine.strategies.get(name)
+            replay_status = getattr(strat, "replay_status", "") if strat else ""
+            if replay_status == "running":
+                print(
+                    f"[headless] skip immediate pipeline for {name}: "
+                    "replay_status=running; 回放完成后策略会按需补跑今日数据"
+                )
+                continue
             print(f"[headless] 立即触发 {name} pipeline...")
             ml_engine.run_pipeline_now(name)
 

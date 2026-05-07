@@ -1364,6 +1364,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
         try:
             self._replay_loop_body(start, end, gateway)
+            self._maybe_catch_up_today_after_replay(end)
             self.replay_status = "completed"
             self.write_log("[replay] 全部交易日完成，进入实时模式")
         except Exception as exc:
@@ -1386,6 +1387,48 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                         self.write_log(f"[replay] resume_job({job_name}) 失败: {exc}")
                 if paused_jobs:
                     self.write_log(f"[replay] 恢复 cron jobs {paused_jobs}")
+
+    def _maybe_catch_up_today_after_replay(self, replay_end: date) -> None:
+        """回放追平后，必要时补跑今日 pipeline，避免启动已过 trigger_time 时漏今日产物。
+
+        触发条件：
+          1. 回放窗口确实停在 yesterday（``replay_end < today``）；
+          2. 当前 wall-clock 已过 ``trigger_time``；
+          3. ``output_root/{strategy}/{today}/diagnostics.json`` 尚不存在。
+
+        这样 sim 策略在冷启动后能先追历史，再补今天一笔，mlearnweb 卡片就不会长期
+        停留在 yesterday 或空白状态。
+        """
+        today = date.today()
+        if replay_end >= today:
+            return
+
+        try:
+            trigger_at = datetime.strptime(self.trigger_time, "%H:%M").time()
+        except ValueError as exc:
+            self.write_log(f"[replay] trigger_time={self.trigger_time!r} 非法，跳过今日补跑: {exc}")
+            return
+
+        now_time = datetime.now().time()
+        if now_time < trigger_at:
+            return
+
+        today_dir = Path(self.output_root) / self.strategy_name / today.strftime("%Y%m%d")
+        if (today_dir / "diagnostics.json").exists():
+            self.write_log(f"[replay] 今日 {today} 产物已存在，跳过补跑")
+            return
+
+        self.write_log(
+            f"[replay] 已过 trigger_time={self.trigger_time}，且今日 {today} 尚无产物；"
+            "补跑一次实时 pipeline"
+        )
+        try:
+            self.run_daily_pipeline(as_of_date=today)
+        except Exception as exc:
+            self.write_log(
+                f"[replay] 今日补跑失败（保留实时模式 + cron，等待下次触发）: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     def _replay_loop_body(self, start: date, end: date, gateway: Any) -> None:
         """Phase 4 加速回放主循环。

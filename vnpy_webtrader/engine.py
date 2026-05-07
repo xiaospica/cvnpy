@@ -300,7 +300,7 @@ class WebEngine(BaseEngine):
         return adapter.stop_all().to_dict()
 
     # ------------------------------------------------------------------
-    # ML 监控专属 (MlStrategy 引擎)
+    # ML 监控专属 (MlStrategy 引擎, 仅 metrics/prediction 需要 ML 特有方法)
     # ------------------------------------------------------------------
 
     ML_ENGINE_NAME = "MlStrategy"
@@ -352,10 +352,25 @@ class WebEngine(BaseEngine):
         return {"ok": True, "message": "", "data": summary}
 
     def get_ml_health(self) -> Dict[str, Any]:
-        adapter = self._ml_adapter()
-        if adapter is None:
-            return self._err("MlStrategy 引擎未注册", 404)
-        return {"ok": True, "message": "", "data": adapter.get_health()}
+        """所有已注册策略引擎的健康状态汇总 (引擎无关).
+
+        优先找 MlStrategy adapter; 若未注册则 fanout 到所有已注册 adapter,
+        汇总各引擎的策略列表. 这样 SignalStrategyPlus / CtaStrategy 等非 ML
+        引擎的策略同样能被 mlearnweb replay_equity_sync_service 发现.
+        """
+        ml_adapter = self._ml_adapter()
+        if ml_adapter is not None:
+            return {"ok": True, "message": "", "data": ml_adapter.get_health()}
+
+        # Fallback: 汇总所有已注册 adapter 的策略
+        all_strategies: List[Dict] = []
+        for adapter in self.adapters.values():
+            try:
+                health = adapter.get_health()
+                all_strategies.extend(health.get("strategies") or [])
+            except Exception:
+                pass
+        return {"ok": True, "message": "", "data": {"strategies": all_strategies}}
 
     def get_ml_replay_equity_snapshots(
         self,
@@ -363,15 +378,29 @@ class WebEngine(BaseEngine):
         since: Optional[str] = None,
         limit: int = 10000,
     ) -> Dict[str, Any]:
-        """读 vnpy 端本地 replay_history.db 回放权益快照 (A1/B2 解耦).
+        """读本地 replay_history.db 回放权益快照 (A1/B2 解耦, 引擎无关).
 
-        mlearnweb replay_equity_sync_service 用 since=local_max(inserted_at)
-        增量 fanout 拉.
+        优先走 MlStrategy adapter; 若未注册则在所有 adapter 中找持有该策略的引擎.
+        mlearnweb replay_equity_sync_service 用 since=local_max(inserted_at) 增量拉.
         """
-        adapter = self._ml_adapter()
-        if adapter is None:
-            return self._err("MlStrategy 引擎未注册", 404)
-        rows = adapter.get_replay_equity_snapshots(name, since=since, limit=limit)
+        # 优先 MlStrategy adapter
+        ml_adapter = self._ml_adapter()
+        if ml_adapter is not None:
+            rows = ml_adapter.get_replay_equity_snapshots(name, since=since, limit=limit)
+            return {"ok": True, "message": "", "data": rows}
+
+        # Fallback: 遍历所有 adapter, 找持有该策略名的引擎
+        for adapter in self.adapters.values():
+            if adapter._exists(name):
+                rows = adapter.get_replay_equity_snapshots(name, since=since, limit=limit)
+                return {"ok": True, "message": "", "data": rows}
+
+        # 策略不在任何引擎里也不报错, 直接读 replay_history.db
+        try:
+            from vnpy_ml_strategy.replay_history import list_snapshots
+            rows = list_snapshots(name, since_iso=since, limit=limit)
+        except ImportError:
+            rows = []
         return {"ok": True, "message": "", "data": rows}
 
     # ------------------------------------------------------------------

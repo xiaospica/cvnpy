@@ -196,6 +196,10 @@ def boot(setting_path: Path, logger: logging.Logger):
                 child_env = dict(os.environ)
                 child_env["VNPY_WEB_REQ_ADDRESS"] = rep
                 child_env["VNPY_WEB_SUB_ADDRESS"] = pub
+                # 让 vnpy_qmt_sim history_positions 能找到正确的 sim db
+                sim_db_dir = str(sim_cfg.get("db_dir", ""))
+                if sim_db_dir:
+                    child_env["VNPY_QMT_SIM_TRADING_STATE"] = sim_db_dir
                 web_proc = subprocess.Popen(
                     cmd,
                     cwd=str(_PROJECT_ROOT),

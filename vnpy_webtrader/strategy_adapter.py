@@ -248,6 +248,40 @@ class StrategyEngineAdapter:
             return StrategyOpResult(False, "初始化返回 False")
         return StrategyOpResult(True, "inited")
 
+    # ---- 回放权益快照 (引擎无关, 读本地 replay_history.db) -----------------
+
+    def get_replay_equity_snapshots(
+        self,
+        name: str,
+        since: Optional[str] = None,
+        limit: int = 10000,
+    ) -> List[Dict[str, Any]]:
+        """读本地 replay_history.db 回放权益快照 (A1/B2 解耦).
+
+        所有引擎通用 — 只要策略调用过 vnpy_ml_strategy.replay_history.write_snapshot,
+        mlearnweb 的 replay_equity_sync_service 就能通过本接口拉到数据.
+        """
+        try:
+            from vnpy_ml_strategy.replay_history import list_snapshots
+        except ImportError:
+            return []
+        return list_snapshots(name, since_iso=since, limit=limit)
+
+    # ---- 通用健康检查 -------------------------------------------------------
+
+    def get_health(self) -> Dict[str, Any]:
+        """所有策略的存活状态汇总. ML 子类可 override 追加 ML 专属字段."""
+        strategies = getattr(self.engine, "strategies", {})
+        result: List[Dict[str, Any]] = []
+        for name, obj in strategies.items():
+            result.append({
+                "name": name,
+                "engine": self.app_name,
+                "inited": bool(getattr(obj, "inited", False)),
+                "trading": bool(getattr(obj, "trading", False)),
+            })
+        return {"strategies": result}
+
 
 # ---------------------------------------------------------------------------
 # 具体适配器
@@ -559,40 +593,15 @@ class MLStrategyAdapter(StrategyEngineAdapter):
             "topk": topk,
         }
 
-    def get_replay_equity_snapshots(
-        self,
-        name: str,
-        since: Optional[str] = None,
-        limit: int = 10000,
-    ) -> List[Dict[str, Any]]:
-        """读 vnpy 端本地 replay_history.db 的回放权益快照 (A1/B2 解耦后).
-
-        mlearnweb 端 replay_equity_sync_service 通过 fanout 拉本接口, UPSERT
-        到自己的 strategy_equity_snapshots(source_label='replay_settle').
-
-        Parameters
-        ----------
-        name : 策略实例名 (精确匹配)
-        since : ISO datetime; 仅返回 inserted_at >= since 的行 (增量同步用,
-                mlearnweb 用本地 max(inserted_at) 作 since)
-        limit : 单次返回最多行数 (默认 10000, 上限由 endpoint 层 Query 校验)
-
-        返回空列表表示该策略当前未发生过回放 (db 文件不存在或对应 strategy_name
-        无记录), 不算错误.
-        """
-        try:
-            from vnpy_ml_strategy.replay_history import list_snapshots
-        except ImportError:
-            return []
-        return list_snapshots(name, since_iso=since, limit=limit)
-
     def get_health(self) -> Dict[str, Any]:
-        """集合级健康检查: 所有 ML 策略的最新跑状态."""
+        """ML 专属健康检查: 在基类通用字段基础上追加 ML 运行状态字段."""
         strategies = getattr(self.engine, "strategies", {})
         result: List[Dict[str, Any]] = []
         for name, obj in strategies.items():
             result.append({
                 "name": name,
+                "inited": bool(getattr(obj, "inited", False)),
+                "trading": bool(getattr(obj, "trading", False)),
                 "last_run_date": getattr(obj, "last_run_date", ""),
                 "last_status": getattr(obj, "last_status", ""),
                 "last_error": getattr(obj, "last_error", ""),
