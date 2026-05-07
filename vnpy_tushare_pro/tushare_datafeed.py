@@ -291,8 +291,8 @@ class TushareDatafeedPro(BaseDatafeed):
             output("Tushare数据服务初始化失败：密码为空！")
             return False
 
-        ts.set_token(self.password)
-        self.pro: DataApi | None = ts.pro_api()
+        # 直接把 token 传给 pro_api，避免每次初始化都重写 ~/tk.csv。
+        self.pro: DataApi | None = ts.pro_api(self.password)
         self.inited = True
 
         return True

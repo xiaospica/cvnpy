@@ -319,40 +319,36 @@ def _wait_pipeline_with_heartbeat(
     *,
     timeout_s: int = PIPELINE_TIMEOUT_S,
     heartbeat_s: float = PIPELINE_HEARTBEAT_S,
-) -> Tuple[bool, float]:
-    """触发 ``run_pipeline_now`` 后轮询 ``diagnostics.json``, 每隔 heartbeat_s 打进度.
+) -> Tuple[str, float]:
+    """同步触发 ``run_pipeline_now(..., as_of_date=day)`` 并返回真实状态.
 
-    注意: 用 ``mtime > initial_mtime`` 判断"新产出", 否则如果该日之前跑过,
-    旧 diagnostics.json 会立刻命中, 无法正确等待本次运行.
-
-    Returns
-    -------
-    (ok, elapsed_s): ok=True 表示 diagnostics 在 timeout 内被本次运行重写
+    旧实现只盯 ``diagnostics.json`` 的 mtime，会把"子进程已写完产物、但主进程随后
+    timeout/failed，未走 persist_selections"误判成成功。这里改为以策略实例的
+    ``last_run_date/last_status`` 为准，和真实主流程保持一致。
     """
-    out_day_dir = Path(out_root) / strategy_name / day_str
-    diag_path = out_day_dir / "diagnostics.json"
-    initial_mtime = diag_path.stat().st_mtime if diag_path.exists() else 0.0
+    strat = ml_engine.strategies.get(strategy_name)
+    if strat is None:
+        raise RuntimeError(f"strategy {strategy_name!r} not registered")
 
-    # t0 必须在 run_pipeline_now 之前: 该函数实测为"同步阻塞直到 subprocess
-    # 完成"(见 smoke 日志 scheduler start→job done ~74s), 若 t0 放后面,
-    # elapsed 只计了 subprocess 完成后的 mtime 轮询时间(~2s), 严重误导.
+    day = datetime.strptime(day_str, "%Y%m%d").date()
+    expected_date = day.strftime("%Y-%m-%d")
     t0 = time.time()
-    if not ml_engine.run_pipeline_now(strategy_name):
+    if not ml_engine.run_pipeline_now(strategy_name, as_of_date=day):
         raise RuntimeError(f"run_pipeline_now failed for {day_str}")
+    elapsed = time.time() - t0
 
-    last_hb = t0
-    while time.time() - t0 < timeout_s:
-        time.sleep(2)
-        if diag_path.exists() and diag_path.stat().st_mtime > initial_mtime:
-            return True, time.time() - t0
-        now = time.time()
-        if now - last_hb >= heartbeat_s:
-            _log(
-                f"  ... pipeline[{day_str}] running ({now - t0:.0f}s elapsed, "
-                f"waiting for {diag_path.name})"
-            )
-            last_hb = now
-    return False, time.time() - t0
+    last_run_date = getattr(strat, "last_run_date", "") or ""
+    last_status = getattr(strat, "last_status", "") or ""
+    last_stage = getattr(strat, "last_stage", "") or ""
+    last_n_pred = getattr(strat, "last_n_pred", -1)
+
+    if last_run_date != expected_date:
+        return "unknown", elapsed
+    if last_stage in ("", "predict") and last_n_pred == 0 and last_status == "":
+        return "non_trading", elapsed
+    if last_status in ("ok", "empty", "failed"):
+        return last_status, elapsed
+    return "unknown", elapsed
 
 
 def _run_day(
@@ -405,18 +401,21 @@ def _run_day(
     if TRIGGER_PIPELINE_ON_STARTUP:
         _log(f"[{day_str}] Phase 4 — run_pipeline_now")
         try:
-            ok, elapsed = _wait_pipeline_with_heartbeat(
+            status, elapsed = _wait_pipeline_with_heartbeat(
                 ml_engine, STRATEGY_NAME, day_str, OUT_ROOT,
             )
         except Exception as exc:  # noqa: BLE001
             _log(f"  FAIL: pipeline 抛异常: {type(exc).__name__}: {exc}")
             return False
-        if ok:
+        if status == "ok":
             _log(f"  pipeline done elapsed={elapsed:.1f}s")
+        elif status == "non_trading":
+            _log(f"  SKIPPED: {day_str} 非交易日, pipeline 未执行")
+            return True
         else:
             _log(
-                f"  TIMEOUT: pipeline 未在 {PIPELINE_TIMEOUT_S}s 内产出新 diagnostics "
-                f"(elapsed={elapsed:.1f}s)"
+                f"  FAIL: pipeline status={status!r} elapsed={elapsed:.1f}s "
+                f"last_error={getattr(ml_engine.strategies.get(STRATEGY_NAME), 'last_error', '')}"
             )
             return False
     else:
@@ -554,6 +553,14 @@ def main() -> int:
 
     # --- Phase 3: add + init + start 策略 (提前到 Phase 2 之前, 以便多日
     # 循环模式下策略已就绪, 每日 run_pipeline_now 直接复用同一策略实例) ---
+    #
+    # 关键：这里必须显式关闭策略自身的 on_start replay。
+    # smoke_full_pipeline 已经通过 _run_day() 串行编排“先 ingest 再 pipeline”，
+    # 并支持 SIMULATE_ROLLING_DAYS 逐日重放。若保留 enable_replay=True，
+    # start_strategy() 会立刻在后台线程里跑 _run_replay_loop，导致：
+    #   1. replay 抢在 Phase 2 ingest 前启动，顺序与脚本目标相反；
+    #   2. replay 与 _run_day() 并发读写同一 output_root/snapshots，污染结果；
+    #   3. mlearnweb 先采到 replay 的旧 latest，卡片会停在 yesterday/空白。
     _log("=== Phase 3 — add_strategy ===")
     strat = ml_engine.add_strategy("QlibMLStrategy", STRATEGY_NAME, {
         "bundle_dir": BUNDLE_DIR,
@@ -567,8 +574,25 @@ def main() -> int:
         "lookback_days": 60,
         "subprocess_timeout_s": 300,
         "enable_trading": False,
+        "enable_replay": False,
     })
     assert ml_engine.init_strategy(STRATEGY_NAME)
+    ts_datafeed = tushare_engine._get_tushare_datafeed()
+    ts_pipeline = getattr(ts_datafeed, "daily_ingest_pipeline", None)
+    if ts_pipeline is None:
+        raise RuntimeError(
+            "DailyIngestPipeline 未启用，无法为 smoke 注入 filter_chain_specs"
+        )
+    specs = ml_engine.list_active_filter_configs()
+    if not specs:
+        raise RuntimeError(
+            "ml_engine.list_active_filter_configs() 返回空，无法决定 snapshot universe"
+        )
+    ts_pipeline.set_filter_chain_specs(specs)
+    _log(
+        "DailyIngestPipeline.filter_chain_specs 已注入 "
+        f"{len(specs)} 个 filter_id: {list(specs.keys())}"
+    )
     assert ml_engine.start_strategy(STRATEGY_NAME)
     _log(f"strategy inited+started, inited={strat.inited} trading={strat.trading}")
 

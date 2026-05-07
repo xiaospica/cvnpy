@@ -88,6 +88,66 @@ def _kill_process_tree(pid: int, timeout: float = 5.0) -> None:
             p.terminate()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+
+
+def _artifact_mtime(path: Path) -> float:
+    """Return artifact mtime, or 0 when the file does not exist."""
+    return path.stat().st_mtime if path.exists() else 0.0
+
+
+def _load_predict_outputs(
+    out_dir: Path,
+    *,
+    strategy_name: str,
+) -> Dict[str, Any]:
+    """Load diagnostics/metrics/predictions from one strategy day directory."""
+    diag_path = out_dir / "diagnostics.json"
+    if not diag_path.exists():
+        raise FileNotFoundError(f"diagnostics.json 不存在: {diag_path}")
+
+    diag = json.loads(diag_path.read_text(encoding="utf-8"))
+    if diag.get("schema_version", 0) != DIAGNOSTICS_SCHEMA_MAJOR:
+        raise InferenceSchemaError(
+            f"diagnostics.schema_version={diag.get('schema_version')} "
+            f"expected {DIAGNOSTICS_SCHEMA_MAJOR}"
+        )
+
+    metrics: Dict[str, Any] = {}
+    pred_df: Optional[pd.DataFrame] = None
+
+    metrics_path = out_dir / "metrics.json"
+    if metrics_path.exists():
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+
+    pred_path = out_dir / "predictions.parquet"
+    if pred_path.exists():
+        pred_df = pd.read_parquet(pred_path)
+
+    return {
+        "pred_df": pred_df,
+        "metrics": metrics,
+        "diagnostics": diag,
+    }
+
+
+def _recover_fresh_outputs_if_any(
+    out_dir: Path,
+    *,
+    strategy_name: str,
+    previous_diag_mtime: float,
+) -> Optional[Dict[str, Any]]:
+    """Recover outputs written by the current run after a monitor-side timeout.
+
+    qlib 子进程偶发会在成功写完 `diagnostics/metrics/predictions` 后，因残留子进程
+    或进程树回收延迟而让监控层超时。若 `diagnostics.json` 是本次运行新写出的，
+    则优先返回真实产物，而不是把整次推理判成 timeout 失败。
+    """
+    diag_path = out_dir / "diagnostics.json"
+    if not diag_path.exists():
+        return None
+    if _artifact_mtime(diag_path) <= previous_diag_mtime:
+        return None
+    return _load_predict_outputs(out_dir, strategy_name=strategy_name)
     gone, alive = psutil.wait_procs(procs, timeout=timeout)
     for p in alive:
         try:
@@ -237,6 +297,7 @@ class QlibPredictor:
         """
         out_dir = Path(output_root) / strategy_name / live_end.strftime("%Y%m%d")
         out_dir.mkdir(parents=True, exist_ok=True)
+        previous_diag_mtime = _artifact_mtime(out_dir / "diagnostics.json")
 
         cmd = [
             inference_python,
@@ -263,13 +324,23 @@ class QlibPredictor:
 
         # P1-5: monitored runner (RSS + 超时双监控) 替代 subprocess.run.
         # OOM / timeout 抛 InferenceOOM / InferenceTimeout, 由调用方分支处理.
-        result = _run_subprocess_monitored(
-            cmd,
-            env,
-            timeout_s=timeout_s,
-            memory_limit_mb=memory_limit_mb,
-            label=f"{strategy_name} T={live_end.isoformat()}",
-        )
+        try:
+            result = _run_subprocess_monitored(
+                cmd,
+                env,
+                timeout_s=timeout_s,
+                memory_limit_mb=memory_limit_mb,
+                label=f"{strategy_name} T={live_end.isoformat()}",
+            )
+        except InferenceTimeout:
+            recovered = _recover_fresh_outputs_if_any(
+                out_dir,
+                strategy_name=strategy_name,
+                previous_diag_mtime=previous_diag_mtime,
+            )
+            if recovered is not None:
+                return recovered
+            raise
 
         diag_path = out_dir / "diagnostics.json"
         if not diag_path.exists():
@@ -288,32 +359,7 @@ class QlibPredictor:
                 },
             }
 
-        diag = json.loads(diag_path.read_text(encoding="utf-8"))
-
-        # schema version gate
-        if diag.get("schema_version", 0) != DIAGNOSTICS_SCHEMA_MAJOR:
-            raise InferenceSchemaError(
-                f"diagnostics.schema_version={diag.get('schema_version')} "
-                f"expected {DIAGNOSTICS_SCHEMA_MAJOR}"
-            )
-
-        # Load metrics + predictions only if status != failed (save I/O on failure path)
-        metrics: Dict[str, Any] = {}
-        pred_df: Optional[pd.DataFrame] = None
-
-        metrics_path = out_dir / "metrics.json"
-        if metrics_path.exists():
-            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-
-        pred_path = out_dir / "predictions.parquet"
-        if pred_path.exists():
-            pred_df = pd.read_parquet(pred_path)
-
-        return {
-            "pred_df": pred_df,
-            "metrics": metrics,
-            "diagnostics": diag,
-        }
+        return _load_predict_outputs(out_dir, strategy_name=strategy_name)
 
     def run_range(
         self,
