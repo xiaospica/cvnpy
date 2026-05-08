@@ -145,6 +145,17 @@ if not os.getenv("QS_DATA_ROOT"):
     raise RuntimeError(
         "QS_DATA_ROOT 未设. 检查 .env (或 .env.production) 是否存在并含此字段."
     )
+_stock_list_path = os.getenv("TUSHARE_STOCK_LIST_PATH", "").strip()
+if not _stock_list_path:
+    raise RuntimeError(
+        "TUSHARE_STOCK_LIST_PATH 未设. 请在 .env (或 .env.production) 中配置 "
+        "stock_list.parquet 的绝对路径；否则 selections.parquet 中的 name 会为空."
+    )
+if not Path(_stock_list_path).exists():
+    raise RuntimeError(
+        f"TUSHARE_STOCK_LIST_PATH 指向的文件不存在: {_stock_list_path}. "
+        "请检查 .env (或 .env.production) 配置."
+    )
 
 
 TRIGGER_ON_STARTUP = True
