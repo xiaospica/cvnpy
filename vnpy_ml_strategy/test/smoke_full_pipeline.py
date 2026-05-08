@@ -110,6 +110,8 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
 
 # --- sys.path 注入 ------------------------------------------------------
@@ -134,7 +136,8 @@ if "ML_INGEST_LOOKBACK_DAYS" not in os.environ:
 # 控制本次跑哪些 Phase, 用于快速 iter (如只跑 vnpy 不拉数, 或不启 mlearnweb)
 TRIGGER_INGEST_ON_STARTUP: bool = True    # False → 只跑 vnpy 不拉数
 TRIGGER_PIPELINE_ON_STARTUP: bool = True  # False → 只拉数不推理
-SPAWN_MLEARNWEB: bool = True              # False → 不启 mlearnweb live_main 子进程
+SPAWN_MLEARNWEB: bool = os.getenv("SPAWN_MLEARNWEB", "1") != "0"  # False → 不启 mlearnweb live_main 子进程
+EXIT_AFTER_READY: bool = os.getenv("SMOKE_EXIT_AFTER_READY", "0") == "1"
 
 # --- 2) 时间窗口 ----------------------------------------------------
 # LIVE_DATE 默认 today, 但若非交易日 / 当前 < 20:00 (tushare 当日 bar 未落)
@@ -175,7 +178,12 @@ JQ_INDEX_CSV_PATHS_JSON: str = os.getenv(
 
 # --- 5) 策略 / 模型 / 输出 ------------------------------------------
 BUNDLE_DIR: str = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964"
-OUT_ROOT: str = r"D:/ml_output/smoke_full_pipeline"
+# Keep the default aligned with mlearnweb/backend/.env (ML_LIVE_OUTPUT_ROOT=D:\ml_output).
+# If this points at a nested smoke-only root, an already-running :8100 mlearnweb
+# process will look under D:/ml_output/{strategy}/... and the frontend cannot load
+# prediction/all for the smoke strategy.  Override with SMOKE_ML_OUTPUT_ROOT when
+# a fully isolated output tree is needed.
+OUT_ROOT: str = os.getenv("SMOKE_ML_OUTPUT_ROOT", os.getenv("ML_LIVE_OUTPUT_ROOT", r"D:/ml_output"))
 STRATEGY_NAME: str = "jq41_csi300_2026"
 
 # --- 6) 外部服务进程 / 解释器 ---------------------------------------
@@ -311,6 +319,16 @@ def _run_ingest_with_heartbeat(
     return state["result"], time.time() - t0
 
 
+def _is_http_alive(url: str, timeout_s: float = 2.0) -> bool:
+    try:
+        with urlopen(url, timeout=timeout_s) as r:
+            return 200 <= getattr(r, "status", 200) < 500
+    except HTTPError as exc:
+        return 200 <= exc.code < 500
+    except (OSError, URLError):
+        return False
+
+
 def _wait_pipeline_with_heartbeat(
     ml_engine: Any,
     strategy_name: str,
@@ -349,6 +367,51 @@ def _wait_pipeline_with_heartbeat(
     if last_status in ("ok", "empty", "failed"):
         return last_status, elapsed
     return "unknown", elapsed
+
+
+def _finalize_prediction_artifacts(
+    ml_engine: Any,
+    strategy_name: str,
+    day: date,
+    out_root: str,
+) -> None:
+    """Ensure selections/latest exist so mlearnweb can display TopK."""
+    import pandas as pd
+
+    strat = ml_engine.strategies.get(strategy_name)
+    if strat is None:
+        raise RuntimeError(f"strategy {strategy_name!r} not registered")
+
+    day_str = day.strftime("%Y%m%d")
+    day_iso = day.strftime("%Y-%m-%d")
+    out_day = Path(out_root) / strategy_name / day_str
+    pred_p = out_day / "predictions.parquet"
+    metrics_p = out_day / "metrics.json"
+    sel_p = out_day / "selections.parquet"
+    latest_p = Path(out_root) / strategy_name / "latest.json"
+
+    if not pred_p.exists() or not metrics_p.exists():
+        return
+
+    metrics = json.loads(metrics_p.read_text(encoding="utf-8"))
+    if not isinstance(metrics, dict) or metrics.get("n_predictions", 0) <= 0:
+        return
+
+    setattr(strat, "last_run_date", day_iso)
+    setattr(strat, "last_status", "ok")
+    setattr(strat, "last_model_run_id", metrics.get("model_run_id", ""))
+    setattr(strat, "last_n_pred", int(metrics.get("n_predictions") or 0))
+
+    if not sel_p.exists():
+        pred_df = pd.read_parquet(pred_p)
+        selected = strat.select_topk(pred_df)
+        strat.persist_selections(selected, as_of_date=day)
+        _log(f"  repaired selections.parquet from predictions: {sel_p}")
+
+    # Refresh webtrader MetricsCache and write {output_root}/{strategy}/latest.json.
+    strat._publish_metrics(metrics, as_of_date=day)
+    if latest_p.exists():
+        _log(f"  published latest.json for frontend: {latest_p}")
 
 
 def _run_day(
@@ -409,6 +472,11 @@ def _run_day(
             return False
         if status == "ok":
             _log(f"  pipeline done elapsed={elapsed:.1f}s")
+            try:
+                _finalize_prediction_artifacts(ml_engine, STRATEGY_NAME, day, OUT_ROOT)
+            except Exception as exc:  # noqa: BLE001
+                _log(f"  FAIL: finalize prediction artifacts 异常: {type(exc).__name__}: {exc}")
+                return False
         elif status == "non_trading":
             _log(f"  SKIPPED: {day_str} 非交易日, pipeline 未执行")
             return True
@@ -449,7 +517,11 @@ def main() -> int:
     from vnpy.event import EventEngine
     from vnpy.trader.engine import MainEngine
     from vnpy.trader.setting import SETTINGS
-    # 让 vnpy_tushare_pro 的 SETTINGS 也认这个 password
+    # 直接脚本启动时会优先 import 仓库内的 vnpy 源码，它读取的是当前运行路径
+    # 对应的 vt_setting.json。若 datafeed.name 未配置，会退回 BaseDatafeed，
+    # 后续 _get_tushare_datafeed().daily_ingest_pipeline / .downloader 都会失效。
+    # 这里显式指定 tushare_pro，避免依赖外部全局配置。
+    SETTINGS["datafeed.name"] = "tushare_pro"
     SETTINGS["datafeed.username"] = "tushare"
     SETTINGS["datafeed.password"] = token
 
@@ -471,10 +543,22 @@ def main() -> int:
 
     tushare_engine = main_engine.get_engine(TUSHARE_APP)
     tushare_engine.init_engine()
-    _log(f"TushareProEngine inited, daily_ingest_pipeline={tushare_engine._get_tushare_datafeed().daily_ingest_pipeline is not None}")
+    ts_datafeed = tushare_engine._get_tushare_datafeed()
+    ts_pipeline = getattr(ts_datafeed, "daily_ingest_pipeline", None)
+    downloader = getattr(ts_datafeed, "downloader", None)
+    _log(
+        "TushareProEngine inited, "
+        f"datafeed={type(ts_datafeed).__module__}.{type(ts_datafeed).__name__}, "
+        f"daily_ingest_pipeline={ts_pipeline is not None}"
+    )
+    if downloader is None:
+        raise RuntimeError(
+            "vnpy datafeed 未正确加载为 vnpy_tushare_pro.tushare_datafeed.TushareDatafeedPro; "
+            f"当前类型={type(ts_datafeed).__module__}.{type(ts_datafeed).__name__}. "
+            "请检查 SETTINGS['datafeed.name'] 是否为 'tushare_pro'。"
+        )
 
     # 现在 tushare engine 已就绪, 确定 LIVE_DATE (非交易日自动回退)
-    downloader = tushare_engine._get_tushare_datafeed().downloader
     live_date = _resolve_live_date(downloader)
     live_date_str = live_date.strftime("%Y%m%d")
     live_date_iso = live_date.strftime("%Y-%m-%d")
@@ -516,7 +600,12 @@ def main() -> int:
     web_engine.start_server("tcp://127.0.0.1:2014", "tcp://127.0.0.1:4102")
     _log("webtrader RPC on :2014 / :4102")
 
-    # 派生 webtrader uvicorn
+    # webtrader 必须由本次 smoke 派生，才能暴露同一个 MLEngine/策略实例。
+    # 复用旧 :8001 会让 /ml/health 查到旧进程，测试会失真。
+    if _is_http_alive("http://127.0.0.1:8001/api/v1/ml/health"):
+        _log("FAIL: port 8001 already has a webtrader process. Stop it before running smoke.")
+        main_engine.close()
+        return 2
     webtrader_uv = subprocess.Popen(
         [
             sys.executable, "-u", "-m", "uvicorn",
@@ -530,25 +619,39 @@ def main() -> int:
     # 派生 mlearnweb live_main uvicorn
     mlearnweb_uv = None
     if SPAWN_MLEARNWEB:
-        mlearnweb_uv = subprocess.Popen(
-            [
-                PY311, "-u", "-m", "uvicorn",
-                "app.live_main:app", "--host", "127.0.0.1", "--port", "8100",
-            ],
-            cwd=MLEARNWEB_BACKEND,
-            env={
-                **os.environ,
-                "PYTHONIOENCODING": "utf-8",
-                "ML_LIVE_OUTPUT_ROOT": OUT_ROOT,
-                "VNPY_SNAPSHOT_RETENTION_DAYS": "365",
-            },
-        )
-        _log(f"spawned mlearnweb live_main pid={mlearnweb_uv.pid} on :8100")
+        if _is_http_alive("http://127.0.0.1:8100/health"):
+            _log(
+                "reuse existing mlearnweb live_main on :8100 "
+                f"(smoke OUT_ROOT={OUT_ROOT}; keep it aligned with backend ML_LIVE_OUTPUT_ROOT)"
+            )
+        else:
+            mlearnweb_uv = subprocess.Popen(
+                [
+                    PY311, "-u", "-m", "uvicorn",
+                    "app.live_main:app", "--host", "127.0.0.1", "--port", "8100",
+                ],
+                cwd=MLEARNWEB_BACKEND,
+                env={
+                    **os.environ,
+                    "PYTHONIOENCODING": "utf-8",
+                    "ML_LIVE_OUTPUT_ROOT": OUT_ROOT,
+                    "VNPY_SNAPSHOT_RETENTION_DAYS": "365",
+                },
+            )
+            _log(f"spawned mlearnweb live_main pid={mlearnweb_uv.pid} on :8100")
 
     time.sleep(4)  # 给 uvicorn 启动时间
 
-    if webtrader_uv.poll() is not None:
+    if webtrader_uv is not None and webtrader_uv.poll() is not None:
         _log(f"FAIL: webtrader uvicorn died early (rc={webtrader_uv.returncode})")
+        return 2
+    if mlearnweb_uv is not None and mlearnweb_uv.poll() is not None:
+        _log(
+            f"FAIL: mlearnweb live_main uvicorn died early (rc={mlearnweb_uv.returncode}); "
+            "port 8100 may already be occupied. Stop the existing live_main or run with SPAWN_MLEARNWEB=0 "
+            "only if that backend uses the same ML_LIVE_OUTPUT_ROOT."
+        )
+        _teardown(main_engine, webtrader_uv, mlearnweb_uv)
         return 2
 
     # --- Phase 3: add + init + start 策略 (提前到 Phase 2 之前, 以便多日
@@ -655,6 +758,10 @@ def main() -> int:
     _log("=== Phase 7 — READY ===")
     _log("生产 1 日流程演练完成, 所有断言通过.")
     _log("trading + webtrader REST + mlearnweb SQLite 全部就绪 on :2014 / :4102 / :8001 / :8100")
+    if EXIT_AFTER_READY:
+        _log("SMOKE_EXIT_AFTER_READY=1, assertions passed; tearing down and exiting.")
+        _teardown(main_engine, webtrader_uv, mlearnweb_uv)
+        return 0
     _log("Ctrl+C to exit (will tear down 2 uvicorn children).")
 
     stop = {"v": False}
@@ -665,7 +772,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, _sigint)
     while not stop["v"]:
         time.sleep(1)
-        if webtrader_uv.poll() is not None:
+        if webtrader_uv is not None and webtrader_uv.poll() is not None:
             _log(f"webtrader uvicorn 自退 (rc={webtrader_uv.returncode})")
             stop["v"] = True
         if mlearnweb_uv is not None and mlearnweb_uv.poll() is not None:
@@ -746,8 +853,19 @@ def _run_assertions(live_date_str: str, live_date_iso: str) -> list[str]:
     if sel_p.exists():
         sel = pd.read_parquet(sel_p)
         _check(len(sel) == 7, f"[h] selections rows={len(sel)} (期望 7)")
+        if len(sel) > 0:
+            _check(str(sel.iloc[0].get("trade_date")) == live_date_iso, f"[h] selections trade_date={sel.iloc[0].get('trade_date')} != {live_date_iso}")
     else:
         errors.append(f"[h] selections.parquet 缺失")
+
+    # [h2] latest.json 必须推进到 LIVE_DATE；前端 latest 卡片依赖它/内存 cache
+    latest_p = Path(OUT_ROOT) / STRATEGY_NAME / "latest.json"
+    if latest_p.exists():
+        latest = json.loads(latest_p.read_text(encoding="utf-8"))
+        _check(latest.get("trade_date") == live_date_iso, f"[h2] latest trade_date={latest.get('trade_date')} != {live_date_iso}")
+        _check(latest.get("n_predictions", 0) > 0, f"[h2] latest n_predictions={latest.get('n_predictions')}")
+    else:
+        errors.append(f"[h2] latest.json 缺失: {latest_p}")
 
     # [i] webtrader /ml/health (需 token)
     try:
@@ -787,6 +905,19 @@ def _run_assertions(live_date_str: str, live_date_iso: str) -> list[str]:
         except Exception as e:
             errors.append(f"[k] SQLite 查询失败: {e}")
 
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(MLEARNWEB_DB))
+            n = conn.execute(
+                "SELECT COUNT(*) FROM ml_prediction_daily "
+                "WHERE strategy_name=? AND trade_date LIKE ? AND length(coalesce(topk_json,'')) > 2",
+                (STRATEGY_NAME, f"{live_date_iso}%"),
+            ).fetchone()[0]
+            conn.close()
+            _check(n >= 1, f"[k2] SQLite ml_prediction_daily({STRATEGY_NAME}, {live_date_iso}) topk rows={n}")
+        except Exception as e:
+            errors.append(f"[k2] SQLite prediction 查询失败: {e}")
+
     # [l] mlearnweb /metrics/rolling
     if SPAWN_MLEARNWEB:
         try:
@@ -798,6 +929,29 @@ def _run_assertions(live_date_str: str, live_date_iso: str) -> list[str]:
             _check(hc >= 1, f"[l] mlearnweb /metrics/rolling history_count={hc}")
         except Exception as e:
             errors.append(f"[l] mlearnweb rolling 访问失败: {e}")
+
+        try:
+            import urllib.request
+            url = f"http://127.0.0.1:8100/api/live-trading/ml/local/{STRATEGY_NAME}/prediction/latest/summary"
+            with urllib.request.urlopen(url, timeout=5) as r:
+                body = json.loads(r.read())
+            data = body.get("data") or {}
+            _check(data.get("trade_date") == live_date_iso, f"[m] mlearnweb latest trade_date={data.get('trade_date')} != {live_date_iso}")
+            _check(len(data.get("topk") or []) == 7, f"[m] mlearnweb latest topk rows={len(data.get('topk') or [])}")
+        except Exception as e:
+            errors.append(f"[m] mlearnweb latest prediction 访问失败: {e}")
+
+        try:
+            import urllib.request
+            url = f"http://127.0.0.1:8100/api/live-trading/ml/local/{STRATEGY_NAME}/prediction/summary/{live_date_str}"
+            with urllib.request.urlopen(url, timeout=5) as r:
+                body = json.loads(r.read())
+            data = body.get("data") or {}
+            _check(body.get("success") is True, f"[n] mlearnweb by-date success={body.get('success')} warning={body.get('warning')}")
+            _check(data.get("trade_date") == live_date_iso, f"[n] mlearnweb by-date trade_date={data.get('trade_date')} != {live_date_iso}")
+            _check(len(data.get("topk") or []) == 7, f"[n] mlearnweb by-date topk rows={len(data.get('topk') or [])}")
+        except Exception as e:
+            errors.append(f"[n] mlearnweb by-date prediction 访问失败: {e}")
 
     return errors
 
