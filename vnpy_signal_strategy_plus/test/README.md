@@ -9,12 +9,12 @@
 [csv_to_redis_replay] ─xadd─→ Redis Stream ─xreadgroup─→ [bridge] ─INSERT─→ MySQL stock_trade
                                                                                     │
                                                                                     ↓ poll 50ms
-[run_sim_e2e]  EventEngine + MainEngine ←─send_order─ [EtfIntraTestStrategy]  process_signal
+[run_sim_e2e]  EventEngine + MainEngine ←─send_order─ [CsvReplayTestStrategy]  process_signal
    ├ QmtSimGateway                                            ↑
    │  ├ md (merged_parquet 行情源)                            │
    │  └ td (撮合 + sim_QMT_SIM.db 持久化)                    │
    ├ SignalStrategyPlusApp                                    │
-   │  └ EtfIntraTestStrategy (回放控制器：跨日 settle / refresh_tick / _replay_now)
+   │  └ CsvReplayTestStrategy (回放控制器：跨日 settle / refresh_tick / _replay_now)
    └ WebTraderApp (RpcServer + uvicorn HTTP API @ 18001)
 
 [run_e2e_test 编排器]  cleanup → 启动 bridge → 注入 csv → 等消化 → 调 reconcile
@@ -27,12 +27,22 @@
 
 | 文件                          | 职责                                                    |
 | ----------------------------- | ------------------------------------------------------- |
-| `test_setting.json`           | 全局配置（CSV 路径 / 凭证 / Redis / MySQL / sim / 端口）|
+| `test_setting.json`           | CSV 回归链路配置（CSV 路径 / 凭证 / Redis / MySQL / sim / 端口）|
+| `redis_live_sim_setting.json` | 聚宽近实盘模拟链路配置（无 `position.csv` 持仓引导） |
 | `csv_to_redis_replay.py`      | CSV 成交流水 → Redis Stream 注入                        |
 | `reconcile_trades.py`         | 三维对账（市值占比 + 股数 + 拒单）                      |
 | `run_sim_e2e.py`              | 命令行启动器：sim 网关 + 策略 + WebTrader（无 GUI）     |
 | `run_e2e_test.py`             | 端到端编排器（清理→bridge→注入→等待→对账）              |
 | `purge_test_strategy.py`      | 清残留（mysql / redis stream / sim db / 端口扫描）      |
+
+### 2.1 两条测试链路
+
+| 链路 | 策略类 | 策略实例名 | 配置 | 适用场景 |
+| --- | --- | --- | --- | --- |
+| CSV 回归链路 | `CsvReplayTestStrategy` | `etf_intra_test` | `test_setting.json` / `test_setting.local.json` | 用本地 `transaction.csv` / `position.csv` 快速复现历史回归结果 |
+| 聚宽近实盘模拟链路 | `RedisLiveSimTestStrategy` | `etf_rotation_basic` | `redis_live_sim_setting.json` / `redis_live_sim_setting.local.json` | 聚宽回测写 Redis，bridge 写 MySQL，vnpy 通过 QMT_SIM 模拟成交，mlearnweb 观察结果 |
+
+近实盘模拟链路不读取 `position.csv`，不做持仓引导，QMT_SIM 应从 `模拟资金=1000000` 纯现金开始。切换真实网关时，保留 `etf_rotation_basic` 策略实例和 MySQL 信号语义，将启动入口的 `QMT_SIM` 换成实盘网关，并把 `replay.mode` 改为 `live`。
 
 ## 3. 配置
 
@@ -40,7 +50,8 @@
 
 ```json
 {
-  "strategy_name": "etf_intra_test",     // 三处一致：stream_key / target_stg / vnpy strategy_name
+  "strategy_name": "etf_intra_test",      // 三处一致：stream_key / target_stg / vnpy strategy_name
+  "strategy_class": "CsvReplayTestStrategy",
   "initial_capital": 1000000.0,           // sim 起始资金（应 ≥ 单笔最大金额，dry-run 会打印推荐值）
 
   "csv": {
@@ -162,7 +173,7 @@ Get-NetTCPConnection -LocalPort 2014, 4102, 8001 -State Listen |
     Select-Object -Unique OwningProcess |
     ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 
-# 2) 用生产端口启动 sim_e2e（前端会立刻看到 etf_intra_test 卡片）
+# 2) 用生产端口启动 sim_e2e（前端会立刻看到当前配置的测试策略卡片）
 F:/Program_Home/vnpy/python.exe `
   F:\Quant\vnpy\vnpy_strategy_dev\vnpy_signal_strategy_plus\test\run_sim_e2e.py `
   --use-production-ports
@@ -170,7 +181,27 @@ F:/Program_Home/vnpy/python.exe `
 
 测试完毕 Ctrl+C 关停 sim_e2e 后，重启你的常驻 webtrader 即可恢复生产视图。
 
-### 5.3 跑端到端编排器
+### 5.3 启动聚宽近实盘模拟链路
+
+近实盘模拟链路用于测试：聚宽回测写 Redis -> bridge 写 MySQL -> vnpy 策略下单 -> QMT_SIM 撮合 -> mlearnweb 展示。该链路使用生产 WebTrader 端口 `2014/4102/8001`，方便前端直接看到 `etf_rotation_basic` 策略卡片。
+
+**终端 1**（保持运行）：
+
+```powershell
+F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.run_sim_e2e `
+  --config F:/Quant/vnpy/vnpy_strategy_dev/vnpy_signal_strategy_plus/test/redis_live_sim_setting.local.json
+```
+
+**终端 2**（保持运行）：
+
+```powershell
+F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.scripts.redis_to_mysql_bridge `
+  --config F:/Quant/vnpy/vnpy_strategy_dev/vnpy_signal_strategy_plus/scripts/redis_bridge_setting.local.json
+```
+
+随后开启聚宽回测。bridge 配置中必须保持 `stream_key=etf_rotation_basic`、`target_stg=etf_rotation_basic`；vnpy 配置中必须保持 `strategy_name=etf_rotation_basic`、`strategy_class=RedisLiveSimTestStrategy`。
+
+### 5.4 跑端到端编排器
 
 **终端 2**：
 
@@ -182,7 +213,7 @@ F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.run_e2e_test `
 执行步骤：
 
 1. 前置检查（mysql / redis / sim db）
-2. 清理：`DELETE FROM stock_trade WHERE stg=etf_intra_test`、`XTRIM <stream> MAXLEN 0`
+2. 清理：`DELETE FROM stock_trade WHERE stg=<strategy_name>`、`XTRIM <stream> MAXLEN 0`
 3. 启动 bridge subprocess（stdout 重定向到独立日志，避免 PIPE 阻塞）
 4. `csv_to_redis_replay.replay()` 注入信号到 Redis Stream
 5. 轮询等待 `stock_trade.processed=1` 比例（默认最多 120 秒）
@@ -197,7 +228,7 @@ sim_total=1,004,206 csv_total≈1,090,196
 [E2E] FAIL 市值占比维度有 1 个标的超容差 1.0%
 ```
 
-### 5.4 查看输出
+### 5.5 查看输出
 
 ```
 vnpy_signal_strategy_plus/test/output/
@@ -208,7 +239,7 @@ vnpy_signal_strategy_plus/test/output/
 └── bridge_setting_e2e.json         # 编排器派生的 bridge 临时配置
 ```
 
-### 5.5 通过 WebTrader HTTP API 实时看业务数据
+### 5.6 通过 WebTrader HTTP API 实时看业务数据
 
 ```bash
 # 拿 token（默认账号 vnpy/vnpy）
@@ -248,10 +279,15 @@ F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.reconcile_trad
 ### 6.3 清残留
 
 ```powershell
+# CSV 回归链路
 F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.purge_test_strategy
+
+# 聚宽近实盘模拟链路
+F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.purge_test_strategy `
+  --config vnpy_signal_strategy_plus/test/redis_live_sim_setting.local.json
 ```
 
-会清：mysql `stock_trade` 中 `stg=etf_intra_test` 的行 + redis stream + sim db 文件
+会清：mysql `stock_trade` 中 `stg=<strategy_name>` 的行 + redis stream + sim db 文件
 + 扫描端口占用给警告（不主动杀进程）。
 
 ### 6.4 编排器子选项
@@ -269,13 +305,13 @@ F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.purge_test_str
 
 ## 7. 回放控制器与持仓引导
 
-[etf_intra_test_strategy.py](../strategies/etf_intra_test_strategy.py) 重写了
+[csv_replay_test_strategy.py](../strategies/csv_replay_test_strategy.py) 重写了
 `run_polling`，作为按 `remark` 升序的虚拟交易日回放控制器：
 
 - 启动时 `gateway.enable_auto_settle(False)`，禁用自然日 settle
 - 每条信号前 `md.refresh_tick(vt, as_of_date=sig_day)`
 - 设置 `td.counter._replay_now = sig.remark`（trade.datetime 用回放时间）
-- 跨日时 `td.counter.settle_end_of_day(prev_day)` 让 yd_volume 滚动 → SELL 解锁
+- 跨信号日时按交易日历逐日 `settle_end_of_day`；无交易信号的交易日只刷新当前持仓行情并写权益快照，不下单
 - 静默期到达后 settle 最后一日
 
 **持仓引导（窄 date_range 专用）**：
@@ -326,7 +362,7 @@ uvicorn 子进程通过环境变量 `VNPY_WEB_REQ_ADDRESS` / `VNPY_WEB_SUB_ADDRE
 - **完整跨日精确对账**：需要写 `qlib_bar_source` 适配器，让 sim 用
   `D:/vnpy_data/qlib_data_bin/`（已覆盖 2025-08~2026-04）作为行情源。属后续工程。
 - **mysql_signal_strategy.py 的 process_signal 资金口径**：父类原生用
-  `account.balance` 算 vol_int；测试场景下 `EtfIntraTestStrategy.get_account_asset`
+  `account.balance` 算 vol_int；测试场景下 `CsvReplayTestStrategy.get_account_asset`
   override 返回总权益。生产策略保持原行为不受影响。
 
 ## 11. 故障排查
@@ -372,8 +408,8 @@ bridge 写 mysql 速度慢（远程单条 commit ~300ms），169 笔信号大概
 ### 11.4 strategy 日志显示 "下单数量为 0"
 
 ```
-[etf_intra_test] 账户总资产(权益口径): 2752.0
-[etf_intra_test] 下单数量为 0 (计算后: 0)，忽略信号: 0.096696
+[etf_rotation_basic] 账户总资产(权益口径): 2752.0
+[etf_rotation_basic] 下单数量为 0 (计算后: 0)，忽略信号: 0.096696
 ```
 
 资金口径问题。如果**没有**走持仓引导（`date_range=null`），sim 起始 capital 应该
@@ -390,7 +426,34 @@ bridge 写 mysql 速度慢（远程单条 commit ~300ms），169 笔信号大概
 `skiprows=1 + names=POSITION_COLS17` 显式 17 列解析。如果用了别的导出格式，
 需要在 [reconcile_trades.py](reconcile_trades.py#L13) 调整 `POSITION_COLS17`。
 
-## 12. 相关文档
+## 12. 通用回放控制器
+
+近实盘 Redis/JQ 链路和 CSV 链路现在统一通过
+`vnpy_qmt_sim.replay.SimReplayController` 推进模拟柜台日期；
+`vnpy_signal_strategy_plus.replay_adapter.StockTradeSignalReplayAdapter`
+负责从 MySQL `stock_trade` 拉取信号并调用真实策略的 `process_signal()`。
+
+职责边界：
+
+- QMT_SIM 日期推进、`_replay_now`、auto-settle、行情刷新、日终结算、权益快照由 `vnpy_qmt_sim.replay` 负责。
+- Redis/JQ/CSV 信号只要最终进入 `stock_trade`，就由 signal adapter 消费。
+- `empty`、`amt`、`raw_payload` 等字段保留在 ORM 对象中，策略侧可原样读取。
+
+重构前验收 baseline 已保存到：
+
+```powershell
+F:\Quant\vnpy\vnpy_strategy_dev\artifacts\replay_acceptance\pre_refactor_20260510_133032
+```
+
+重构后可用下面命令捕获并对比：
+
+```powershell
+F:\Program_Home\vnpy\python.exe -m vnpy_qmt_sim.replay.acceptance run `
+  --baseline F:\Quant\vnpy\vnpy_strategy_dev\artifacts\replay_acceptance\pre_refactor_20260510_133032 `
+  --scenario three_strategy_live_page --compare
+```
+
+## 13. 相关文档
 
 - [`../scripts/README.md`](../scripts/README.md) - 生产 Redis→MySQL bridge
 - [`../mysql_signal_strategy.py`](../mysql_signal_strategy.py) - 策略基类（process_signal / run_polling 实盘版）

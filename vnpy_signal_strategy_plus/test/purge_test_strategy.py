@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
-"""清理 e2e 测试策略 ``etf_intra_test`` 的残留状态。
+"""清理 e2e 测试策略 ``etf_rotation_basic`` 的残留状态。
 
-用途：当前端 ``localhost:5173`` 上看到 ``etf_intra_test`` 但无法删除时，用本
+用途：当前端 ``localhost:5173`` 上看到 ``etf_rotation_basic`` 但无法删除时，用本
 脚本批量清掉所有持久化痕迹。**不会**触碰生产策略 ``mysql_signal_setting.json``
 的其他条目。
 
 清理项目：
 
-1. **MySQL ``stock_trade``**：``DELETE WHERE stg='etf_intra_test'``。
+1. **MySQL ``stock_trade``**：``DELETE WHERE stg='etf_rotation_basic'``。
 2. **Redis Stream**：``XTRIM <stream> MAXLEN 0`` 清掉积压消息。
 3. **sim 网关持久化**：删除 ``D:/vnpy_data/state/sim_QMT_SIM.{db,db-shm,db-wal,lock}``
    （仅当未被进程占用时；若占用先杀进程）。
 4. **占用我们端口的残留进程**（**12014/14102/18001 + 旧默认 2014/4102/8001**）：
    仅警告，不主动杀（怕误杀生产 webtrader），用户自行判断。
 
-注意：``etf_intra_test`` 策略实例本身只存在于运行中的主进程内存中——
+注意：``etf_rotation_basic`` 策略实例本身只存在于运行中的主进程内存中——
 进程一停就消失，无需"删除"。前端仍能看到它通常是 **mlearnweb 历史快照库**
 的残留（独立项目，不在本工程内），需在那边的数据库里清。
 """
@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -37,7 +38,7 @@ def resolve_setting_path(template_path: Path) -> Path:
 
 
 def load_setting(path: Path) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 
@@ -90,6 +91,27 @@ def purge_sim_db(setting: dict) -> None:
             print(f"[sim] 跳过 {p}（不存在）")
 
 
+def purge_replay_history(setting: dict) -> None:
+    """Clear vnpy replay equity snapshots for the configured strategy."""
+    stg = setting["strategy_name"]
+    state_dir = Path(setting.get("sim", {}).get("db_dir", r"D:/vnpy_data/state"))
+    db_path = state_dir / "replay_history.db"
+    if not db_path.exists():
+        print(f"[replay-history] skip {db_path} (not exists)")
+        return
+
+    try:
+        with sqlite3.connect(str(db_path), timeout=20.0) as conn:
+            res = conn.execute(
+                "DELETE FROM replay_equity_snapshots WHERE strategy_name=?",
+                (stg,),
+            )
+            conn.commit()
+        print(f"[replay-history] DELETE strategy_name='{stg}' -> {res.rowcount} rows")
+    except sqlite3.Error as exc:
+        print(f"[replay-history] delete failed {db_path}: {exc}")
+
+
 def warn_port_holders(setting: dict) -> None:
     """检查端口占用，警告但不杀。"""
     try:
@@ -131,7 +153,7 @@ def warn_port_holders(setting: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="清理 e2e 测试策略 etf_intra_test 的残留（mysql / redis / sim db）"
+        description="按配置清理 e2e 测试策略残留（mysql / redis / sim db）"
     )
     parser.add_argument(
         "--config",
@@ -142,6 +164,7 @@ def main() -> None:
     parser.add_argument("--skip-mysql", action="store_true")
     parser.add_argument("--skip-redis", action="store_true")
     parser.add_argument("--skip-sim-db", action="store_true")
+    parser.add_argument("--skip-replay-history", action="store_true")
     args = parser.parse_args()
 
     setting = load_setting(Path(args.config))
@@ -155,6 +178,8 @@ def main() -> None:
         purge_redis(setting)
     if not args.skip_sim_db:
         purge_sim_db(setting)
+    if not args.skip_replay_history:
+        purge_replay_history(setting)
 
     print("[purge] 完成")
 

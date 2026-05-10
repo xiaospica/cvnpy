@@ -5,7 +5,7 @@
 
 - **无 Qt GUI**：纯 EventEngine 主循环，可在 SSH/Docker/编排器子进程里跑。
 - **自动 connect**：从 ``test_setting.json`` 读 sim 配置，启动后立即 connect。
-- **自动加载并启动策略**：``EtfIntraTestStrategy``，避免 GUI 手动操作。
+- **自动加载并启动策略**：默认 ``CsvReplayTestStrategy``，也可由配置覆盖。
 - **自动启动 WebTrader 服务**：在主进程启动 ZMQ RpcServer，再 subprocess 起
   uvicorn 提供 HTTP REST/WS 给前端实盘监控。
 
@@ -17,7 +17,7 @@
 启动后：
 
 - sim 网关已 connect（账户=test_setting.sim.account_id，初始资金=connect_setting.模拟资金）
-- 策略 ``EtfIntraTestStrategy`` 已 init+start（轮询 mysql stock_trade）
+- 策略已 init+start（轮询 mysql stock_trade）
 - HTTP API: http://127.0.0.1:8001/docs（账号 vnpy/vnpy 见 ``.vntrader/web_trader_setting.json``）
 - WS: ws://127.0.0.1:8001/api/v1/ws
 
@@ -87,7 +87,7 @@ def _setup_logger() -> logging.Logger:
 
 def boot(setting_path: Path, logger: logging.Logger):
     """启动主引擎、sim 网关、策略、webtrader。返回 (main_engine, web_proc, stop_event)。"""
-    with open(setting_path, "r", encoding="utf-8") as f:
+    with open(setting_path, "r", encoding="utf-8-sig") as f:
         setting = json.load(f)
 
     sim_cfg = setting["sim"]
@@ -121,12 +121,13 @@ def boot(setting_path: Path, logger: logging.Logger):
     # 2) signal engine: load 策略类 + 注册策略实例
     signal_engine = main_engine.get_engine("SignalStrategyPlus")
     signal_engine.init_engine()  # 触发 load_strategy_class（扫描 strategies/）
-    if "EtfIntraTestStrategy" not in signal_engine.classes:
+    strategy_class = setting.get("strategy_class", "CsvReplayTestStrategy")
+    if strategy_class not in signal_engine.classes:
         raise RuntimeError(
-            "EtfIntraTestStrategy 未被加载。检查："
-            f"{_PROJECT_ROOT}/vnpy_signal_strategy_plus/strategies/etf_intra_test_strategy.py"
+            f"{strategy_class} 未被加载。检查："
+            f"{_PROJECT_ROOT}/vnpy_signal_strategy_plus/strategies"
         )
-    signal_engine.add_strategy("EtfIntraTestStrategy")
+    signal_engine.add_strategy(strategy_class)
     strategy_name = setting.get("strategy_name", "etf_intra_test")
     if strategy_name not in signal_engine.strategies:
         raise RuntimeError(
@@ -135,7 +136,7 @@ def boot(setting_path: Path, logger: logging.Logger):
         )
     signal_engine.init_strategy(strategy_name)
     signal_engine.start_strategy(strategy_name)
-    logger.info(f"[boot] 策略 {strategy_name} init+start 完成")
+    logger.info(f"[boot] 策略 {strategy_class}/{strategy_name} init+start 完成")
 
     # 3) webtrader 服务
     web_proc = None
@@ -301,7 +302,7 @@ def main() -> None:
     # 处理 --no-webtrader / --use-production-ports：写入临时 setting 文件
     setting_overrides_needed = args.no_webtrader or args.use_production_ports
     if setting_overrides_needed:
-        with open(setting_path, "r", encoding="utf-8") as f:
+        with open(setting_path, "r", encoding="utf-8-sig") as f:
             setting = json.load(f)
         web = setting.setdefault("webtrader", {})
         if args.no_webtrader:

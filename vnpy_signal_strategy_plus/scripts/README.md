@@ -25,8 +25,8 @@
 - **多策略并发**：每个 `subscription` 一个守护线程，独立 `xreadgroup` 阻塞拉取。
 - **字段透传**：Redis JSON 的 `code`（如 `518880.SH`）直接写入 MySQL；策略层
   `convert_code_to_vnpy_type` 负责剥后缀转 vnpy 格式。
-- **stg 字段覆盖**：用配置中的 `target_stg` 覆盖 payload 里的 `stg`，支持 Redis
-  端策略名与 MySQL 端策略 key 解耦（迁移期常见）。
+- **stg 字段透传**：优先写入 payload 里的 `stg`，只有 Redis 没带 `stg` 时才使用配置中的 `target_stg`。
+- **原始信号保留**：已知字段写入独立列，完整 Redis payload 同步写入 `raw_payload`，避免新增字段被丢弃。
 
 ## 2. 配置文件
 
@@ -66,10 +66,11 @@ Redis Stream 的 `xadd` payload 是 dict（fields/values 全字符串）：
 | `pct`      | `pct`               | 百分比（0~1 小数）                                  |
 | `type`     | `type`              | `BUY_LST` / `SELL_LST` / `BUY_FIXED` / `SELL_FIXED` |
 | `price`    | `price`             | 参考价（fallback）                                  |
-| `stg`      | `stg`               | 用配置 `target_stg` 覆盖，不读 payload              |
+| `stg`      | `stg`               | 优先使用 payload 值；缺省时使用配置 `target_stg`       |
 | `remark`   | `remark` (DateTime) | `'YYYY-MM-DD HH:MM:SS'` 字符串解析                  |
-| `amt`      | —                   | 当前 stock_trade 表无对应列，bridge 静默丢弃        |
-| `empty`    | —                   | 同上                                                |
+| `amt`      | `amt`               | 透传保存，当前策略仍以 `pct` 为下单计算口径           |
+| `empty`    | `empty`             | `1` 表示 SELL 信号按可用持仓全量清仓；默认 `0`     |
+| 其他字段   | `raw_payload`       | 完整 Redis payload JSON 备份，供审计和对账使用       |
 
 ## 4. 启动
 

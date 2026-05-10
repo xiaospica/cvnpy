@@ -124,6 +124,49 @@ sys.path.insert(0, str(ROOT / "vendor" / "qlib_strategy_core"))
 sys.path.insert(0, r"F:\Quant\code\qlib_strategy_dev")
 
 
+def _load_dotenv_file(path: Path) -> None:
+    """Load simple KEY=VALUE entries without overriding existing env values.
+
+    Parameters
+    ----------
+    path : Path
+        dotenv file path. This fallback supports the deployment file format
+        used by this repo when python-dotenv is unavailable.
+    """
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+
+
+def _load_runtime_env() -> None:
+    """Load repo dotenv config before module-level smoke settings are derived."""
+    dotenv_file = os.getenv("DOTENV_FILE")
+    candidates: list[Path] = []
+    if dotenv_file:
+        candidates.append(ROOT / dotenv_file)
+    candidates.extend([ROOT / ".env.production", ROOT / ".env"])
+
+    env_path = next((path for path in candidates if path.exists()), None)
+    if env_path is None:
+        return
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(env_path, override=False)
+    except ModuleNotFoundError:
+        _load_dotenv_file(env_path)
+
+
+_load_runtime_env()
+
+
 # =====================================================================
 # 配置区 — 按用途分组, 维护时只需改对应小节
 # =====================================================================

@@ -12,11 +12,11 @@ MySQL 轮询的策略消费。
 - 字段透传：Redis JSON 的 code 直接写入 MySQL，由策略层
   ``convert_code_to_vnpy_type`` 负责剥后缀（"518880.SH"/"518880"/
   "518880.SSE" 都能正确转成 ``518880.SSE``）。
-- ``stg`` 字段：使用配置中的 ``target_stg`` 覆盖 payload 里的 ``stg``，
-  支持 Redis 端策略名 与 MySQL 端策略 key 解耦（迁移期常见）。
-- ``amt`` / ``empty`` 字段：当前 stock_trade 表无对应列，bridge 静默
-  丢弃（INFO 级日志）。CSV 测试通过 INITIAL_CAPITAL 把 amt 反推为
-  pct，绕开 schema 限制。
+- ``stg`` 字段：优先写入 payload 里的 ``stg``，缺省时才使用配置中的
+  ``target_stg``。
+- ``empty`` 字段：写入 ``stock_trade.empty``，策略侧用于 SELL 清仓。
+- ``amt`` / ``raw_payload`` 字段：Redis 已知字段写入独立列，同时把完整
+  payload 写入 ``raw_payload``，用于审计和差异定位。
 
 Stock ORM 必须与 ``vnpy_signal_strategy_plus.mysql_signal_strategy.Stock``
 保持字段一致。任何 schema 变更需同步两处。
@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import redis
-from sqlalchemy import (Boolean, Column, DateTime, Float, Integer, String,
+from sqlalchemy import (Boolean, Column, DateTime, Float, Integer, String, Text,
                         create_engine)
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -66,6 +66,9 @@ class Stock(Base):
     stg = Column(String(32), nullable=False)
     remark = Column(DateTime, nullable=False)
     processed = Column(Boolean, default=False)
+    empty = Column(Boolean, default=False)
+    amt = Column(Float, nullable=True)
+    raw_payload = Column(Text, nullable=True)
 
 
 # ---------------- 配置 ----------------
@@ -143,29 +146,31 @@ class MySQLWriter:
         """写一条信号到 stock_trade。失败返回 False（外层不应 xack）。
 
         :param payload: 已 utf-8 解码的 dict，所有 value 是 str（Redis Stream 字段语义）。
-        :param target_stg: 配置里的 target_stg，覆盖 payload['stg']。
+        :param target_stg: 配置里的 target_stg，作为 payload['stg'] 缺省值。
         """
         try:
             code = str(payload["code"])
             pct = float(payload.get("pct", 0) or 0)
             type_ = str(payload["type"])
             price = float(payload.get("price", 0) or 0)
+            stg = str(payload.get("stg") or target_stg)
             remark_str = str(payload["remark"])
             remark_dt = datetime.strptime(remark_str, "%Y-%m-%d %H:%M:%S")
+            empty = str(payload.get("empty", "0")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+            }
+            amt_raw = payload.get("amt")
+            amt = float(amt_raw) if amt_raw not in (None, "") else None
+            raw_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         except KeyError as exc:
             logger.error(f"[mysql] payload 缺字段 {exc}: {payload}")
             return False
         except ValueError as exc:
             logger.error(f"[mysql] payload 字段解析失败 {exc}: {payload}")
             return False
-
-        # amt / empty 字段当前 stock_trade 表不支持，仅记日志
-        for ignore_field in ("amt", "empty"):
-            if ignore_field in payload:
-                logger.info(
-                    f"[mysql] 忽略 payload['{ignore_field}']={payload[ignore_field]} "
-                    f"(stock_trade 无对应列)"
-                )
 
         session = self.Session()
         try:
@@ -174,15 +179,19 @@ class MySQLWriter:
                 pct=pct,
                 type=type_,
                 price=price,
-                stg=target_stg,
+                stg=stg,
                 remark=remark_dt,
                 processed=False,
+                empty=empty,
+                amt=amt,
+                raw_payload=raw_payload,
             )
             session.add(row)
             session.commit()
             logger.info(
-                f"[mysql] insert ok id={row.id} stg={target_stg} "
-                f"code={code} type={type_} pct={pct} price={price} remark={remark_str}"
+                f"[mysql] insert ok id={row.id} stg={stg} "
+                f"code={code} type={type_} pct={pct} price={price} "
+                f"empty={int(empty)} amt={amt} remark={remark_str}"
             )
             return True
         except Exception as exc:
@@ -271,6 +280,24 @@ class StreamConsumer(threading.Thread):
             except redis.ConnectionError as exc:
                 self.logger.error(
                     f"[{self.sub.stream_key}] redis 连接异常 {exc}; 3s 后重试"
+                )
+                self.stop_event.wait(3)
+                continue
+            except redis.ResponseError as exc:
+                if "NOGROUP" in str(exc):
+                    self.logger.warning(
+                        f"[{self.sub.stream_key}] consumer group 丢失，尝试重建: {exc}"
+                    )
+                    try:
+                        self._ensure_group()
+                    except Exception as ensure_exc:
+                        self.logger.exception(
+                            f"[{self.sub.stream_key}] 重建 consumer group 失败: {ensure_exc}"
+                        )
+                    self.stop_event.wait(3)
+                    continue
+                self.logger.exception(
+                    f"[{self.sub.stream_key}] xreadgroup 异常 {exc}; 3s 后重试"
                 )
                 self.stop_event.wait(3)
                 continue

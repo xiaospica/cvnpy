@@ -994,9 +994,12 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 gateway = None
             counter = getattr(getattr(gateway, "td", None), "counter", None) if gateway else None
             if counter is not None and hasattr(counter, "capital"):
-                cap = float(getattr(counter, "capital", 0) or 0)
-                frz = float(getattr(counter, "frozen", 0) or 0)
-                return max(0.0, cap - frz)
+                cap_raw = getattr(counter, "capital", None)
+                frz_raw = getattr(counter, "frozen", 0)
+                if isinstance(cap_raw, (int, float)) and isinstance(frz_raw, (int, float)):
+                    cap = float(cap_raw or 0)
+                    frz = float(frz_raw or 0)
+                    return max(0.0, cap - frz)
             # Fallback: OmsEngine event-based 路径（实盘）
             for acc in main_engine.get_all_accounts():
                 if getattr(acc, "gateway_name", "") == self.gateway:
@@ -1441,93 +1444,18 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
              persist_selections → generate_orders（如 enable_trading）→ settle_end_of_day
              不再 spawn 子进程，每天纯内存计算 + IO，~ms 级
         """
-        days: List[date] = []
-        cursor = start
-        while cursor <= end:
-            if self._is_trade_day(cursor):
-                days.append(cursor)
-            cursor += timedelta(days=1)
+        from vnpy_qmt_sim.replay import SimReplayController
 
-        total = len(days)
-        if total == 0:
-            self.write_log(f"[replay] 起止 {start} ~ {end} 内无交易日，跳过")
-            return
+        from .replay_adapter import MLStrategyReplayAdapter
 
-        # Phase A: 批量推理（一次子进程产出所有日 predictions/diagnostics）
-        # 跳过已有 batch_mode diagnostics 的窗口（续跑幂等）
-        # P2-1: 影子策略不跑自己推理, 改成逐日 link 上游产物
-        if self.signal_source_strategy:
-            self.write_log(
-                f"[replay] 影子策略 signal_source={self.signal_source_strategy!r}, "
-                f"跳过 batch predict, 逐日 link 上游 selections.parquet"
-            )
-            for day in days:
-                self._link_selections_from_upstream(day)
-        else:
-            need_batch_predict = self._need_batch_predict(days)
-            if need_batch_predict:
-                self.write_log(f"[replay] batch predict {start} ~ {end} ({total} 交易日)，spawning 一个推理子进程...")
-                try:
-                    stats = self.signal_engine.run_inference_range(
-                        bundle_dir=self.bundle_dir,
-                        range_start=start,
-                        range_end=end,
-                        lookback_days=self.lookback_days,
-                        strategy_name=self.strategy_name,
-                        inference_python=self.inference_python,
-                        output_root=self.output_root,
-                        provider_uri=self.provider_uri,
-                        baseline_path=self.baseline_path or None,
-                        timeout_s=max(3600, total * 30),  # 给充足余量
-                    )
-                    self.write_log(
-                        f"[replay] batch predict done: {stats.get('n_days_with_data')} days have data "
-                        f"of {stats.get('n_days_total')} total (returncode={stats.get('returncode')})"
-                    )
-                    if stats.get("returncode") != 0:
-                        err = stats.get("stderr_tail", "")
-                        self.write_log(f"[replay] batch subprocess returned non-zero. stderr tail:\n{err}")
-                except Exception as exc:
-                    self.write_log(
-                        f"[replay] batch predict 异常: {type(exc).__name__}: {exc} — "
-                        f"会逐日 fallback 到单日 run_pipeline_now"
-                    )
-            else:
-                self.write_log("[replay] 已有 batch_mode diagnostics 覆盖整个窗口，跳过批量推理（续跑）")
-
-        # Phase B: 逐日推进
-        # 真实策略时序：T 日 20:00 推理 → T+1 日 09:30 开盘 rebalance → T+1 日收盘 settle
-        # 回放映射：day[i-1] 推理产出的 pred_score = day[i] 的决策依据
-        #   for day in days:
-        #     1. 用 prev_day_pred_score 在 day 开盘走 qlib 算法决策 → rebalance
-        #     2. 读 day 的 predictions.parquet → 暂存全量 pred_score 为 day+1 决策依据
-        #     3. 显式 settle_end_of_day(day)：今日买入转 yd 给 day+1 卖出
-        prev_day_pred_score: Optional[pd.Series] = None
-
-        # Phase 4：禁用本 gateway 自动 settle（按真实自然日触发会污染回放状态）
-        # 回放期间由本循环显式 settle_end_of_day(day)。仅影响本 gateway 实例。
-        if gateway is not None and hasattr(gateway, "enable_auto_settle"):
-            try:
-                gateway.enable_auto_settle(False)
-                self.write_log("[replay] 已禁用本 gateway 自动 settle（按逻辑日显式结算）")
-            except Exception as exc:
-                self.write_log(f"[replay] 禁用 auto_settle 失败: {exc}")
-
-        try:
-            self._replay_loop_iter(days, total, prev_day_pred_score, gateway)
-        finally:
-            if gateway is not None and hasattr(gateway, "enable_auto_settle"):
-                try:
-                    gateway.enable_auto_settle(True)
-                    self.write_log("[replay] 已恢复本 gateway 自动 settle")
-                except Exception as exc:
-                    self.write_log(f"[replay] 恢复 auto_settle 失败: {exc}")
-            # 清理回放逻辑日：恢复实时模式 datetime.now() 行为
-            if gateway is not None:
-                try:
-                    gateway.td.counter._replay_now = None
-                except Exception:
-                    pass
+        adapter = MLStrategyReplayAdapter(self, gateway)
+        controller = SimReplayController(
+            gateway,
+            strategy_name=self.strategy_name,
+            is_trade_day=self._is_trade_day,
+            write_log=self.write_log,
+        )
+        controller.run_explicit(start, end, adapter)
 
     def _replay_loop_iter(
         self,

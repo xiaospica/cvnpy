@@ -33,7 +33,7 @@ import json
 import re
 import time
 import traceback
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -44,13 +44,15 @@ from vnpy_signal_strategy_plus.mysql_signal_strategy import (
     MySQLSignalStrategyPlus,
     Stock,
 )
+from vnpy_signal_strategy_plus.replay_adapter import StockTradeSignalReplayAdapter
 from vnpy_signal_strategy_plus.utils import convert_code_to_vnpy_type
+from vnpy_ml_strategy.utils.trade_calendar import StaleCalendarError, make_calendar
 
 # 4/14 快照初始化逻辑用：从 instrument(`名元股份(003003.XSHE)`) 提取代码
 _INSTRUMENT_RE = re.compile(r"\((\d{6}\.[A-Z]+)\)")
 _JQ_TO_VNPY = {"XSHG": "SSE", "XSHE": "SZSE"}
 
-# 测试配置文件路径：strategies/etf_intra_test_strategy.py
+# 测试配置文件路径：strategies/csv_replay_test_strategy.py
 #   .parent       = strategies/
 #   .parent.parent = vnpy_signal_strategy_plus/
 # 优先用 test_setting.local.json（含真实密码、加 .gitignore），fallback 到模板。
@@ -64,7 +66,7 @@ TEST_SETTING_PATH = _resolve_setting_path(
 )
 
 
-class EtfIntraTestStrategy(MySQLSignalStrategyPlus):
+class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
     """E2E 测试专用策略类，仅用于回归 Redis -> MySQL -> sim 链路。"""
 
     author = "e2e-test"
@@ -81,7 +83,7 @@ class EtfIntraTestStrategy(MySQLSignalStrategyPlus):
             return
 
         try:
-            with open(TEST_SETTING_PATH, "r", encoding="utf-8") as f:
+            with open(TEST_SETTING_PATH, "r", encoding="utf-8-sig") as f:
                 setting = json.load(f)
         except Exception as exc:
             self.write_log(f"[etf-test] 测试配置读取失败: {exc}")
@@ -116,6 +118,13 @@ class EtfIntraTestStrategy(MySQLSignalStrategyPlus):
         self._replay_enabled: bool = not bool(
             replay_cfg.get("rebase_remark_to_today", False)
         )
+        self._calendar_provider_uri: str = str(
+            replay_cfg.get("calendar_provider_uri")
+            or setting.get("calendar_provider_uri")
+            or "D:/vnpy_data/qlib_data_bin"
+        )
+        self._trade_calendar = None
+        self._calendar_warning_logged = False
         # 持仓引导：date_range[0] 是回放起点，需要把 date_range[0] 前一日的
         # CSV 持仓快照注入 sim，让回放只跑增量（避免全期累计 fallback 价误差）。
         self._date_range_start: Optional[str] = None
@@ -334,9 +343,103 @@ class EtfIntraTestStrategy(MySQLSignalStrategyPlus):
             return None
         return gw
 
+    def _get_trade_calendar(self):
+        """Return the replay trading calendar, preferring local qlib calendar file."""
+        if not hasattr(self, "_calendar_provider_uri"):
+            self._calendar_provider_uri = "D:/vnpy_data/qlib_data_bin"
+        if not hasattr(self, "_trade_calendar"):
+            self._trade_calendar = None
+        if self._trade_calendar is None:
+            self._trade_calendar = make_calendar(self._calendar_provider_uri)
+        return self._trade_calendar
+
+    def _is_replay_trade_day(self, day: date) -> bool:
+        """Return whether ``day`` is an A-share trading day for replay settlement."""
+        if not hasattr(self, "_calendar_warning_logged"):
+            self._calendar_warning_logged = False
+        try:
+            return bool(self._get_trade_calendar().is_trade_day(day))
+        except StaleCalendarError as exc:
+            if not self._calendar_warning_logged:
+                self.write_log(
+                    f"[replay] trade calendar stale, fallback to weekday: {exc}"
+                )
+                self._calendar_warning_logged = True
+            return day.weekday() < 5
+        except Exception as exc:
+            if not self._calendar_warning_logged:
+                self.write_log(
+                    f"[replay] trade calendar unavailable, fallback to weekday: {exc}"
+                )
+                self._calendar_warning_logged = True
+            return day.weekday() < 5
+
+    def _settle_trade_days(self, sim_gw, start_day: date, end_day: date) -> None:
+        """Settle every trading day in the inclusive range.
+
+        Signal replay advances by signal timestamps, but the account equity curve
+        must advance by trading days. For dates without orders this method only
+        refreshes open-position quotes and marks the account to market.
+        """
+        if end_day < start_day:
+            return
+
+        day = start_day
+        settled = 0
+        while day <= end_day:
+            if self._is_replay_trade_day(day):
+                self._settle_day(sim_gw, day)
+                settled += 1
+            day += timedelta(days=1)
+
+        if settled > 1:
+            self.write_log(
+                f"[replay] settled {settled} trade days from {start_day} to {end_day}"
+            )
+
+    def _refresh_position_quotes_for_settle(self, sim_gw, day: date) -> None:
+        """Refresh all open-position quotes before replay end-of-day settlement.
+
+        The replay controller refreshes the signal symbol before each order so the
+        fill price is correct. End-of-day mark-to-market needs a wider refresh:
+        positions without a signal on the day must still be marked with that
+        day's close instead of a stale quote cached from the previous signal day.
+        """
+        td = getattr(sim_gw, "td", None)
+        counter = getattr(td, "counter", None) if td is not None else None
+        md = getattr(sim_gw, "md", None)
+        refresh_tick = getattr(md, "refresh_tick", None) if md is not None else None
+        positions = getattr(counter, "positions", {}) if counter is not None else {}
+        if not positions or not callable(refresh_tick):
+            return
+
+        refreshed = 0
+        missed: list[str] = []
+        for pos in list(positions.values()):
+            vt_symbol = str(getattr(pos, "vt_symbol", "") or "")
+            volume = float(getattr(pos, "volume", 0) or 0)
+            if not vt_symbol or volume <= 0:
+                continue
+            try:
+                tick = refresh_tick(vt_symbol, as_of_date=day)
+                if tick is None:
+                    missed.append(vt_symbol)
+                else:
+                    refreshed += 1
+            except Exception as exc:
+                missed.append(f"{vt_symbol}:{type(exc).__name__}")
+
+        if refreshed or missed:
+            msg = f"[replay] settle quote refresh day={day} positions={refreshed}"
+            if missed:
+                suffix = "..." if len(missed) > 5 else ""
+                msg += f" missed={','.join(missed[:5])}{suffix}"
+            self.write_log(msg)
+
     def _settle_day(self, sim_gw, day: date) -> None:
         """触发 sim 日终结算 + 写入回放权益快照（mlearnweb 前端权益曲线数据源）。"""
         try:
+            self._refresh_position_quotes_for_settle(sim_gw, day)
             sim_gw.td.counter.settle_end_of_day(day)
             self.write_log(
                 f"[replay] settle_end_of_day({day}) yd 已结转，T+1 限制对此日及之前持仓解锁"
@@ -386,23 +489,7 @@ class EtfIntraTestStrategy(MySQLSignalStrategyPlus):
             self.write_log(f"[replay] day {day} 权益快照写入失败: {type(exc).__name__}: {exc}")
 
     def run_polling(self) -> None:
-        """覆盖父类：按 remark 升序的"虚拟交易日"回放控制器。
-
-        与父类的差异：
-
-        - 不按 ``self.current_dt = datetime.now()`` 过滤"当天"信号；改为
-          一次性拉所有未处理信号，按 ``remark`` 升序处理。
-        - 每条信号前 ``refresh_tick(vt, as_of_date=sig_day)`` + 设
-          ``_replay_now=sig.remark``，process_signal 内部 send_order
-          产生的 trade 会带正确的回放日期与价格。
-        - 跨日时（``sig_day > last_day``）先调 ``settle_end_of_day(last_day)``
-          让 T+1 SELL 能在新一日卖出昨仓。
-        - 全部信号消化后等待 ``idle_settle_seconds`` 静默期（让 bridge 写入
-          完成），然后触发最后一日的 settle。
-
-        ⚠️ 仅当 ``replay.rebase_remark_to_today=false`` 时启用回放语义；否则
-        退化为父类行为（仍由 self._replay_enabled 守门）。
-        """
+        """使用通用回放控制器消费 ``stock_trade`` 历史信号。"""
         if not self._replay_enabled:
             self.write_log(
                 "[replay] rebase_remark_to_today=true，回退到父类 run_polling（实时模式）"
@@ -416,112 +503,10 @@ class EtfIntraTestStrategy(MySQLSignalStrategyPlus):
             )
             return super().run_polling()
 
-        sim_gw.enable_auto_settle(False)
-        self.write_log(
-            f"[replay] 回放模式启动 gateway={self.gateway}; "
-            "auto_settle 已禁用，由本策略按 remark 推进 + 显式 settle"
+        adapter = StockTradeSignalReplayAdapter(
+            self,
+            gateway=sim_gw,
+            is_trade_day=self._is_replay_trade_day,
+            idle_settle_seconds=getattr(self, "_idle_settle_seconds", 30.0),
         )
-
-        last_day: Optional[date] = None
-        last_signal_ts: float = time.time()
-
-        while self.is_polling_avtive:
-            if not self.Session:
-                time.sleep(self.poll_interval)
-                continue
-
-            try:
-                session = self.Session()
-                signals = (
-                    session.query(Stock)
-                    .filter(
-                        Stock.stg == self.strategy_name,
-                        Stock.processed == False,  # noqa: E712
-                    )
-                    .order_by(Stock.remark.asc(), Stock.id.asc())
-                    .limit(50)
-                    .all()
-                )
-
-                if not signals:
-                    # 静默期到了 → 触发最后一日的 settle，关闭"未结转昨仓"
-                    if (
-                        last_day is not None
-                        and (time.time() - last_signal_ts) >= self._idle_settle_seconds
-                    ):
-                        self._settle_day(sim_gw, last_day)
-                        sim_gw.td.counter._replay_now = None
-                        last_day = None  # 防止重复 settle
-                    session.close()
-                    time.sleep(max(self.poll_interval, 0.5))
-                    continue
-
-                last_signal_ts = time.time()
-
-                for sig in signals:
-                    if not self.is_polling_avtive:
-                        break
-
-                    sig_day = sig.remark.date() if isinstance(sig.remark, datetime) else sig.remark
-
-                    # 跨日：先 settle 上一天（让昨仓滚动 → SELL 解锁）
-                    if last_day is not None and sig_day > last_day:
-                        self._settle_day(sim_gw, last_day)
-
-                    # 每条信号都 refresh tick（merged_parquet 有缓存，重复调用便宜）
-                    vt_symbol = convert_code_to_vnpy_type(sig.code)
-                    try:
-                        sim_gw.md.refresh_tick(vt_symbol, as_of_date=sig_day)
-                    except Exception as exc:
-                        self.write_log(
-                            f"[replay] refresh_tick({vt_symbol}, {sig_day}) 异常: {exc}"
-                        )
-
-                    sim_gw.td.counter._replay_now = sig.remark
-                    self.current_dt = sig.remark
-
-                    try:
-                        processed = self.process_signal(sig)
-                    except Exception as exc:
-                        self.write_log(
-                            f"[replay] process_signal id={sig.id} 异常: {exc}\n"
-                            f"{traceback.format_exc()}"
-                        )
-                        processed = False
-
-                    if processed:
-                        try:
-                            sig.processed = True
-                            session.commit()
-                        except Exception as exc:
-                            session.rollback()
-                            self.write_log(
-                                f"[replay] commit processed=True 失败 id={sig.id}: {exc}"
-                            )
-                    else:
-                        session.rollback()
-
-                    self.last_signal_id = max(self.last_signal_id, sig.id)
-                    last_day = sig_day
-                    # 让出 GIL 给 sim 撮合 + EventEngine 推送
-                    time.sleep(0.01)
-
-                session.close()
-                self.put_event()
-
-            except Exception as exc:
-                self.write_log(
-                    f"[replay] run_polling 异常: {exc}\n{traceback.format_exc()}"
-                )
-                try:
-                    session.rollback()
-                    session.close()
-                except Exception:
-                    pass
-                time.sleep(1)
-
-        # 退出时清 _replay_now（避免下一次启动用到 stale 时间戳）
-        try:
-            sim_gw.td.counter._replay_now = None
-        except Exception:
-            pass
+        adapter.run_polling_loop()

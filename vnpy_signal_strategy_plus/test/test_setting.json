@@ -2,6 +2,7 @@
     "_doc": "vnpy_signal_strategy_plus 端到端回归测试配置。strategy_name 必须三处一致：(1) Redis stream_key，(2) bridge target_stg / mysql stock_trade.stg，(3) vnpy 中加载的策略实例 strategy_name。",
 
     "strategy_name": "etf_intra_test",
+    "strategy_class": "CsvReplayTestStrategy",
     "initial_capital": 1000000.0,
 
     "csv": {
@@ -21,7 +22,7 @@
     },
 
     "replay": {
-        "_doc": "回放模式 + 持仓引导：date_range=['2026-04-15','2026-04-29'] 只回放该范围内 19 笔信号增量；EtfIntraTestStrategy.on_init 自动用 csv 的前一日（4/14）持仓快照初始化 sim（注入 14 个持仓 + 扣减现金），让 sim 4/29 累计 = csv 4/14 起始 + 增量 = csv 4/29 终态。该范围 sim 命中 merged_parquet 真实历史行情，价格/股数/占比都精确。",
+        "_doc": "回放模式 + 持仓引导：date_range=['2026-04-15','2026-04-29'] 只回放该范围内 19 笔信号增量；CsvReplayTestStrategy.on_init 自动用 csv 的前一日（4/14）持仓快照初始化 sim（注入 14 个持仓 + 扣减现金），让 sim 4/29 累计 = csv 4/14 起始 + 增量 = csv 4/29 终态。该范围 sim 命中 merged_parquet 真实历史行情，价格/股数/占比都精确。",
         "rebase_remark_to_today": false,
         "date_range": ["2026-04-15", "2026-04-29"],
         "idle_settle_seconds": 30

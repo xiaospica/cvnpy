@@ -90,4 +90,6 @@ vnpy_signal_strategy_plus/test/output/
 
 # vnpy_signal_strategy_plus e2e 测试本地配置（含真实密码，不提交）
 vnpy_signal_strategy_plus/test/test_setting.local.json
+vnpy_signal_strategy_plus/test/redis_live_sim_setting.local.json
 vnpy_signal_strategy_plus/scripts/redis_bridge_setting.local.json
+artifacts

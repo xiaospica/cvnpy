@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timedelta
 import time
@@ -36,6 +36,9 @@ class Stock(Base):
     stg = Column(String(32), nullable=False)
     remark = Column(DateTime, nullable=False)  # 下单时间
     processed = Column(Boolean, default=False)
+    empty = Column(Boolean, default=False)
+    amt = Column(Float, nullable=True)
+    raw_payload = Column(Text, nullable=True)
 
 class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
     """
@@ -299,6 +302,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         # pct calculation
         pct = float(signal.pct)
         fallback_price = float(signal.price or 0)
+        empty_signal = self.is_empty_signal(signal)
 
         gateway_name = self.get_gateway_name(vt_symbol)
         if not gateway_name:
@@ -320,7 +324,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             vol_int = int(target_value / calc_price)
             vol_int = (vol_int // 100) * 100
 
-            if vol_int <= 0:
+            if vol_int <= 0 and not (direction == Direction.SHORT and empty_signal):
                 self.write_log(f"下单数量为0 (计算后: {vol_int})，忽略信号: {pct}")
                 return True
 
@@ -350,7 +354,9 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
                     )
                     return True
 
-                if vol_int > available:
+                if empty_signal:
+                    vol_int = available
+                elif vol_int > available:
                     vol_int = available
 
                 if vol_int <= 0:
@@ -386,6 +392,14 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         else:
             self.write_log("下单失败")
         return True
+
+    @staticmethod
+    def is_empty_signal(signal: Stock) -> bool:
+        """Return True when a signal explicitly asks to fully clear the position."""
+        value = getattr(signal, "empty", False)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y"}
+        return bool(value)
 
     def get_gateway_name(self, vt_symbol: str) -> str | None:
         contract = self.signal_engine.main_engine.get_contract(vt_symbol)

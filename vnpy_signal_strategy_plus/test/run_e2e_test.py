@@ -3,7 +3,7 @@
 
 **前置条件（用户在编排器启动前完成）：**
 
-1. ``mysql_signal_setting.json`` 不需改动；测试策略 ``EtfIntraTestStrategy``
+1. ``mysql_signal_setting.json`` 不需改动；测试策略 ``CsvReplayTestStrategy``
    自带配置加载，从 ``test_setting.json`` 读 mysql 段。
 
 2. **手动**在另一个终端启动 ``run_sim.py``（或 ``run_sim_e2e.py``，待后续实现）：
@@ -11,8 +11,8 @@
    - 取消 ``main_engine.add_gateway(QmtSimGateway, gateway_name="QMT_SIM")`` 的注释
    - GUI 内连接 QMT_SIM 网关，账户初始资金设置为 ``test_setting.json`` 的
      ``initial_capital``
-   - 在 GUI 的 SignalStrategyPlus 面板里加载策略 ``EtfIntraTestStrategy``
-     （strategy_name="etf_intra_test"），点击「初始化」+「启动」
+   - 在 GUI 的 SignalStrategyPlus 面板里加载策略 ``CsvReplayTestStrategy``
+     （strategy_name="etf_rotation_basic"），点击「初始化」+「启动」
 
 3. 在 ``test_setting.json`` 中把 ``mysql.password`` / ``redis.password``
    替换为真实密码。
@@ -21,7 +21,7 @@
 
 1. 前置检查（mysql/redis 连通性、sim db 文件路径存在）。
 2. 清理旧状态：
-   - DELETE FROM stock_trade WHERE stg='etf_intra_test' （可选）
+   - DELETE FROM stock_trade WHERE stg='etf_rotation_basic' （可选）
    - XTRIM <stream> MAXLEN 0
 3. 启动 bridge subprocess（``redis_to_mysql_bridge``，从 test_setting.json
    生成临时 bridge 配置）。
