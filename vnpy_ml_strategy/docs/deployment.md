@@ -161,7 +161,7 @@ bootstrap.ps1 干了 7 件事:
 7. (可选 -SkipDryRun 关闭) 跑 `import run_ml_headless` dry-run 验证 .env / yaml 配置链
 
 ⚠️ **bootstrap 不会**自动:
-- 改 `vt_setting.json` 里 tushare token / SMTP 凭据 (Step 4c 手填)
+- 校验 `TUSHARE_TOKEN` 是否真实可用；SMTP 凭据仍需按需填 `vt_setting.json`
 - 拷 bundle (Step 8 训练机 rsync)
 - 装 miniqmt 客户端 (Step 10 券商私有流程)
 - 跑第一次 daily_ingest (Step 7 上线前手动验证一次)
@@ -250,12 +250,17 @@ ML_DAILY_INGEST_ENABLED=1                              # 实盘必须 1
 STRATEGIES_CONFIG=config/strategies.production.yaml   # 默认值
 ```
 
-**4c. 设 vt_setting.json 也读 env** (vnpy 框架本身的 datafeed.password 还要填):
+**4c. vn.py datafeed token 注入**
+
+`run_ml_headless.py` 与 `deploy/initial_ingest.py` 会在启动期把 `.env.production`
+中的 `TUSHARE_TOKEN` 注入到 vn.py `SETTINGS["datafeed.password"]`，因此首次部署
+优先只维护 `.env.production` 即可。若需要兼容手工 UI / 旧脚本，也可以继续直接填：
 
 ```powershell
 notepad C:\Users\$env:USERNAME\.vntrader\vt_setting.json
-# 改成 (datafeed.password 取 env, 但 vt_setting.json 不支持 ${} 语法,
-# 需要部署脚本启动期注入或直接填具体值)
+# datafeed.name = tushare_pro
+# datafeed.username = tushare
+# datafeed.password = <你的 tushare token>
 ```
 
 ⚠️ **加固建议** (上线后 ~2 周升级到 Windows Credential Manager / DPAPI 加密):
@@ -330,8 +335,9 @@ Get-Content D:\vnpy_data\qlib_data_bin\calendars\day.txt -Tail 3
 ls D:\vnpy_data\snapshots\filtered\*_$(Get-Date -Format yyyyMMdd).parquet
 ```
 
-⚠️ **凭据要求**: vt_setting.json 的 `datafeed.password` (tushare token) 必须填,
-否则 ingest 第一阶段 `fetch` 直接 raise. 见 Step 4c.
+⚠️ **凭据要求**: `.env.production` 的 `TUSHARE_TOKEN` 必须填且有效；
+也可用 `vt_setting.json` 的 `datafeed.password` 作为兼容兜底。否则 ingest 第一阶段
+`fetch` 会直接失败。见 Step 4c.
 
 ### Step 8. rsync bundle 到部署机
 

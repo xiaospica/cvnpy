@@ -14,7 +14,7 @@
 # 先决条件 (bootstrap.ps1 -Apply 已搞定 + 用户手工补的部分):
 #   - .env.production / strategies.production.yaml 已配
 #   - bundle 已 rsync 到 ${VNPY_MODEL_ROOT}/<run_id>/, 含 filter_config.json
-#   - vt_setting.json 的 datafeed.username / datafeed.password (tushare token) 已填
+#   - .env.production 的 TUSHARE_TOKEN 已填；或 vt_setting.json 的 datafeed.password 已填
 #   - vnpy 主 Python 已装 (脚本自动从 .env / 检测 / winget 装)
 
 [CmdletBinding()]
@@ -71,6 +71,6 @@ if ($rc -eq 0) {
     exit 0
 } else {
     Write-Host ""
-    Write-Error "[ingest] 失败 (rc=$rc) — 检查 vt_setting.json datafeed.password / network / disk."
+    Write-Error "[ingest] 失败 (rc=$rc) — 检查 .env.production TUSHARE_TOKEN / vt_setting.json datafeed.password / network / disk."
     exit $rc
 }

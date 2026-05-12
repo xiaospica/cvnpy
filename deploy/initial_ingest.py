@@ -24,7 +24,8 @@
     1. 加载 .env.production (走 dotenv, 与 run_ml_headless.py 同源逻辑)
     2. 读 config/strategies.production.yaml, 收集所有 bundle_dir
     3. 读每个 bundle 的 filter_config.json, 聚合 filter_chain_specs
-    4. 构造 TushareDatafeedPro (走 vt_setting.json 的 tushare datafeed.password)
+    4. 构造 TushareDatafeedPro (优先走 .env.production 的 TUSHARE_TOKEN,
+       兼容 vt_setting.json 的 datafeed.password)
     5. set_filter_chain_specs(specs) + ingest_today(date) 逐日跑
     6. 每日打印 stages_done / merged_rows / qlib calendar 末尾日期
 """
@@ -46,17 +47,22 @@ def _bootstrap_repo_imports() -> None:
     """与 run_ml_headless.py 同源: vendor / .env / repo root 加 sys.path."""
     os.environ.setdefault("VNPY_DOCK_BACKEND", "ads")
 
-    # 1. repo root → import vnpy_tushare_pro / vnpy_ml_strategy
+    # 1. 固定工作目录到 repo root，确保 vn.py 优先读取 <repo>/.vntrader。
+    #    vn.py 的 TEMP_DIR 在 import vnpy.trader.utility 时按 Path.cwd() 决定；
+    #    如果用户从 deploy/ 执行脚本，会错误回退到 C:/Users/<user>/.vntrader。
+    os.chdir(_REPO)
+
+    # 2. repo root → import vnpy_tushare_pro / vnpy_ml_strategy
     if str(_REPO) not in sys.path:
         sys.path.insert(0, str(_REPO))
 
-    # 2. vendor/qlib_strategy_core → qlib runtime (虽然初始 ingest 不直接 import qlib,
+    # 3. vendor/qlib_strategy_core → qlib runtime (虽然初始 ingest 不直接 import qlib,
     # 但 vnpy_tushare_pro 内部可能间接依赖)
     core_dir = _REPO / "vendor" / "qlib_strategy_core"
     if core_dir.exists() and str(core_dir) not in sys.path:
         sys.path.insert(0, str(core_dir))
 
-    # 3. .env.production 优先, 然后 .env
+    # 4. .env.production 优先, 然后 .env
     try:
         from dotenv import load_dotenv  # noqa: WPS433
     except ImportError:
@@ -135,6 +141,41 @@ def _trade_dates(date_from: str, date_to: str) -> list[str]:
     return out
 
 
+def _apply_datafeed_env_settings() -> tuple[bool, str]:
+    """把环境变量里的 Tushare datafeed 配置注入 vn.py SETTINGS.
+
+    Returns:
+        ``(has_token, source)`` 二元组。``source`` 只用于日志，不包含密钥值。
+    """
+    from vnpy.trader.setting import SETTINGS
+
+    env_token = (
+        os.getenv("VNPY_DATAFEED_PASSWORD")
+        or os.getenv("TUSHARE_TOKEN")
+        or ""
+    ).strip()
+    env_username = (
+        os.getenv("VNPY_DATAFEED_USERNAME")
+        or os.getenv("TUSHARE_USERNAME")
+        or "tushare"
+    ).strip()
+    env_name = (os.getenv("VNPY_DATAFEED_NAME") or "tushare_pro").strip()
+
+    if env_name:
+        SETTINGS["datafeed.name"] = env_name
+    if env_username:
+        SETTINGS["datafeed.username"] = env_username
+
+    if env_token:
+        SETTINGS["datafeed.password"] = env_token
+        return True, "env:TUSHARE_TOKEN/VNPY_DATAFEED_PASSWORD"
+
+    if str(SETTINGS.get("datafeed.password", "")).strip():
+        return True, "vt_setting.json:datafeed.password"
+
+    return False, "missing"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="首次部署 / 灾备恢复时一次性历史数据回填.",
@@ -164,14 +205,35 @@ def main() -> int:
         return 1
     print(f"[ingest] 共 {len(specs)} 个 filter_id: {list(specs.keys())}")
 
-    print("[ingest] 初始化 TushareDatafeedPro (vt_setting.json datafeed.password)...")
+    print(
+        "[ingest] 初始化 TushareDatafeedPro "
+        "(.env.production TUSHARE_TOKEN / vt_setting.json datafeed.password)..."
+    )
     try:
         from vnpy_tushare_pro import Datafeed
     except Exception as exc:
         print(f"[ingest] ❌ import vnpy_tushare_pro 失败: {exc}")
         print("        检查: vnpy 主 Python 是否装了 vnpy + vnpy_tushare_pro")
         return 2
-    dp = Datafeed()
+
+    has_token, token_source = _apply_datafeed_env_settings()
+    if not has_token:
+        print("[ingest] ❌ 找不到 Tushare token。")
+        print("        请在 .env.production 填 TUSHARE_TOKEN=...，")
+        print("        或在 C:/Users/<user>/.vntrader/vt_setting.json 填 datafeed.password。")
+        return 4
+    print(f"[ingest] Tushare token 来源: {token_source}")
+
+    try:
+        dp = Datafeed()
+    except Exception as exc:
+        print(f"[ingest] ❌ TushareDatafeedPro 初始化失败: {exc}")
+        if "api init error" in str(exc).lower():
+            print("        通常是 token 为空、填错、仍是占位符，或当前 Python 环境无法完成 Tushare 初始化。")
+            print("        请检查 .env.production:TUSHARE_TOKEN / VNPY_DATAFEED_PASSWORD，")
+            print("        以及 C:/Users/<user>/.vntrader/vt_setting.json:datafeed.password。")
+        return 4
+
     pipeline = getattr(dp, "daily_ingest_pipeline", None)
     if pipeline is None:
         print("[ingest] ❌ TushareDatafeedPro.daily_ingest_pipeline 未启用; "

@@ -73,6 +73,38 @@ elif (_HERE / ".env").exists():
     load_dotenv(_HERE / ".env", override=False)
 # 如果都没有, 继续走系统 env / 启动期会因关键 env 缺失而 raise
 
+
+def _apply_vnpy_datafeed_env_settings() -> None:
+    """把 .env / 系统 env 中的数据源配置注入 vn.py SETTINGS.
+
+    vn.py 原生只读 ``.vntrader/vt_setting.json``，不认识 ``TUSHARE_TOKEN``。
+    部署脚本统一把敏感项放在 ``.env.production``，因此主进程启动时需要显式同步
+    到 ``SETTINGS``，避免后续 ``TushareProApp`` 构造 datafeed 时拿到空 token。
+    """
+    from vnpy.trader.setting import SETTINGS
+
+    env_name = (os.getenv("VNPY_DATAFEED_NAME") or "tushare_pro").strip()
+    env_username = (
+        os.getenv("VNPY_DATAFEED_USERNAME")
+        or os.getenv("TUSHARE_USERNAME")
+        or "tushare"
+    ).strip()
+    env_token = (
+        os.getenv("VNPY_DATAFEED_PASSWORD")
+        or os.getenv("TUSHARE_TOKEN")
+        or ""
+    ).strip()
+
+    if env_name:
+        SETTINGS["datafeed.name"] = env_name
+    if env_username:
+        SETTINGS["datafeed.username"] = env_username
+    if env_token:
+        SETTINGS["datafeed.password"] = env_token
+
+
+_apply_vnpy_datafeed_env_settings()
+
 # vendor/qlib_strategy_core/ 已在 sys.path[0] (line 53-55), 推理子进程也走它.
 # vnpy 主进程不直接 import qlib, 所以这是唯一所需 sys.path. 部署机不需要外部
 # qlib_strategy_dev 仓库.
