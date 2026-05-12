@@ -108,8 +108,8 @@ function Get-DeployContext {
         Hashtable with keys:
             RepoRoot, EnvFile, EnvVars (raw .env hashtable)
             VnpyPython, InferencePython
-            QsDataRoot, MlOutputRoot, VnpyModelRoot
-            LogRoot, BackupRoot
+            VnpyDataRoot, MlOutputRoot, VnpyModelRoot
+            LogRoot, BackupRoot (QsDataRoot kept as a compatibility alias)
     #>
     param(
         [Parameter(Mandatory)] [string]$RepoRoot,
@@ -142,17 +142,20 @@ function Get-DeployContext {
         if ($detected) { $infPy = $detected }
     }
 
+    $vnpyDataRoot = _Get 'VNPY_DATA_ROOT' 'D:\vnpy_data'
+
     return @{
         RepoRoot         = $RepoRoot
         EnvFile          = $EnvFile
         EnvVars          = $envVars
         VnpyPython       = $vnpyPy
         InferencePython  = $infPy
-        QsDataRoot       = _Get 'QS_DATA_ROOT'    'D:\vnpy_data'
-        MlOutputRoot     = _Get 'ML_OUTPUT_ROOT'  'D:\ml_output'
-        VnpyModelRoot    = _Get 'VNPY_MODEL_ROOT' 'D:\vnpy_data\models'
-        LogRoot          = _Get 'LOG_ROOT'        'D:\vnpy_logs'
-        BackupRoot       = _Get 'BACKUP_ROOT'     'D:\backups'
+        VnpyDataRoot     = $vnpyDataRoot
+        QsDataRoot       = $vnpyDataRoot  # compatibility alias for older deploy scripts
+        MlOutputRoot     = _Get 'ML_OUTPUT_ROOT'  (Join-Path $vnpyDataRoot 'ml_output')
+        VnpyModelRoot    = _Get 'VNPY_MODEL_ROOT' (Join-Path $vnpyDataRoot 'models')
+        LogRoot          = _Get 'LOG_ROOT'        (Join-Path $vnpyDataRoot 'logs')
+        BackupRoot       = _Get 'BACKUP_ROOT'     (Join-Path $vnpyDataRoot 'backups')
     }
 }
 

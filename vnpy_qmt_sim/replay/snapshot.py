@@ -39,12 +39,9 @@ _init_done: dict[str, bool] = {}
 
 
 def resolve_replay_history_db() -> Path:
-    """Resolve the local replay-history SQLite path."""
-    explicit = os.environ.get("REPLAY_HISTORY_DB")
-    if explicit:
-        return Path(explicit)
-    qs_root = os.environ.get("QS_DATA_ROOT", r"D:/vnpy_data")
-    return Path(qs_root) / "state" / "replay_history.db"
+    """Resolve the local replay-history SQLite path from VNPY_DATA_ROOT."""
+    from vnpy_common.data_paths import replay_history_db_path
+    return replay_history_db_path()
 
 
 def _get_conn(db_path: Path) -> sqlite3.Connection:

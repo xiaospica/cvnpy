@@ -66,25 +66,30 @@ elif (_HERE / ".env").exists():
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+from vnpy_common.data_paths import (  # noqa: E402
+    ensure_vnpy_data_env,
+    ml_output_root,
+    models_root,
+    replay_history_db_path,
+    sim_state_dir,
+    vnpy_data_root,
+)
+
+ensure_vnpy_data_env()
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 配置常量 (从 .env 读)
 # ═══════════════════════════════════════════════════════════════════════════
 
 # 选 csi300_lgb_headless (bundle f6017) 作 demo 示例策略 (与 strategies.production.yaml 一致).
-# .env 没配 VNPY_MODEL_ROOT 时报错 (不留兼容默认).
-_VNPY_MODEL_ROOT = os.environ.get("VNPY_MODEL_ROOT")
-if not _VNPY_MODEL_ROOT:
-    raise RuntimeError(
-        "VNPY_MODEL_ROOT 未设. 检查 .env / .env.production 是否含此字段."
-    )
 DEMO_BUNDLE_DIR = os.getenv(
-    "DEMO_BUNDLE_DIR",  # demo 专用覆盖, 默认走 .env VNPY_MODEL_ROOT + 默认 run_id
-    f"{_VNPY_MODEL_ROOT}/f6017411b44c4c7790b63c5766b93964",
+    "DEMO_BUNDLE_DIR",
+    str(models_root() / "f6017411b44c4c7790b63c5766b93964"),
 )
 
-# 基础 setting (sim gateway 共享, 与 strategies.production.yaml 中 qmt_sim 同源)
-_QS_DATA_ROOT = os.environ.get("QS_DATA_ROOT") or "D:/vnpy_data"
+# ?? setting (sim gateway ??, ? strategies.production.yaml ? qmt_sim ??)
+_VNPY_DATA_ROOT = vnpy_data_root()
 QMT_SIM_BASE_SETTING: Dict[str, Any] = {
     "模拟资金": 1_000_000.0,
     "部分成交率": 0.0,
@@ -94,13 +99,13 @@ QMT_SIM_BASE_SETTING: Dict[str, Any] = {
     "报单上报延迟毫秒": 0,
     "卖出持仓不足拒单": "是",
     "行情源": "merged_parquet",
-    "merged_parquet_merged_root": f"{_QS_DATA_ROOT}/snapshots/merged",
+    "merged_parquet_merged_root": str(_VNPY_DATA_ROOT / "snapshots" / "merged"),
     "merged_parquet_reference_kind": "today_open",
     "merged_parquet_fallback_days": 10,
     "merged_parquet_stale_warn_hours": 48,
     "启用持久化": "是",
-    # [A2] 状态文件统一到 ${QS_DATA_ROOT}/state/
-    "持久化目录": f"{_QS_DATA_ROOT}/state",
+    # [A2] 状态文件统一到 ${VNPY_DATA_ROOT}/state/
+    "持久化目录": str(sim_state_dir()),
 }
 
 # 实盘 miniqmt 默认 setting (V3 用; 资金账号 由 --qmt-account 注入, 路径走 .env)
@@ -117,10 +122,10 @@ STRATEGY_BASE_SETTING: Dict[str, Any] = {
         "INFERENCE_PYTHON",
         r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
     ),
-    "provider_uri": f"{_QS_DATA_ROOT}/qlib_data_bin",
+    "provider_uri": str(_VNPY_DATA_ROOT / "qlib_data_bin"),
     "trigger_time": "21:00",
     "buy_sell_time": "09:26",
-    "output_root": os.environ.get("ML_OUTPUT_ROOT", "D:/ml_output"),
+    "output_root": str(ml_output_root()),
     "lookback_days": 60,
     "subprocess_timeout_s": 300,
     "baseline_path": "",
@@ -150,12 +155,12 @@ def _cleanup_demo_state(strategy_names: List[str], gateway_names: List[str]) -> 
     print("Step 1 · 清理 demo 状态")
     print("=" * 60)
 
-    # 1a. sim_db (按 demo gateway_names) — [A2] 已统一到 ${QS_DATA_ROOT}/state
-    sim_state_dir = Path(_QS_DATA_ROOT) / "state"
-    if sim_state_dir.exists():
+    # 1a. sim_db (按 demo gateway_names) — [A2] 已统一到 ${VNPY_DATA_ROOT}/state
+    sim_state_root = sim_state_dir()
+    if sim_state_root.exists():
         for gw_name in gateway_names:
             for suffix in (".db", ".db-shm", ".db-wal", ".lock"):
-                p = sim_state_dir / f"sim_{gw_name}{suffix}"
+                p = sim_state_root / f"sim_{gw_name}{suffix}"
                 if p.exists():
                     try:
                         p.unlink()
@@ -164,9 +169,9 @@ def _cleanup_demo_state(strategy_names: List[str], gateway_names: List[str]) -> 
                         print(f"  ⚠️ 删 {p.name} 失败: {exc}")
 
     # 1b. ml_output (按 demo strategy_names)
-    ml_output_root = Path(os.getenv("ML_OUTPUT_ROOT", r"D:/ml_output"))
+    ml_root = ml_output_root()
     for strat_name in strategy_names:
-        d = ml_output_root / strat_name
+        d = ml_root / strat_name
         if d.exists():
             try:
                 shutil.rmtree(d)
@@ -175,9 +180,9 @@ def _cleanup_demo_state(strategy_names: List[str], gateway_names: List[str]) -> 
                 print(f"  ⚠️ 删 {d} 失败: {exc}")
 
     # 1c. replay_history.db (demo 重置后由 vnpy 端按需重写)
-    qs_root = Path(os.getenv("QS_DATA_ROOT", r"D:/vnpy_data"))
+    replay_db = replay_history_db_path()
     for suffix in ("", "-shm", "-wal"):
-        p = qs_root / "state" / f"replay_history.db{suffix}"
+        p = Path(str(replay_db) + suffix)
         if p.exists():
             try:
                 p.unlink()
@@ -476,7 +481,7 @@ def _print_verification(mode: str, strategy_names: List[str], gateway_names: Lis
     print("\n" + "=" * 60)
     print(f"Step 6 · 退出后验证 cmd ({mode})")
     print("=" * 60)
-    sim_state = Path(_QS_DATA_ROOT) / "state"
+    sim_state = sim_state_dir()
 
     print("\n# (a) sim_db 物理隔离 — 各 gateway 独立持仓 / 资金:")
     for gw in gateway_names:

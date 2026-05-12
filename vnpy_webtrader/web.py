@@ -139,6 +139,7 @@ from .routes_node import router as node_router
 from .routes_strategy import router as strategy_router
 from .routes_ml import router as ml_router
 from .routes_reference import router as reference_router
+from .event_journal import append_event, list_events
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +283,18 @@ def get_all_accounts(access: bool = Depends(get_access)) -> List[dict]:
     return [to_dict(a) for a in accounts]
 
 
+@app.get("/api/v1/events")
+def get_event_journal(
+    since_seq: int = 0,
+    limit: int = 1000,
+    topic: str = "",
+    strategy_name: str = "",
+    access: bool = Depends(get_access),
+) -> List[dict]:
+    """Durable WS/RPC event journal for mlearnweb backfill."""
+    return list_events(since_seq=since_seq, limit=limit, topic=topic, strategy_name=strategy_name)
+
+
 @app.get("/api/v1/contract")
 def get_all_contracts(access: bool = Depends(get_access)) -> List[dict]:
     contracts: List[ContractData] = get_rpc_client().get_all_contracts()
@@ -350,18 +363,27 @@ def _map_topic(raw_topic: str) -> tuple[str, str]:
 
 
 def _rpc_callback(topic: str, data: Any) -> None:
-    """RpcClient 接收到推送时触发, 打包成 WS 消息广播给所有前端连接。"""
-    if not active_websockets:
-        return
+    """Persist RPC push to the event journal, then fan out to websocket clients."""
     wire_topic, engine = _map_topic(topic)
+    payload_data = to_dict(data) if hasattr(data, "__dict__") else data
+    ts = time.time()
     message: Dict[str, Any] = {
         "topic": wire_topic,
         "node_id": NODE_ID,
-        "ts": time.time(),
-        "data": to_dict(data) if hasattr(data, "__dict__") else data,
+        "ts": ts,
+        "data": payload_data,
     }
     if engine:
         message["engine"] = engine
+    append_event(
+        topic=wire_topic,
+        node_id=NODE_ID,
+        engine=engine,
+        data=payload_data,
+        event_ts=ts,
+    )
+    if not active_websockets:
+        return
     try:
         payload = json.dumps(message, ensure_ascii=False, default=str)
     except Exception:

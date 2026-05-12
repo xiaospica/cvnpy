@@ -1,7 +1,7 @@
 """vnpy 端本地回放权益历史 SQLite (A1/B2 解耦后替代 mlearnweb.db 直写).
 
 设计:
-  - 路径: ``$QS_DATA_ROOT/state/replay_history.db`` (默认
+  - 路径: ``$VNPY_DATA_ROOT/state/replay_history.db`` (默认
     ``D:/vnpy_data/state/replay_history.db``); env ``REPLAY_HISTORY_DB`` 可覆盖
   - 单表 ``replay_equity_snapshots`` (PRIMARY KEY = strategy_name, ts)
     UPSERT 写入 — 同一 (策略, 日期) 重跑回放只保留最新一行
@@ -56,18 +56,14 @@ _init_done: Dict[str, bool] = {}  # 按 db_path 缓存,避免每次写都跑 DDL
 
 
 def _resolve_db_path() -> Path:
-    """按 env > 默认顺序解析 db 路径. 路径不依赖文件存在,首次写时自动建.
+    """Resolve replay history DB path from the unified vnpy data root.
 
-    优先级:
-      1. env ``REPLAY_HISTORY_DB`` (绝对路径)
-      2. ``$QS_DATA_ROOT/state/replay_history.db``
-      3. ``D:/vnpy_data/state/replay_history.db`` (兜底默认)
+    ``REPLAY_HISTORY_DB`` remains an explicit advanced override for tests and
+    emergency repair, but the normal deployment default is derived from
+    ``VNPY_DATA_ROOT``.
     """
-    explicit = os.environ.get("REPLAY_HISTORY_DB")
-    if explicit:
-        return Path(explicit)
-    qs_root = os.environ.get("QS_DATA_ROOT", r"D:/vnpy_data")
-    return Path(qs_root) / "state" / "replay_history.db"
+    from vnpy_common.data_paths import replay_history_db_path
+    return replay_history_db_path()
 
 
 def _get_conn(db_path: Path) -> sqlite3.Connection:

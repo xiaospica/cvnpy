@@ -49,6 +49,7 @@ from vnpy.trader.event import EVENT_LOG
 from vnpy.trader.object import LogData, OrderData, OrderRequest, TradeData
 
 from vnpy_order_utils import AutoResubmitMixin
+from vnpy_common.data_paths import ml_output_root
 
 from .base import (
     APP_NAME,
@@ -129,7 +130,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     n_drop: int = 1
     risk_degree: float = 0.95
     gateway: str = ""
-    output_root: str = "D:/ml_output"
+    output_root: str = str(ml_output_root())
     lookback_days: int = 60
     provider_uri: str = ""
     baseline_path: str = ""

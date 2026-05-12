@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, Any
+import os
 from datetime import datetime
 from vnpy.event import EventEngine, Event, EVENT_TIMER
 from vnpy.trader.gateway import BaseGateway
@@ -13,6 +14,7 @@ from vnpy.trader.object import (
 from vnpy.trader.constant import Exchange, Status
 
 from .bar_source import build_bar_source
+from vnpy_common.data_paths import merged_snapshots_dir, sim_state_dir
 from .md import QmtSimMd
 from .td import QmtSimTd
 
@@ -35,7 +37,7 @@ class QmtSimGateway(BaseGateway):
         "报单上报延迟毫秒": 0,
         "卖出持仓不足拒单": "是",
         "行情源": "merged_parquet",
-        "merged_parquet_merged_root": r"D:\vnpy_data\snapshots\merged",
+        "merged_parquet_merged_root": str(merged_snapshots_dir()),
         # today_open: 撮合参考价 = 当日**原始**(未复权) open，对齐"次日 09:30 开盘成交"语义
         # prev_close: 老语义，仅在 source 没有当日数据时退化使用
         # 详见 plan 文档"决策 1"（原始价撮合 + 决策 2 的 pct_chg mark-to-market）
@@ -46,7 +48,7 @@ class QmtSimGateway(BaseGateway):
         # [A2] 默认放在 D:/vnpy_data/state/ 与其他状态文件 (replay_history.db)
         # 集中, 便于备份 / 跨机部署. 旧路径 vnpy_qmt_sim/.trading_state/ 已废弃,
         # 升级时 mv 即可 (无 DB schema 变化, 文件位置变化).
-        "持久化目录": r"D:\vnpy_data\state",
+        "持久化目录": str(sim_state_dir()),
     }
 
     exchanges = [Exchange.SSE, Exchange.SZSE]
@@ -109,8 +111,8 @@ class QmtSimGateway(BaseGateway):
         except Exception as exc:
             self.write_log(f"持久化模块加载失败，跳过: {exc}")
             return
-
-        root = setting.get("持久化目录") or r"D:\vnpy_data\state"
+        raw_root = setting.get("持久化目录") or str(sim_state_dir())
+        root = os.path.expandvars(str(raw_root))
         account_id = setting.get("账户", "test_id")
         try:
             persistence = QmtSimPersistence(account_id=str(account_id), root=root)

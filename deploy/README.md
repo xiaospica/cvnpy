@@ -121,7 +121,7 @@ schtasks /create /tn "vnpy_daily_backup" `
 .\deploy\install_services.ps1 `
     -VnpyRoot "F:\Quant\vnpy\vnpy_strategy_dev" `
     -VnpyPython "F:\Program_Home\vnpy\python.exe" `
-    -LogRoot "D:\vnpy_logs"
+    -LogRoot "D:\vnpy_data\logs"
 ```
 
 ## NSSM 配置详情
@@ -133,7 +133,7 @@ schtasks /create /tn "vnpy_daily_backup" `
 | `Application` | `<VnpyPython>` | F:\Program_Home\vnpy\python.exe |
 | `AppParameters` | `run_ml_headless.py` | 主入口 |
 | `AppDirectory` | `<VnpyRoot>` | 工作目录 = 仓库根 (load_dotenv 找 .env 用) |
-| `AppStdout` / `AppStderr` | `D:\vnpy_logs\vnpy_headless.{log,err}` | 标准输出 + 错误 |
+| `AppStdout` / `AppStderr` | `D:\vnpy_data\logs\vnpy_headless.{log,err}` | 标准输出 + 错误 |
 | `AppRotateFiles=1` `AppRotateBytes=10485760` | 10 MB 文件 | 日志滚动 (P1-2 部分覆盖) |
 | `AppRestartDelay=10000` | 10s | 崩溃 → 等 10s → 自动重启 (防震荡) |
 | `Start=SERVICE_AUTO_START` | 开机自启 | 服务器重启自动起 |
@@ -149,10 +149,10 @@ nssm status vnpy_headless
 nssm restart vnpy_headless
 
 # 实时看 stdout 日志
-Get-Content D:\vnpy_logs\vnpy_headless.log -Wait -Tail 50
+Get-Content D:\vnpy_data\logs\vnpy_headless.log -Wait -Tail 50
 
 # 看 stderr (推理子进程 / qlib import 异常专属)
-Get-Content D:\vnpy_logs\vnpy_headless.err -Wait -Tail 50
+Get-Content D:\vnpy_data\logs\vnpy_headless.err -Wait -Tail 50
 
 # 测推理端端口 (启动 ~10s 后)
 Test-NetConnection 127.0.0.1 -Port 2014    # vnpy_webtrader RPC rep
@@ -177,17 +177,17 @@ New-NetFirewallRule -DisplayName "vnpy webtrader 8001" `
 ### vnpy_headless 启动后立即崩溃
 
 ```powershell
-Get-Content D:\vnpy_logs\vnpy_headless.err -Tail 50
+Get-Content D:\vnpy_data\logs\vnpy_headless.err -Tail 50
 ```
 
 常见原因:
 
 | 错误 | 修复 |
 |---|---|
-| `RuntimeError: QS_DATA_ROOT 未设` | `.env.production` 缺字段 / 路径错 |
+| `RuntimeError: VNPY_DATA_ROOT 未设` | `.env.production` 缺字段 / 路径错 |
 | `RuntimeError: DailyIngestPipeline 未启用` | `.env.production` 设 `ML_DAILY_INGEST_ENABLED=1` (P0-3) |
 | `ValueError: GATEWAYS 含 N 个 kind=live` | `strategies.production.yaml` gateway 配错 — miniqmt 单进程单账户 ≤ 1 |
-| `FileNotFoundError: bundle ...` | yaml 中 `bundle_dir` 路径不存在; rsync bundle 到 `${VNPY_MODEL_ROOT}/<run_id>` |
+| `FileNotFoundError: bundle ...` | yaml 中 `bundle_dir` 路径不存在; rsync bundle 到 `${VNPY_DATA_ROOT}/models/<run_id>` |
 | `ImportError: vnpy_qmt` | kind=live 但没装 vnpy_qmt; 改 kind=sim (sim 模式) 或 `pip install vnpy_qmt` |
 | `OS 时区 ≠ APScheduler` | P1-4 警告, 修: `tzutil /s "China Standard Time"` + `w32tm /resync` |
 

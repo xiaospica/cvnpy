@@ -173,26 +173,26 @@ class TushareDatafeedPro(BaseDatafeed):
     def _build_daily_ingest_pipeline(self) -> DailyIngestPipeline | None:
         """按 env 变量构造 DailyIngestPipeline (Phase 4 v2).
 
-        QS_DATA_ROOT 驱动所有路径默认, 单变量即可启用:
-          QS_DATA_ROOT=D:/vnpy_data
+        VNPY_DATA_ROOT 驱动所有路径默认, 单变量即可启用:
+          VNPY_DATA_ROOT=D:/vnpy_data
 
         默认布局:
-          {QS_DATA_ROOT}/stock_data/daily_merged_all_new.parquet     (活动 merged, 观察档)
-          {QS_DATA_ROOT}/stock_data/by_stock/                        (qlib CSV 临时区)
-          {QS_DATA_ROOT}/qlib_data_bin/                              (qlib bin, 每日重建)
-          {QS_DATA_ROOT}/snapshots/merged/daily_merged_{T}.parquet   (推理用 merged 快照)
-          {QS_DATA_ROOT}/snapshots/filtered/active_{filter_id}.parquet  (滚动累积过滤档)
-          {QS_DATA_ROOT}/snapshots/filtered/{filter_id}_{T}.parquet  (推理用过滤快照)
-          {QS_DATA_ROOT}/jq_index/hs300_*.csv                        (聚宽成分股 CSV)
+          {VNPY_DATA_ROOT}/stock_data/daily_merged_all_new.parquet     (活动 merged, 观察档)
+          {VNPY_DATA_ROOT}/stock_data/by_stock/                        (qlib CSV 临时区)
+          {VNPY_DATA_ROOT}/qlib_data_bin/                              (qlib bin, 每日重建)
+          {VNPY_DATA_ROOT}/snapshots/merged/daily_merged_{T}.parquet   (推理用 merged 快照)
+          {VNPY_DATA_ROOT}/snapshots/filtered/active_{filter_id}.parquet  (滚动累积过滤档)
+          {VNPY_DATA_ROOT}/snapshots/filtered/{filter_id}_{T}.parquet  (推理用过滤快照)
+          {VNPY_DATA_ROOT}/jq_index/hs300_*.csv                        (聚宽成分股 CSV)
 
         覆盖:
           ML_DAILY_INGEST_ENABLED    "1" 启用 (默认 "1"; 实盘必须 1,
                                      设 "0" 仅用于无 tushare 的研发机)
-          ML_MERGED_PARQUET_PATH     显式指定, 覆盖 QS_DATA_ROOT 默认
+          ML_MERGED_PARQUET_PATH     显式指定, 覆盖 VNPY_DATA_ROOT 默认
           ML_BY_STOCK_CSV_DIR
           ML_QLIB_DIR
           ML_SNAPSHOT_DIR
-          ML_JQ_INDEX_CSV_PATHS      聚宽 CSV 路径 JSON 字符串, 默认从 QS_DATA_ROOT/jq_index/
+          ML_JQ_INDEX_CSV_PATHS      聚宽 CSV 路径 JSON 字符串, 默认从 VNPY_DATA_ROOT/jq_index/
           ML_INGEST_LOOKBACK_DAYS    snapshot 窗口自然日数 (默认 120, ≈80 交易日 cover Alpha158
                                      60 滚动窗口的当日推理). 回放需要更长历史时改大 (250 ≈ 165
                                      交易日, 可 cover ~3 个月前的回放推理).
@@ -209,21 +209,23 @@ class TushareDatafeedPro(BaseDatafeed):
             return None
 
         import json
-        qs_root = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
+        from vnpy_common.data_paths import vnpy_data_root
+
+        data_root = vnpy_data_root()
 
         def _env_or_default(key: str, rel_path: str) -> str:
-            return os.getenv(key) or str(Path(qs_root) / rel_path)
+            return os.getenv(key) or str(data_root / rel_path)
 
-        # 聚宽 CSV: env 覆盖优先, 否则 QS_DATA_ROOT/jq_index/hs300_*.csv
+        # JQ index CSV: explicit env override first, then VNPY_DATA_ROOT/jq_index/hs300_*.csv.
         jq_paths_env = os.getenv("ML_JQ_INDEX_CSV_PATHS")
         if jq_paths_env:
             try:
                 jq_paths = json.loads(jq_paths_env)
             except json.JSONDecodeError:
                 logger.warning(f"[daily_ingest] ML_JQ_INDEX_CSV_PATHS 非合法 JSON, 使用默认")
-                jq_paths = {"csi300": str(Path(qs_root) / "jq_index" / "hs300_*.csv")}
+                jq_paths = {"csi300": str(data_root / "jq_index" / "hs300_*.csv")}
         else:
-            jq_paths = {"csi300": str(Path(qs_root) / "jq_index" / "hs300_*.csv")}
+            jq_paths = {"csi300": str(data_root / "jq_index" / "hs300_*.csv")}
 
         try:
             index_source = OfflineIndexDataSource(

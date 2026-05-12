@@ -38,7 +38,8 @@ def _vt_to_ts(vt: str) -> str:
 
 def _resolve_sim_db_path(gateway_name: str) -> Optional[Path]:
     """sim_<account_id>.db, account_id 默认 == gateway_name."""
-    root = Path(os.environ.get("VNPY_QMT_SIM_TRADING_STATE", _DEFAULT_TRADING_STATE))
+    from vnpy_common.data_paths import sim_state_dir
+    root = sim_state_dir()
     if not root.exists():
         return None
     if gateway_name:
@@ -68,7 +69,10 @@ def build_positions_on_date(
         logger.warning(f"[history_positions] sim db 不可达 (gateway={gateway_name})")
         return []
 
-    merged_path = Path(os.environ.get("DAILY_MERGED_ALL_PATH", _DEFAULT_DAILY_MERGED))
+    from vnpy_common.data_paths import data_path
+    merged_path = Path(os.environ.get(
+        "DAILY_MERGED_ALL_PATH", str(data_path("stock_data", "daily_merged_all_new.parquet"))
+    ))
     if not merged_path.exists():
         logger.warning(f"[history_positions] daily_merged 不存在: {merged_path}")
         return []

@@ -83,7 +83,7 @@ def corp_actions(
 ) -> Dict[str, Any]:
     """检测最近 N 日内持仓股票发生的除权除息事件 (Phase 3.3).
 
-    数据源: 本节点 ``${ML_SNAPSHOT_DIR | QS_DATA_ROOT/snapshots}/merged/daily_merged_{T}.parquet``
+    数据源: 本节点 ``${ML_SNAPSHOT_DIR | VNPY_DATA_ROOT/snapshots}/merged/daily_merged_{T}.parquet``
     (vnpy_tushare_pro DailyIngestPipeline 每日 20:00 落盘).
 
     Returns

@@ -426,10 +426,10 @@ class MLEngine(BaseEngine):
         timeout_s: int = 180,
     ) -> Dict[str, Any]:
         """委托给 QlibPredictor. 按 bundle 自带的 filter_config.filter_id 派生
-        snapshot 路径 ``{QS_DATA_ROOT}/snapshots/filtered/{filter_id}_{YYYYMMDD}.parquet``.
+        snapshot 路径 ``{VNPY_DATA_ROOT}/snapshots/filtered/{filter_id}_{YYYYMMDD}.parquet``.
 
         ``filter_parquet_path`` 若 None:
-          1. 必须设 env ``QS_DATA_ROOT``, 否则 raise.
+          1. 必须设 env ``VNPY_DATA_ROOT``, 否则 raise.
           2. 从 ModelRegistry 拿 bundle 的 filter_id (强制), 拼路径.
           3. 快照不存在 → strict raise (引导调用方先跑 daily_ingest 或检查
              ``set_filter_chain_specs`` 是否注入了对应 filter_id).
@@ -444,15 +444,10 @@ class MLEngine(BaseEngine):
 
         # 按 bundle 的 filter_id 派生 snapshot 路径; 缺失即 raise
         if filter_parquet_path is None:
-            qs_data_root = _os.getenv("QS_DATA_ROOT")
-            if not qs_data_root:
-                raise RuntimeError(
-                    "QS_DATA_ROOT env 未设, 无法定位 filter snapshot. "
-                    "实盘启动前必须设此 env (run_ml_headless.py 已 setdefault)"
-                )
+            from vnpy_common.data_paths import filtered_snapshots_dir
             filter_id = self._resolve_filter_id(bundle_dir)
             candidate = (
-                _Path(qs_data_root) / "snapshots" / "filtered"
+                filtered_snapshots_dir()
                 / f"{filter_id}_{live_end.strftime('%Y%m%d')}.parquet"
             )
             if not candidate.exists():
@@ -500,13 +495,13 @@ class MLEngine(BaseEngine):
         Note: 批量模式不写 metrics.json（PSI/KS/IC 等留单日实时模式做）；
         每日 diagnostics.json 含 ``batch_mode=true`` 标记。
 
-        按 bundle 的 filter_id 派生 snapshot 模式 ``{QS_DATA_ROOT}/snapshots/
+        按 bundle 的 filter_id 派生 snapshot 模式 ``{VNPY_DATA_ROOT}/snapshots/
         filtered/{filter_id}_*.parquet``, 选**最新**(按文件名日期 max). 由于
         ``_stage_filter`` 按 [T-lookback, T] window 回填, 最新 snapshot 总是含完整
         lookback window 的合规数据, 一份足以驱动整个 [range_start, range_end] 回放.
 
         ``filter_parquet_path`` 若 None:
-          1. 必须设 env ``QS_DATA_ROOT``, 否则 raise.
+          1. 必须设 env ``VNPY_DATA_ROOT``, 否则 raise.
           2. 没有任何 ``{filter_id}_*.parquet`` 匹配 → raise (回放无法用训练时
              固化的 filter, 因为它的日期范围只覆盖训练截止日, 走到训练截止日之后
              handler 全 status=empty 是隐藏的失败).
@@ -522,13 +517,9 @@ class MLEngine(BaseEngine):
 
         # 按 bundle 的 filter_id 派生 snapshot 模式 + 选最新; 缺失即 raise
         if filter_parquet_path is None:
-            qs_data_root = _os.getenv("QS_DATA_ROOT")
-            if not qs_data_root:
-                raise RuntimeError(
-                    "QS_DATA_ROOT env 未设, 无法定位 filter snapshot."
-                )
+            from vnpy_common.data_paths import filtered_snapshots_dir
             filter_id = self._resolve_filter_id(bundle_dir)
-            filter_dir = _Path(qs_data_root) / "snapshots" / "filtered"
+            filter_dir = filtered_snapshots_dir()
             # filter_id 可能含数字 (如 "min_90_days"), 文件名结构 = {filter_id}_{8位日期}.parquet
             # 用 re.escape + \d{8} 严格匹配本 filter_id 的 snapshot
             pattern = _re.compile(rf"^{_re.escape(filter_id)}_(\d{{8}})\.parquet$")

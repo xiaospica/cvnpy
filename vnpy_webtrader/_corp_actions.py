@@ -1,7 +1,7 @@
 """企业行为 (corp_action) 检测 — vnpy 端实现, Phase 3.3 HTTP 化.
 
 之前 mlearnweb ``corp_actions_service.py`` 直读
-``{QS_DATA_ROOT}/snapshots/merged/daily_merged_{T}.parquet`` 跑算法, 跨机
+``{VNPY_DATA_ROOT}/snapshots/merged/daily_merged_{T}.parquet`` 跑算法, 跨机
 部署时 mlearnweb 拿不到这个本地文件. 现在算法搬到 vnpy 端 (数据原生位置)
 + 包成 HTTP 端点 (``/api/v1/reference/corp_actions``), mlearnweb 退化成
 HTTP 客户端.
@@ -12,7 +12,7 @@ HTTP 客户端.
 
 复用 ``DailyIngestPipeline`` 同一份 ``snapshots/merged`` 目录约定, 路径优先级:
     1. env ``ML_SNAPSHOT_DIR`` (绝对路径)
-    2. ``${QS_DATA_ROOT}/snapshots`` (默认 D:/vnpy_data/snapshots)
+    2. ``${VNPY_DATA_ROOT}/snapshots`` (默认 D:/vnpy_data/snapshots)
 
 不依赖 EventEngine / RpcServer — 纯本地文件 + pandas 算法, 给 HTTP layer 直接调.
 """
@@ -59,14 +59,9 @@ _READ_COLS = ["ts_code", "trade_date", "name", "close", "pre_close", "pct_chg"]
 
 
 def _resolve_snapshot_dir() -> Path:
-    """``ML_SNAPSHOT_DIR`` 优先, 否则 ``${QS_DATA_ROOT}/snapshots``,
-    最终回退 ``D:/vnpy_data/snapshots``. 与 ``DailyIngestPipeline`` 默认一致.
-    """
-    explicit = os.getenv("ML_SNAPSHOT_DIR")
-    if explicit:
-        return Path(explicit)
-    qs_root = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
-    return Path(qs_root) / "snapshots"
+    """Resolve snapshots root from VNPY_DATA_ROOT, with explicit override."""
+    from vnpy_common.data_paths import snapshots_dir
+    return snapshots_dir()
 
 
 def _resolve_merged_snapshot(as_of: date, fallback_days: int = 10) -> Optional[Path]:

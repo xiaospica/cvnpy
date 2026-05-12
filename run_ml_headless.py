@@ -105,6 +105,10 @@ def _apply_vnpy_datafeed_env_settings() -> None:
 
 _apply_vnpy_datafeed_env_settings()
 
+from vnpy_common.data_paths import ensure_vnpy_data_env, legacy_path_env_warnings  # noqa: E402
+
+ensure_vnpy_data_env()
+
 # vendor/qlib_strategy_core/ 已在 sys.path[0] (line 53-55), 推理子进程也走它.
 # vnpy 主进程不直接 import qlib, 所以这是唯一所需 sys.path. 部署机不需要外部
 # qlib_strategy_dev 仓库.
@@ -171,11 +175,11 @@ GATEWAYS = _build_gateways(_CFG)
 STRATEGY_BASE_SETTING = dict(_CFG["strategy_base_setting"])
 STRATEGIES = list(_CFG["strategies"])
 
-# 显式 set QS_DATA_ROOT 到环境变量 (engine.run_inference / run_inference_range 内部用 os.getenv)
-# 之前的版本用 os.environ.setdefault, 现在改成由 .env 提供; 这里仅做兜底防错.
-if not os.getenv("QS_DATA_ROOT"):
-    raise RuntimeError(
-        "QS_DATA_ROOT 未设. 检查 .env (或 .env.production) 是否存在并含此字段."
+legacy_path_vars = legacy_path_env_warnings()
+if legacy_path_vars:
+    print(
+        "[headless] WARN: legacy path env vars still set; migrate defaults to VNPY_DATA_ROOT: "
+        + ", ".join(legacy_path_vars)
     )
 _stock_list_path = os.getenv("TUSHARE_STOCK_LIST_PATH", "").strip()
 if not _stock_list_path:
@@ -445,7 +449,7 @@ def main() -> int:
 
     # 第二轮: 把 bundle 声明的 filter_chain_specs 注入 DailyIngestPipeline. 之后
     # 20:00 daily_ingest 才知道要给哪些 filter_id 产 active/snapshot, run_inference
-    # 也才能据此查找 {QS_DATA_ROOT}/snapshots/filtered/{filter_id}_{T}.parquet.
+    # 也才能据此查找 {VNPY_DATA_ROOT}/snapshots/filtered/{filter_id}_{T}.parquet.
     if inited:
         try:
             from vnpy_tushare_pro.engine import APP_NAME as TS_APP_NAME

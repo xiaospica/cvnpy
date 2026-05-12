@@ -9,7 +9,7 @@
 清的位置:
     1. {trading_state}/sim_*.db / .db-shm / .db-wal / .lock  (账户/持仓/订单 SQLite)
     2. ml_output/{strategy_name}/  (--all 才清；包含 batch 推理产出 + selections)
-    3. {QS_DATA_ROOT}/state/replay_history.db  (--all 才清；vnpy 本地回放权益历史,
+    3. {VNPY_DATA_ROOT}/state/replay_history.db  (--all 才清；vnpy 本地回放权益历史,
        Phase 解耦 mlearnweb.db 后由 vnpy 端写本地 + mlearnweb fanout 拉)
 
 不清的位置（给你保留）:
@@ -20,29 +20,23 @@
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-# [A2] 状态文件统一到 D:/vnpy_data/state/ — 与 replay_history.db 集中, 便于备份.
-# 老路径 vnpy_qmt_sim/.trading_state/ 已废弃, 升级时 mv 即可.
-def _trading_state_dir() -> Path:
-    qs_root = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
-    return Path(qs_root) / "state"
+from vnpy_common.data_paths import ml_output_root, replay_history_db_path, sim_state_dir  # noqa: E402
 
+# Default sim state and ML output locations are derived from VNPY_DATA_ROOT.
+TRADING_STATE_DIR = sim_state_dir()
+ML_OUTPUT_ROOT = ml_output_root()
 
-TRADING_STATE_DIR = _trading_state_dir()
-ML_OUTPUT_ROOT = Path(os.getenv("ML_OUTPUT_ROOT", r"D:/ml_output"))
-
-# Phase A1/B2 解耦后,vnpy 端在 {QS_DATA_ROOT}/state/replay_history.db 维护本地
-# 回放权益历史,mlearnweb 通过 vnpy_webtrader endpoint 增量 fanout 拉.
-# --all 时一并清掉,确保下次回放从空 db 开始 (避免老历史污染权益曲线对比).
+# --all also clears the replay history database.
 def _replay_history_db_path() -> Path:
-    qs_root = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
-    return Path(qs_root) / "state" / "replay_history.db"
+    return replay_history_db_path()
 
 
 def _list_persistence_files(trading_dir: Path, gateway_filter: str | None) -> list[Path]:

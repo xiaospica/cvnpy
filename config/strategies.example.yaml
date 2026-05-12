@@ -28,7 +28,7 @@ gateway_base_settings:
     报单上报延迟毫秒: 0
     卖出持仓不足拒单: "是"
     行情源: merged_parquet
-    merged_parquet_merged_root: "${QS_DATA_ROOT}/snapshots/merged"
+    merged_parquet_merged_root: "${VNPY_DATA_ROOT}/snapshots/merged"
     # today_open: 撮合用当日**原始** (未复权) open, 对齐"次日 09:30 开盘成交"
     merged_parquet_reference_kind: today_open
     merged_parquet_fallback_days: 10
@@ -36,7 +36,7 @@ gateway_base_settings:
     启用持久化: "是"
     # [A2] 状态文件统一到 D:/vnpy_data/state/, 与 replay_history.db 同级,
     # 备份 / 跨机部署友好. 旧路径 vnpy_qmt_sim/.trading_state/ 已废弃.
-    持久化目录: "${QS_DATA_ROOT}/state"
+    持久化目录: "${VNPY_DATA_ROOT}/state"
     # 账户 字段不写: QmtSimGateway.connect 会用 gateway_name 兜底,
     # 多 gateway 实例之间天然有不同 account_id (独立 sim_<name>.db).
 
@@ -52,10 +52,10 @@ gateway_base_settings:
 
 strategy_base_setting:
   inference_python: "${INFERENCE_PYTHON}"
-  provider_uri: "${QS_DATA_ROOT}/qlib_data_bin"
+  provider_uri: "${VNPY_DATA_ROOT}/qlib_data_bin"
   trigger_time: "21:00"      # ⚠️ 多策略必须错开 ≥ 10 min
   buy_sell_time: "09:26"     # 09:25 集合竞价开盘价后立即下单
-  output_root: "${ML_OUTPUT_ROOT}"
+  output_root: "${VNPY_DATA_ROOT}/ml_output"
   lookback_days: 60
   subprocess_timeout_s: 300
   baseline_path: ""
@@ -109,7 +109,7 @@ strategies:
     strategy_class: QlibMLStrategy
     gateway_name: QMT_SIM_csi300
     setting_override:
-      bundle_dir: "${VNPY_MODEL_ROOT}/f6017411b44c4c7790b63c5766b93964"
+      bundle_dir: "${VNPY_DATA_ROOT}/models/f6017411b44c4c7790b63c5766b93964"
       topk: 7
       n_drop: 1
       trigger_time: "21:00"
@@ -119,7 +119,7 @@ strategies:
     strategy_class: QlibMLStrategy
     gateway_name: QMT_SIM_csi300_2
     setting_override:
-      bundle_dir: "${VNPY_MODEL_ROOT}/c38e6cfdf549446fbb0d637549e4a245"
+      bundle_dir: "${VNPY_DATA_ROOT}/models/c38e6cfdf549446fbb0d637549e4a245"
       topk: 7
       n_drop: 1
       trigger_time: "21:15"     # 错开 15 min
@@ -130,7 +130,7 @@ strategies:
   #   strategy_class: QlibMLStrategy
   #   gateway_name: QMT
   #   setting_override:
-  #     bundle_dir: "${VNPY_MODEL_ROOT}/<live-bundle-run-id>"
+  #     bundle_dir: "${VNPY_DATA_ROOT}/models/<live-bundle-run-id>"
   #     topk: 7
   #     n_drop: 1
   #     trigger_time: "21:00"
@@ -138,7 +138,7 @@ strategies:
   #   strategy_class: QlibMLStrategy
   #   gateway_name: QMT_SIM_csi300_shadow
   #   setting_override:
-  #     bundle_dir: "${VNPY_MODEL_ROOT}/<live-bundle-run-id>"  # 必须与上游一致
+  #     bundle_dir: "${VNPY_DATA_ROOT}/models/<live-bundle-run-id>"  # 必须与上游一致
   #     topk: 7
   #     n_drop: 1
   #     signal_source_strategy: csi300_live   # 复用上游 selections.parquet

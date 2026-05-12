@@ -4,7 +4,7 @@
 - write_snapshot UPSERT 语义 (同 (strategy, ts) 重写最新)
 - list_snapshots 按 strategy_name 过滤 + since_iso 增量
 - count_snapshots
-- 路径解析 (REPLAY_HISTORY_DB env > QS_DATA_ROOT > 默认)
+- 路径解析 (REPLAY_HISTORY_DB env > VNPY_DATA_ROOT > 默认)
 
 Run:
     F:/Program_Home/vnpy/python.exe -m pytest tests/test_replay_history.py -v
@@ -154,16 +154,16 @@ def test_resolve_db_path_explicit_env(monkeypatch, tmp_path):
     assert _resolve_db_path() == explicit
 
 
-def test_resolve_db_path_qs_data_root(monkeypatch, tmp_path):
+def test_resolve_db_path_vnpy_data_root(monkeypatch, tmp_path):
     monkeypatch.delenv("REPLAY_HISTORY_DB", raising=False)
-    monkeypatch.setenv("QS_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("VNPY_DATA_ROOT", str(tmp_path))
     expected = tmp_path / "state" / "replay_history.db"
     assert _resolve_db_path() == expected
 
 
 def test_resolve_db_path_default(monkeypatch):
     monkeypatch.delenv("REPLAY_HISTORY_DB", raising=False)
-    monkeypatch.delenv("QS_DATA_ROOT", raising=False)
+    monkeypatch.delenv("VNPY_DATA_ROOT", raising=False)
     p = _resolve_db_path()
     assert "vnpy_data" in str(p) or "state" in str(p)
     assert str(p).endswith("replay_history.db")

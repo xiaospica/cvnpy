@@ -50,7 +50,7 @@ $ErrorActionPreference = "Stop"
 if (-not $VnpyRoot) { $VnpyRoot = Resolve-RepoRootFromScript $PSScriptRoot }
 $ctx = Get-DeployContext -RepoRoot $VnpyRoot
 if (-not $BackupRoot)    { $BackupRoot    = $ctx.BackupRoot }
-if (-not $VnpyDataRoot)  { $VnpyDataRoot  = $ctx.QsDataRoot }
+if (-not $VnpyDataRoot)  { $VnpyDataRoot  = $ctx.VnpyDataRoot }
 if (-not $ModelsRoot)    { $ModelsRoot    = $ctx.VnpyModelRoot }
 $today = Get-Date -Format "yyyyMMdd"
 $staging = Join-Path $BackupRoot "staging_$today"
@@ -63,17 +63,19 @@ Write-Host "[backup] archive:     $archive"
 if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
-# 1. replay_history.db (vnpy 端本地)
-$replayDb = Join-Path $VnpyDataRoot "state\replay_history.db"
-if (Test-Path $replayDb) {
-    Copy-Item $replayDb $staging -ErrorAction SilentlyContinue
-    Write-Host "[backup]   ✓ replay_history.db" -ForegroundColor Green
-} else {
-    Write-Host "[backup]   - replay_history.db 不存在 (尚未跑过回放?)" -ForegroundColor Yellow
+# 1. vnpy local SQLite journal/state
+foreach ($dbName in @("replay_history.db", "event_journal.db")) {
+    $dbPath = Join-Path $VnpyDataRoot "state\$dbName"
+    if (Test-Path $dbPath) {
+        Copy-Item $dbPath $staging -ErrorAction SilentlyContinue
+        Write-Host "[backup]   ok $dbName" -ForegroundColor Green
+    } else {
+        Write-Host "[backup]   - $dbName not found: $dbPath" -ForegroundColor Yellow
+    }
 }
 
 # 2. sim_<gateway>.db × N (模拟柜台状态; .lock 跳过)
-# [A2] 状态文件统一到 ${QS_DATA_ROOT}/state/, 与 replay_history.db 同级.
+# [A2] state files live under ${VNPY_DATA_ROOT}/state/ with replay_history.db and event_journal.db.
 $simStateDir = Join-Path $VnpyDataRoot "state"
 if (Test-Path $simStateDir) {
     $simDbs = Get-ChildItem $simStateDir -Filter "sim_*.db"
