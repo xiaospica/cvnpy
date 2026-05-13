@@ -105,7 +105,7 @@ def _apply_vnpy_datafeed_env_settings() -> None:
 
 _apply_vnpy_datafeed_env_settings()
 
-from vnpy_common.data_paths import ensure_vnpy_data_env, legacy_path_env_warnings  # noqa: E402
+from vnpy_common.data_paths import ensure_stock_list_env, ensure_vnpy_data_env, legacy_path_env_warnings  # noqa: E402
 
 ensure_vnpy_data_env()
 
@@ -181,18 +181,13 @@ if legacy_path_vars:
         "[headless] WARN: legacy path env vars still set; migrate defaults to VNPY_DATA_ROOT: "
         + ", ".join(legacy_path_vars)
     )
-_stock_list_path = os.getenv("TUSHARE_STOCK_LIST_PATH", "").strip()
-if not _stock_list_path:
-    raise RuntimeError(
-        "TUSHARE_STOCK_LIST_PATH 未设. 请在 .env (或 .env.production) 中配置 "
-        "stock_list.parquet 的绝对路径；否则 selections.parquet 中的 name 会为空."
-    )
-if not Path(_stock_list_path).exists():
+_stock_list_path = ensure_stock_list_env()
+if not _stock_list_path.exists():
     raise RuntimeError(
         f"TUSHARE_STOCK_LIST_PATH 指向的文件不存在: {_stock_list_path}. "
-        "请检查 .env (或 .env.production) 配置."
+        "默认会从 VNPY_DATA_ROOT 派生为 stock_data/stock_list.parquet；"
+        "请检查 .env (或 .env.production) 配置或补齐该文件."
     )
-
 
 TRIGGER_ON_STARTUP = True
 ENABLE_WEBTRADER = True

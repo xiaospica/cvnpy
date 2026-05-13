@@ -39,6 +39,17 @@ def data_path(*parts: str) -> Path:
     return vnpy_data_root().joinpath(*parts)
 
 
+def stock_list_path() -> Path:
+    explicit = os.getenv("TUSHARE_STOCK_LIST_PATH", "").strip()
+    return Path(explicit).expanduser() if explicit else data_path("stock_data", "stock_list.parquet")
+
+
+def ensure_stock_list_env() -> Path:
+    path = stock_list_path()
+    if not os.getenv("TUSHARE_STOCK_LIST_PATH", "").strip():
+        os.environ["TUSHARE_STOCK_LIST_PATH"] = str(path)
+    return path
+
 def config_dir() -> Path:
     return data_path("config")
 
