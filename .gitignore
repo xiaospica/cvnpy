@@ -19,6 +19,7 @@ x64
 build
 dist
 *.local
+.pytest_tmp_qmt_sim/
 
 # VeighNa
 .vntrader
@@ -50,6 +51,7 @@ lab/
 
 # Local secrets (do not commit)
 vnpy_signal_strategy/mysql_signal_setting.json
+vnpy_signal_strategy_plus/test/.tmp_*.json
 
 # P0-1 凭证 / P0-2 路径外置 (.env + yaml configs)
 # .env / .env.production / .env.staging / .env.local 等都忽略

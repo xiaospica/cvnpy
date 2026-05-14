@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable, Iterable, Iterator, Protocol, Sequence
 
-from .snapshot import calculate_gateway_equity, write_replay_snapshot
+from .snapshot import calculate_gateway_equity, resolve_replay_history_db, write_replay_snapshot
 
 
 class ReplayStrategyAdapter(Protocol):
@@ -235,6 +235,11 @@ class SimReplayController:
                     f"[replay] replay equity snapshot started day={day} equity={equity:.0f}"
                 )
                 self._snapshot_logged_first = True
+            elif not ok:
+                self.write_log(
+                    f"[replay] write_snapshot({day}) returned False; "
+                    f"db={resolve_replay_history_db()}"
+                )
         except Exception as exc:
             self.write_log(f"[replay] write_snapshot({day}) failed: {type(exc).__name__}: {exc}")
 
