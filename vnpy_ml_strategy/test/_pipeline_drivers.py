@@ -179,7 +179,44 @@ def wait_pipeline_with_heartbeat(
 
     expected_date = day.strftime("%Y-%m-%d")
     t0 = time.time()
-    if not ml_engine.run_pipeline_now(strategy_name, as_of_date=day):
+    state: Dict[str, Any] = {"ok": None, "error": None, "done": False}
+
+    def _worker() -> None:
+        try:
+            state["ok"] = ml_engine.run_pipeline_now(strategy_name, as_of_date=day)
+        except Exception as exc:  # noqa: BLE001
+            state["error"] = exc
+        finally:
+            state["done"] = True
+
+    th = threading.Thread(
+        target=_worker,
+        daemon=False,
+        name=f"pipeline-{strategy_name}-{day.strftime('%Y%m%d')}",
+    )
+    th.start()
+    last_hb = t0
+    timeout_logged = False
+    while not state["done"]:
+        time.sleep(0.5)
+        now = time.time()
+        if heartbeat_s > 0 and now - last_hb >= heartbeat_s:
+            log_fn(
+                f"  ... pipeline[{strategy_name},{expected_date}] running "
+                f"({now - t0:.0f}s elapsed)"
+            )
+            last_hb = now
+        if timeout_s > 0 and not timeout_logged and now - t0 >= timeout_s:
+            log_fn(
+                f"  ... pipeline[{strategy_name},{expected_date}] still running "
+                f"after timeout hint {timeout_s}s; waiting for subprocess to exit"
+            )
+            timeout_logged = True
+
+    th.join(timeout=5)
+    if state["error"] is not None:
+        raise state["error"]
+    if not state["ok"]:
         raise RuntimeError(
             f"run_pipeline_now({strategy_name!r}, as_of_date={day}) returned False"
         )

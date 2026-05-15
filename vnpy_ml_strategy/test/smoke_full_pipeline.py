@@ -166,6 +166,12 @@ def _load_runtime_env() -> None:
 
 _load_runtime_env()
 
+from vnpy_common.data_paths import ml_output_root, vnpy_data_root  # noqa: E402
+
+
+def _path_text(path: Path) -> str:
+    return path.expanduser().as_posix()
+
 
 # =====================================================================
 # 配置区 — 按用途分组, 维护时只需改对应小节
@@ -207,26 +213,27 @@ PIPELINE_HEARTBEAT_S: float = 30.0
 # Phase 4 pipeline subprocess 轮询 diagnostics.json 的最长等待秒数
 PIPELINE_TIMEOUT_S: int = 300
 
-# --- 4) 数据路径 (QS_DATA_ROOT 派生, 实盘/训练解耦) ----------------
-QS_DATA_ROOT: str = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
-PROVIDER_URI: str = f"{QS_DATA_ROOT}/qlib_data_bin"
-MERGED_PARQUET: str = f"{QS_DATA_ROOT}/stock_data/daily_merged_all_new.parquet"
-FILTERED_PARQUET: str = f"{QS_DATA_ROOT}/csi300_custom_filtered.parquet"
-BY_STOCK_DIR: str = f"{QS_DATA_ROOT}/stock_data/by_stock"
-SNAPSHOT_DIR: str = f"{QS_DATA_ROOT}/snapshots"
+# --- 4) 数据路径 (VNPY_DATA_ROOT 派生, 实盘/训练解耦) ----------------
+VNPY_DATA_ROOT_PATH: Path = vnpy_data_root()
+VNPY_DATA_ROOT: str = _path_text(VNPY_DATA_ROOT_PATH)
+PROVIDER_URI: str = _path_text(VNPY_DATA_ROOT_PATH / "qlib_data_bin")
+MERGED_PARQUET: str = _path_text(VNPY_DATA_ROOT_PATH / "stock_data" / "daily_merged_all_new.parquet")
+FILTERED_PARQUET: str = _path_text(VNPY_DATA_ROOT_PATH / "csi300_custom_filtered.parquet")
+BY_STOCK_DIR: str = _path_text(VNPY_DATA_ROOT_PATH / "stock_data" / "by_stock")
+SNAPSHOT_DIR: str = _path_text(VNPY_DATA_ROOT_PATH / "snapshots")
 JQ_INDEX_CSV_PATHS_JSON: str = os.getenv(
     "ML_JQ_INDEX_CSV_PATHS",
-    json.dumps({"csi300": f"{QS_DATA_ROOT}/jq_index/hs300_*.csv"}),
+    json.dumps({"csi300": _path_text(VNPY_DATA_ROOT_PATH / "jq_index" / "hs300_*.csv")}),
 )
 
 # --- 5) 策略 / 模型 / 输出 ------------------------------------------
 BUNDLE_DIR: str = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964"
-# Keep the default aligned with mlearnweb/backend/.env (ML_LIVE_OUTPUT_ROOT=D:\ml_output).
-# If this points at a nested smoke-only root, an already-running :8100 mlearnweb
-# process will look under D:/ml_output/{strategy}/... and the frontend cannot load
-# prediction/all for the smoke strategy.  Override with SMOKE_ML_OUTPUT_ROOT when
-# a fully isolated output tree is needed.
-OUT_ROOT: str = os.getenv("SMOKE_ML_OUTPUT_ROOT", os.getenv("ML_LIVE_OUTPUT_ROOT", r"D:/ml_output"))
+# Keep the default aligned with vnpy's single data root: <VNPY_DATA_ROOT>/ml_output.
+# Override with SMOKE_ML_OUTPUT_ROOT when a fully isolated output tree is needed.
+OUT_ROOT: str = os.getenv(
+    "SMOKE_ML_OUTPUT_ROOT",
+    os.getenv("ML_LIVE_OUTPUT_ROOT", _path_text(ml_output_root())),
+)
 STRATEGY_NAME: str = "jq41_csi300_2026"
 
 # --- 6) 外部服务进程 / 解释器 ---------------------------------------
@@ -298,8 +305,8 @@ def _setup_ingest_env(token: str) -> None:
     """把 DailyIngestPipeline 需要的 env 变量塞进 os.environ."""
     os.environ["TUSHARE_TOKEN"] = token
     os.environ["ML_DAILY_INGEST_ENABLED"] = "1"
-    # QS_DATA_ROOT 是单一入口, 其他 ML_* 路径从它派生 (tushare_datafeed 内部)
-    os.environ["QS_DATA_ROOT"] = QS_DATA_ROOT
+    # VNPY_DATA_ROOT 是单一入口, 其他 ML_* 路径从它派生 (tushare_datafeed 内部)
+    os.environ["VNPY_DATA_ROOT"] = VNPY_DATA_ROOT
     # 若需要细粒度覆盖(测试用), 显式设 ML_*:
     os.environ["ML_MERGED_PARQUET_PATH"] = MERGED_PARQUET
     os.environ["ML_FILTERED_PARQUET_PATH"] = FILTERED_PARQUET

@@ -43,26 +43,26 @@ run_pipeline_now(as_of_date=) 已支持显式日期注入 (engine.py:239), 所�
 
 smoke (SMOKE_LIVE_DAYS=3) vs run_ml_headless (SMOKE_LIVE_DAYS=0 等价启动)
 跑出的产物应严格一致, 验证工具:
-    F:/Program_Home/vnpy/python.exe \\
+    python \\
         vnpy_ml_strategy/test/diff_smoke_vs_headless.py OUT_ROOT_A OUT_ROOT_B
 
 ## 运行
 
 ```
 # 默认: batch replay 全段 + single-day 最近 3 天
-F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
+python -u vnpy_ml_strategy/test/run_ml_headless_smoke.py
 
 # baseline B: 全 batch replay (无 single-day, 等价 run_ml_headless 启动)
-SMOKE_LIVE_DAYS=0 F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
+SMOKE_LIVE_DAYS=0 python -u vnpy_ml_strategy/test/run_ml_headless_smoke.py
 
 # 调实时段长度
-SMOKE_LIVE_DAYS=5 F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
+SMOKE_LIVE_DAYS=5 python -u vnpy_ml_strategy/test/run_ml_headless_smoke.py
 
 # 关下单
-SMOKE_ENABLE_TRADING=0 F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
+SMOKE_ENABLE_TRADING=0 python -u vnpy_ml_strategy/test/run_ml_headless_smoke.py
 
 # 关 mlearnweb 子进程
-SMOKE_SPAWN_MLEARNWEB=0 F:/Program_Home/vnpy/python.exe -u run_ml_headless_smoke.py
+SMOKE_SPAWN_MLEARNWEB=0 python -u vnpy_ml_strategy/test/run_ml_headless_smoke.py
 ```
 
 ## 与 smoke_full_pipeline.py 区别
@@ -103,14 +103,24 @@ except Exception:  # noqa: BLE001 — 旧 Python / non-tty 环境兜底
 
 os.environ["VNPY_DOCK_BACKEND"] = "ads"
 _HERE = Path(__file__).resolve().parent
-_CORE_DIR = _HERE / "vendor" / "qlib_strategy_core"
-if _CORE_DIR.exists() and str(_CORE_DIR) not in sys.path:
-    sys.path.insert(0, str(_CORE_DIR))
-_QLIB_SOURCE = Path(os.getenv("QLIB_SOURCE_ROOT", r"F:\Quant\code\qlib_strategy_dev"))
-if (_QLIB_SOURCE / "qlib" / "__init__.py").exists() and str(_QLIB_SOURCE) not in sys.path:
-    sys.path.insert(0, str(_QLIB_SOURCE))
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
+VNPY_REPO_ROOT = _HERE.parents[1]
+_CORE_DIR = VNPY_REPO_ROOT / "vendor" / "qlib_strategy_core"
+
+
+def _prepend_sys_path(path: Path) -> None:
+    text = str(path)
+    if path.exists() and text not in sys.path:
+        sys.path.insert(0, text)
+
+
+_prepend_sys_path(VNPY_REPO_ROOT)
+_prepend_sys_path(_CORE_DIR)
+
+_QLIB_SOURCE_ENV = os.getenv("QLIB_SOURCE_ROOT", "").strip()
+if _QLIB_SOURCE_ENV:
+    _QLIB_SOURCE = Path(_QLIB_SOURCE_ENV).expanduser()
+    if (_QLIB_SOURCE / "qlib" / "__init__.py").exists():
+        _prepend_sys_path(_QLIB_SOURCE)
 
 
 # =====================================================================
@@ -121,9 +131,9 @@ from run_ml_headless import (  # noqa: E402  (sys.path 必须先注入)
     GATEWAYS,
     STRATEGIES,
     STRATEGY_BASE_SETTING,
-    USE_GATEWAY_KIND,
     _validate_startup_config,
 )
+from vnpy_common.data_paths import ml_output_root, sim_state_dir, vnpy_data_root  # noqa: E402
 from vnpy_ml_strategy.test._pipeline_drivers import (  # noqa: E402
     assert_orders_for_gateway,
     assert_strategy_day_outputs,
@@ -169,13 +179,40 @@ PIPELINE_HEARTBEAT_S: float = float(os.getenv("SMOKE_PIPELINE_HEARTBEAT_S", "30"
 PIPELINE_TIMEOUT_S: int = int(os.getenv("SMOKE_PIPELINE_TIMEOUT_S", "600"))
 
 # --- 4) 路径 / 解释器 ---
-QS_DATA_ROOT: str = os.getenv("QS_DATA_ROOT", r"D:/vnpy_data")
-PY311: str = os.getenv(
-    "INFERENCE_PYTHON",
-    r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
+def _path_text(path: Path) -> str:
+    return path.expanduser().as_posix()
+
+
+def _resolve_mlearnweb_backend() -> str:
+    explicit = (
+        os.getenv("SMOKE_MLEARNWEB_BACKEND")
+        or os.getenv("MLEARNWEB_BACKEND")
+        or ""
+    ).strip()
+    if explicit:
+        return _path_text(Path(explicit))
+
+    candidates = [
+        VNPY_REPO_ROOT.parents[1] / "code" / "qlib_strategy_dev" / "mlearnweb" / "backend",
+        VNPY_REPO_ROOT.parent / "qlib_strategy_dev" / "mlearnweb" / "backend",
+        Path.cwd() / "mlearnweb" / "backend",
+    ]
+    for candidate in candidates:
+        if (candidate / "app").is_dir():
+            return _path_text(candidate)
+    return ""
+
+
+VNPY_DATA_ROOT_PATH: Path = vnpy_data_root()
+VNPY_DATA_ROOT: str = _path_text(VNPY_DATA_ROOT_PATH)
+PY311: str = (
+    os.getenv("SMOKE_MLEARNWEB_PYTHON")
+    or os.getenv("MLEARNWEB_PYTHON")
+    or os.getenv("INFERENCE_PYTHON")
+    or sys.executable
 )
-MLEARNWEB_BACKEND: str = r"F:/Quant/code/qlib_strategy_dev/mlearnweb/backend"
-SIM_DB_DIR: str = r"F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state"
+MLEARNWEB_BACKEND: str = _resolve_mlearnweb_backend()
+SIM_DB_DIR: str = _path_text(sim_state_dir())
 
 # --- 5) ingest 环境变量 (复用 smoke_full_pipeline 同一套) ---
 if "ML_INGEST_LOOKBACK_DAYS" not in os.environ:
@@ -203,7 +240,7 @@ def _load_tushare_token() -> str:
     """从 ``api.json`` 读 tushare token."""
     import json as _json
 
-    api_json = _HERE / "api.json"
+    api_json = VNPY_REPO_ROOT / "api.json"
     if not api_json.exists():
         raise FileNotFoundError(f"api.json 不存在: {api_json}")
     data = _json.loads(api_json.read_text(encoding="utf-8"))
@@ -217,17 +254,23 @@ def _setup_ingest_env(token: str) -> None:
     """把 DailyIngestPipeline 需要的 env 变量塞进 os.environ."""
     os.environ["TUSHARE_TOKEN"] = token
     os.environ["ML_DAILY_INGEST_ENABLED"] = "1"
-    os.environ["QS_DATA_ROOT"] = QS_DATA_ROOT
+    os.environ["VNPY_DATA_ROOT"] = VNPY_DATA_ROOT
     # 兜底显式设 ML_* 路径 (与 smoke_full_pipeline 一致)
-    os.environ.setdefault("ML_MERGED_PARQUET_PATH", f"{QS_DATA_ROOT}/stock_data/daily_merged_all_new.parquet")
-    os.environ.setdefault("ML_FILTERED_PARQUET_PATH", f"{QS_DATA_ROOT}/csi300_custom_filtered.parquet")
-    os.environ.setdefault("ML_BY_STOCK_CSV_DIR", f"{QS_DATA_ROOT}/stock_data/by_stock")
-    os.environ.setdefault("ML_QLIB_DIR", f"{QS_DATA_ROOT}/qlib_data_bin")
-    os.environ.setdefault("ML_SNAPSHOT_DIR", f"{QS_DATA_ROOT}/snapshots")
+    os.environ.setdefault(
+        "ML_MERGED_PARQUET_PATH",
+        _path_text(VNPY_DATA_ROOT_PATH / "stock_data" / "daily_merged_all_new.parquet"),
+    )
+    os.environ.setdefault(
+        "ML_FILTERED_PARQUET_PATH",
+        _path_text(VNPY_DATA_ROOT_PATH / "csi300_custom_filtered.parquet"),
+    )
+    os.environ.setdefault("ML_BY_STOCK_CSV_DIR", _path_text(VNPY_DATA_ROOT_PATH / "stock_data" / "by_stock"))
+    os.environ.setdefault("ML_QLIB_DIR", _path_text(VNPY_DATA_ROOT_PATH / "qlib_data_bin"))
+    os.environ.setdefault("ML_SNAPSHOT_DIR", _path_text(VNPY_DATA_ROOT_PATH / "snapshots"))
     if "ML_JQ_INDEX_CSV_PATHS" not in os.environ:
         import json as _json
         os.environ["ML_JQ_INDEX_CSV_PATHS"] = _json.dumps(
-            {"csi300": f"{QS_DATA_ROOT}/jq_index/hs300_*.csv"}
+            {"csi300": _path_text(VNPY_DATA_ROOT_PATH / "jq_index" / "hs300_*.csv")}
         )
     os.environ.setdefault("VNPY_DATAFEED_USERNAME", "tushare")
     os.environ.setdefault("VNPY_DATAFEED_PASSWORD", token)
@@ -274,6 +317,34 @@ def _teardown_uvicorn(proc: Optional[subprocess.Popen], label: str) -> None:
 # =====================================================================
 
 
+def _inject_filter_chain_specs(tushare_engine: Any, ml_engine: Any) -> None:
+    """Inject active strategy filter specs before replay or ingest can run."""
+
+    ts_datafeed = tushare_engine._get_tushare_datafeed()
+    ts_pipeline = getattr(ts_datafeed, "daily_ingest_pipeline", None)
+    if ts_pipeline is None:
+        raise RuntimeError(
+            "DailyIngestPipeline is not enabled; cannot inject filter_chain_specs"
+        )
+
+    specs = ml_engine.list_active_filter_configs()
+    if not specs:
+        raise RuntimeError(
+            "ml_engine.list_active_filter_configs() returned empty; "
+            "cannot decide snapshot universe"
+        )
+
+    ts_pipeline.set_filter_chain_specs(specs)
+    try:
+        filter_ids = sorted(specs.keys())
+    except AttributeError:
+        filter_ids = []
+    _log(
+        "  DailyIngestPipeline.filter_chain_specs injected "
+        f"{len(specs)} filter_id(s): {filter_ids}"
+    )
+
+
 def main() -> int:
     _log("=== Phase 0 — 前置 ===")
     _validate_startup_config()
@@ -297,12 +368,21 @@ def main() -> int:
     event_engine = EventEngine()
     main_engine = MainEngine(event_engine)
 
+    def _load_gateway_class(kind: str):
+        if kind == "sim":
+            from vnpy_qmt_sim import QmtSimGateway
+            return QmtSimGateway
+        if kind == "live":
+            from vnpy_qmt import QmtGateway
+            return QmtGateway
+        if kind == "fake_live":
+            from vnpy_ml_strategy.test.fakes.fake_qmt_gateway import FakeQmtGateway
+            return FakeQmtGateway
+        raise ValueError(f"unknown gateway kind: {kind!r}")
+
     # Gateway
-    if USE_GATEWAY_KIND == "QMT_SIM":
-        from vnpy_qmt_sim import QmtSimGateway as _GatewayClass
-    else:
-        from vnpy_qmt import QmtGateway as _GatewayClass
     for gw in GATEWAYS:
+        _GatewayClass = _load_gateway_class(gw["kind"])
         main_engine.add_gateway(_GatewayClass, gateway_name=gw["name"])
 
     # Apps
@@ -337,17 +417,25 @@ def main() -> int:
     # 派生 webtrader uvicorn (mlearnweb 通过它拉数据)
     webtrader_uv = _spawn_uvicorn(
         "webtrader", sys.executable, "vnpy_webtrader.web:app",
-        WEBTRADER_HTTP_PORT, str(_HERE),
+        WEBTRADER_HTTP_PORT, _path_text(VNPY_REPO_ROOT),
     )
 
     # 派生 mlearnweb live_main uvicorn (用 PY311, 与 vnpy 主进程解释器解耦)
     mlearnweb_uv: Optional[subprocess.Popen] = None
     if SMOKE_SPAWN_MLEARNWEB:
+        if not MLEARNWEB_BACKEND:
+            _log(
+                "FAIL: 未找到 mlearnweb/backend；请设置 SMOKE_MLEARNWEB_BACKEND "
+                "或 MLEARNWEB_BACKEND，或设 SMOKE_SPAWN_MLEARNWEB=0"
+            )
+            _teardown_uvicorn(webtrader_uv, "webtrader")
+            main_engine.close()
+            return 2
         mlearnweb_uv = _spawn_uvicorn(
             "mlearnweb", PY311, "app.live_main:app",
             MLEARNWEB_PORT, MLEARNWEB_BACKEND,
             extra_env={
-                "ML_LIVE_OUTPUT_ROOT": STRATEGY_BASE_SETTING.get("output_root", r"D:/ml_output"),
+                "ML_LIVE_OUTPUT_ROOT": STRATEGY_BASE_SETTING.get("output_root", _path_text(ml_output_root())),
                 "VNPY_SNAPSHOT_RETENTION_DAYS": "365",
             },
         )
@@ -405,6 +493,7 @@ def main() -> int:
     # 策略 on_start 会自动后台触发 batch replay [replay_start_date, replay_end_date]
     _log("=== Phase 3 — add_strategy + 触发 batch replay ===")
     valid_gw = {gw["name"] for gw in GATEWAYS}
+    inited: List[Tuple[str, str]] = []
     started: List[Tuple[str, str]] = []
 
     for strat_def in STRATEGIES:
@@ -435,10 +524,29 @@ def main() -> int:
         if not ml_engine.init_strategy(name):
             _log(f"  init_strategy({name}) failed")
             continue
+        inited.append((name, gw_name))
+
+    if not inited:
+        _log("FAIL: no strategy initialized")
+        _teardown_uvicorn(webtrader_uv, "webtrader")
+        _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
+        main_engine.close()
+        return 2
+
+    try:
+        _inject_filter_chain_specs(tushare_engine, ml_engine)
+    except Exception as exc:  # noqa: BLE001
+        _log(f"FAIL: inject filter_chain_specs failed: {type(exc).__name__}: {exc}")
+        _teardown_uvicorn(webtrader_uv, "webtrader")
+        _teardown_uvicorn(mlearnweb_uv, "mlearnweb")
+        main_engine.close()
+        return 2
+
+    for name, _gw_name in inited:
         if not ml_engine.start_strategy(name):
             _log(f"  start_strategy({name}) failed")
             continue
-        started.append((name, gw_name))
+        started.append((name, _gw_name))
 
     if not started:
         _log("FAIL: no strategy started")
@@ -556,7 +664,7 @@ def main() -> int:
                     time.sleep(sleep_s)
 
             # Phase 5.2 — Ingest 后刷新 ml_engine 的 trade_calendar 缓存
-            # 必要性: ingest 内 DumpDataAll 重写 D:/vnpy_data/qlib_data_bin/calendars/day.txt,
+            # 必要性: ingest 内 DumpDataAll 重写 ${VNPY_DATA_ROOT}/qlib_data_bin/calendars/day.txt,
             # 但 QlibCalendar 实例在首次 _load() 时缓存了 trade_days set, 后续不重读.
             # 不刷新会导致策略 _is_trade_day(day) 用陈旧 cache, 走 non-trading day 路径
             # 直接 skip 不写 diagnostics, smoke 会被错误地认为有 bug.
@@ -599,6 +707,11 @@ def main() -> int:
                 try:
                     counter.settle_end_of_day(day)
                     _log(f"  [{gw_name}] settle_end_of_day({day}) ok")
+                    strat = ml_engine.strategies.get(strat_name)
+                    persist_equity = getattr(strat, "_persist_replay_equity_snapshot", None)
+                    if callable(persist_equity):
+                        persist_equity(day, gw)
+                        _log(f"  [{gw_name}] replay equity snapshot persisted for {strat_name} {day}")
                 except Exception as exc:  # noqa: BLE001
                     _log(f"  WARN: {gw_name} settle({day}) 异常: {type(exc).__name__}: {exc}")
 
