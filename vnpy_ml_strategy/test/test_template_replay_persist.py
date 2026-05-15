@@ -143,14 +143,12 @@ def test_persist_does_not_raise_on_db_unavailable(monkeypatch, capfd):
     stub._persist_replay_equity_snapshot(date(2026, 4, 30), gateway)
 
 
-def test_engine_persists_sim_live_eod_snapshot(isolated_replay_db):
+def test_service_persists_sim_live_eod_snapshot(isolated_replay_db):
     """sim-live settlement should also journal EOD equity to replay_history.db."""
-    from vnpy_ml_strategy.engine import MLEngine
     from vnpy_ml_strategy.replay_history import count_snapshots, list_snapshots
+    from vnpy_ml_strategy.services.eod_equity_journal import EodEquityJournalService
 
-    engine = MLEngine.__new__(MLEngine)
-    engine._eod_equity_snapshot_keys = set()
-    engine.main_engine = MagicMock()
+    main_engine = MagicMock()
 
     strat = MagicMock()
     strat.strategy_name = "csi300_live"
@@ -158,14 +156,20 @@ def test_engine_persists_sim_live_eod_snapshot(isolated_replay_db):
     strat.inited = True
     strat.trading = True
     strat.get_variables.return_value = {"last_status": "ok"}
-    engine.strategies = {strat.strategy_name: strat}
+    strategies = {strat.strategy_name: strat}
 
     gateway = _make_gateway_stub(cash=1_000_000.0, positions=[])
     gateway.td.counter.last_settle_date = date(2026, 5, 15)
-    engine.main_engine.get_gateway.return_value = gateway
+    main_engine.get_gateway.return_value = gateway
 
-    engine._persist_sim_live_eod_equity_from_settled_gateways()
-    engine._persist_sim_live_eod_equity_from_settled_gateways()
+    service = EodEquityJournalService(
+        main_engine=main_engine,
+        strategies=strategies,
+        is_trade_day=lambda d: True,
+    )
+
+    service.persist_sim_live_eod_equity_from_settled_gateways()
+    service.persist_sim_live_eod_equity_from_settled_gateways()
 
     assert count_snapshots("csi300_live", db_path=isolated_replay_db) == 1
     row = list_snapshots("csi300_live", db_path=isolated_replay_db)[0]
