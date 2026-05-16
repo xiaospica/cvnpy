@@ -61,8 +61,14 @@ A 股策略通常继承自 `CtaTemplate` 或自定义策略基类。
 ### 3.4 数据根目录与持久化边界
 
 - 默认部署只配置 `VNPY_DATA_ROOT`，运行态默认路径都从该 root 派生：`state/`、`ml_output/`、`snapshots/`、`models/`、`logs/`、`backups/`。
+- ML 日更事实链路固定为 `DailyIngestPipeline -> snapshots/merged + snapshots/filtered + stock_data/by_stock + qlib_data_bin`。任何成功执行到 dump 阶段的 `ingest_today(T)` 都会原子替换 `<VNPY_DATA_ROOT>/qlib_data_bin`，并更新 `calendars/day.txt`，因此 `run_ml_headless.py`、`smoke_full_pipeline.py`、运维手动触发和 20:00 cron 都必须视为会修改当前 qlib provider 的入口。
+- `qlib_data_bin` 禁止倒退发布：目标日 `T` 不得早于当前 `calendars/day.txt` 末尾，也不得早于 `<VNPY_DATA_ROOT>/snapshots/merged/daily_merged_*.parquet` 中的最新日期。若已有 2026-05-15 快照，不允许再把 provider 发布成 2026-05-13。
+- `ML_INGEST_ALLOW_QLIB_ROLLBACK=1` 只能作为人工确认后的应急回滚逃生开关；不要写入 `.env`、`.env.production`、Windows 服务、计划任务或长期启动脚本。使用时必须记录原因、目标日期和恢复动作，用完立即 unset。正常 smoke/headless/e2e 绝不能依赖该变量。
+- 运行 `smoke_full_pipeline.py` 时，如果不希望触碰生产数据源，必须使用隔离的 `VNPY_DATA_ROOT`，或至少显式覆盖 `ML_QLIB_DIR`、`ML_SNAPSHOT_DIR`、`ML_MERGED_PARQUET_PATH` 到临时目录；否则默认会更新生产 root 下的 qlib calendar。
 - 通用策略权益事实源固定为 `<VNPY_DATA_ROOT>/state/strategy_equity_journal.db`，读写入口是 `vnpy_common.persistence.strategy_equity_journal`。
 - 日终权益 journal 对所有策略引擎生效，不属于 ML 专属能力。回放、模拟实时、真实柜台收盘分别使用 `replay_settle`、`sim_live_settle`、`broker_live_close`，并且必须带 `(engine, strategy_name)`。
+- 真实柜台 `broker_live_close` 写入时间统一由 env `VNPY_BROKER_LIVE_EOD_JOURNAL_TIME` 管理，默认 `16:00`；不要在策略或 service 中散落硬编码收盘后触发时间。
+- 多策略共享真实账户时，策略级权益归因依赖 `OrderRequest.reference={strategy_name}:{seq}`、`strategy_trade_journal` 成交流水和每策略初始资金配置 `VNPY_STRATEGY_INITIAL_CAPITALS`；不要在 mlearnweb 或前端按账户权益自行拆分。
 - webtrader 对外只暴露通用接口 `/api/v1/strategy/equity-journal`；不要再新增或恢复 ML 专属 replay equity API。
 - 旧 `vnpy_ml_strategy/replay_history.py`、`REPLAY_HISTORY_DB`、`replay_history.db` 不再作为运行时契约使用；新增脚本、测试、文档不要继续依赖这些旧名。
 - vnpy 不直接写 mlearnweb.db。mlearnweb 通过 HTTP 拉取 vnpy 事实源并写自己的展示库，跨工程边界必须保持 HTTP/RPC 解耦。

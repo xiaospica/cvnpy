@@ -103,4 +103,10 @@
 - P0-P2 代码重构已完成：common journal、common day-end service、webtrader 通用接口、mlearnweb 同步 loop 均已切换到新契约。
 - P3 已覆盖核心单测：common journal、ML 模板回放写入、QMT_SIM 回放控制器、mlearnweb journal sync。
 - P4 已更新：`docs/architecture.md`、vnpy `AGENTS.md`、qlib/mlearnweb `AGENTS.md`。
-- 未纳入本轮：全量 webtrader HTTP e2e、真实柜台 15:10 后 broker-live 日终写入验证、多策略共享真实账户的精确权益归因。
+
+## 补充收口（2026-05-16）
+
+- webtrader 已补 `GET /api/v1/strategy/equity-journal` 的 HTTP route 测试，覆盖 query 透传与 RPC error unwrap。
+- 真实柜台 `broker_live_close` 写入时间改为 env `VNPY_BROKER_LIVE_EOD_JOURNAL_TIME`，默认 `16:00`。
+- 多策略共享真实账户时，QMT 网关持久化 `OrderRequest.reference` 到 broker order id 的映射，并将成交写入 `strategy_trade_journal`；`StrategyEquityJournalService` 使用每策略初始资金和成交流水归因 `broker_live_close.strategy_value`，同时保留真实账户总权益到 `account_equity`，缺失条件时显式回退账户级权益。
+- 当前仍需实盘环境长期观察：券商持仓市值字段口径、手续费/税费字段缺失、策略初始资金配置变更后的历史口径。

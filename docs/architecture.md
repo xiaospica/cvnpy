@@ -53,7 +53,40 @@ flowchart LR
 
 旧的 `QS_DATA_ROOT`、`ML_OUTPUT_ROOT` 等变量只作为高级覆盖或迁移提示，不再是默认部署入口；`REPLAY_HISTORY_DB` 与 `replay_history.db` 已退出运行时契约。
 
-### 1.0.1 通用策略权益 Journal
+### 1.0.1 ML 日更数据链路与 qlib Provider 发布
+
+`DailyIngestPipeline` 是 ML 策略实盘推理使用的市场数据发布器，不只是下载器。每次 `ingest_today(T)` 成功跑完都会把本地数据冻结为日期 `T` 的视图，并原子替换 `<VNPY_DATA_ROOT>/qlib_data_bin`，因此会更新 `calendars/day.txt`。
+
+```mermaid
+flowchart LR
+    TS["Tushare daily data"] --> FETCH["Stage 1 FETCH<br/>run_incremental_pipeline"]
+    FETCH --> MERGED["snapshots/merged/<br/>daily_merged_T.parquet"]
+    MERGED --> FILTER["Stage 2 FILTER<br/>active + T snapshot"]
+    FILTER --> FSNAP["snapshots/filtered/<br/>filter_id_T.parquet"]
+    FILTER --> CSV["Stage 3 BY_STOCK<br/>stock_data/by_stock/*.csv"]
+    CSV --> DUMP["Stage 4 DUMP<br/>DumpDataAll"]
+    DUMP --> QLIB["qlib_data_bin/<br/>calendars/day.txt"]
+```
+
+入口包括：
+
+| 入口 | 是否会更新 qlib calendar | 说明 |
+|---|---:|---|
+| `run_ml_headless.py` | 是 | 生产 headless 进程会构造 `DailyIngestPipeline`，20:00 cron 或手动触发会发布 provider |
+| `smoke_full_pipeline.py` | 是 | 默认 `TRIGGER_INGEST_ON_STARTUP=True`，会直接调用 `run_daily_ingest_now(LIVE_DATE)` |
+| webtrader/运维手动 ingest | 是 | 最终同样进入 `TushareProEngine.run_daily_ingest_now()` |
+| 只运行 ML 推理 `run_pipeline_now()` | 否 | 只读取现有 qlib provider 与 filter snapshot，不发布 provider |
+
+发布不变量：
+
+- `calendars/day.txt` 的末尾必须严格等于本次目标交易日 `T`；如果 dump 结果超出或落后于 `T`，视为快照污染或 dump bug，必须拒绝发布。
+- 发布前会检查当前 provider 的 `calendars/day.txt` 和最新 `snapshots/merged/daily_merged_*.parquet`。若任何一个日期大于 `T`，说明本次是倒退发布，默认抛出 `IncrementalDumpError`。
+- `ML_INGEST_ALLOW_QLIB_ROLLBACK=1` 是人工确认后的应急逃生开关，只用于明确要回滚 qlib provider 的场景。它不应进入 `.env`、`.env.production`、服务环境或长期计划任务；使用后必须立即取消，并记录原因、目标日期和恢复步骤。
+- 如果 smoke/e2e 只是验证流程而不想影响生产 provider，应使用隔离的 `VNPY_DATA_ROOT`，或至少将 `ML_QLIB_DIR`、`ML_SNAPSHOT_DIR`、`ML_MERGED_PARQUET_PATH` 覆盖到临时目录。
+
+这条规则解决的典型问题是：凌晨 `smoke_full_pipeline.py` 已把 provider 发布到 2026-05-15，但后续某次 headless/smoke 以 2026-05-13 为目标日再次运行 `ingest_today(20260513)`。旧实现只做全量重建和原子替换，没有比较“当前 provider/最新 snapshot 是否比目标日更新”，因此会把 5.15 provider 覆盖成 5.13。现在该行为默认会被 rollback guard 阻断。
+
+### 1.0.2 通用策略权益 Journal
 
 `strategy_equity_journal.db` 是 vnpy 侧可重建监控曲线的事实源。它不是 ML 专属表，而是所有策略引擎共享的日终权益 journal。
 
@@ -70,7 +103,16 @@ flowchart LR
 
 - **回放**：`SimReplayController` 或策略模板在每日 settle 后写 `replay_settle`。
 - **模拟实时**：`StrategyEquityJournalService` 监听 timer，在 QMT_SIM 的 `last_settle_date` 更新后写 `sim_live_settle`。
-- **真实柜台**：`StrategyEquityJournalService` 在交易日 15:10 后，从 `MainEngine.get_all_accounts()` / `get_all_positions()` 取账户权益写 `broker_live_close`。
+- **真实柜台**：`StrategyEquityJournalService` 在交易日 `VNPY_BROKER_LIVE_EOD_JOURNAL_TIME` 后写 `broker_live_close`。默认时间为 `16:00`，用于避开券商柜台 15:00 后资金/持仓延迟同步窗口。
+
+真实柜台的账户是 broker 级别，同一个资金账号可能被多个策略共享。为了让每条策略曲线可解释，服务按以下优先级归因：
+
+1. 如果订单带有 `OrderRequest.reference={strategy_name}:{seq}`，QMT 网关会把 broker order id 与 reference 写入 `strategy_order_refs`，成交回报再写入 `strategy_trade_journal`。
+2. 对每个策略读取 `strategy_trade_journal`，以 `VNPY_STRATEGY_INITIAL_CAPITALS` 或策略参数中的 `initial_capital` / `allocated_capital` / `strategy_capital` 为起点，按成交方向累计现金和持仓。
+3. 用 `MainEngine.get_all_positions()` 的真实柜台持仓市值做收盘 mark-to-market，得到该策略的 `strategy_value`。
+4. `account_equity` 保留真实柜台账户总权益，便于诊断共享账户口径；如果缺少策略初始资金或成交流水，则 `strategy_value` 也回退为账户级权益，并在 `raw_variables_json.attribution_method=account_equity_fallback` 中标记原因。
+
+`VNPY_STRATEGY_INITIAL_CAPITALS` 使用 JSON 对象配置，key 支持 `gateway:engine:strategy`、`engine:strategy`、`strategy` 三种粒度；可选的 `VNPY_DEFAULT_STRATEGY_INITIAL_CAPITAL` 只适合所有策略等额初始资金的临时环境。当前 `TradeData` 没有手续费/印花税字段，因此精确归因里的现金默认不扣交易费用，风险会记录在 `raw_variables_json.fee_note` 中。
 
 读取入口统一为 webtrader `/api/v1/strategy/equity-journal`。mlearnweb 的 `strategy_equity_journal_sync_service` 按 `(node_id, engine, strategy_name, source_label)` 增量拉取，并写入监控端 `strategy_equity_snapshots`。因此 mlearnweb 重启、换服务器或清空展示库后，只要 vnpy 节点与 `VNPY_DATA_ROOT` 还在，就可以重新补拉历史权益曲线。
 
@@ -79,6 +121,7 @@ flowchart LR
 - journal 主身份必须包含 `(engine, strategy_name, source_label, ts)`，不能只用策略名。
 - vnpy 不能直接写 mlearnweb.db；跨工程同步只走 webtrader HTTP/RPC。
 - 前端和 mlearnweb 后端不解析 vnpy 原始订单/日志来推断权益；权益事实由 vnpy 后端归一后提供。
+- 多策略共享真实账户时，前端展示必须使用 vnpy 已归因后的策略 journal，不能按账户总权益做平均、按持仓比例临时拆分或在 mlearnweb 二次推断。
 - 旧 `vnpy_ml_strategy/replay_history.py`、`REPLAY_HISTORY_DB`、`/api/v1/ml/strategies/{name}/replay/equity_snapshots` 不再使用。
 
 ### 1.1 分层架构图

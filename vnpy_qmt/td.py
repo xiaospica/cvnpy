@@ -14,7 +14,7 @@ from xtquant.xttype import (
     XtTrade, XtAsset, XtOrder, XtOrderError, XtCreditOrder, XtOrderResponse,
     XtPosition, XtCreditDeal, XtCancelError, XtCancelOrderResponse, StockAccount
 )
-from vnpy.trader.constant import Direction, Status, Product
+from vnpy.trader.constant import Direction, Offset, Status, Product
 from vnpy.trader.object import (
     AccountData, TradeData, OrderData, OrderRequest, PositionData
 )
@@ -96,6 +96,19 @@ class TD(XtQuantTraderCallback):
                           datetime=now)
         if req.reference:
             order.extra = {"req_reference": req.reference}
+            try:
+                from vnpy_common.persistence.strategy_trade_journal import (
+                    record_order_reference,
+                )
+
+                record_order_reference(
+                    gateway_name=self.gateway.gateway_name,
+                    orderid=vn_oid,
+                    vt_symbol=order.vt_symbol,
+                    reference=req.reference,
+                )
+            except Exception:
+                pass
         self.orders[order.orderid] = order
         self.order_submit_time[order.orderid] = now
         return order.vt_orderid
@@ -186,6 +199,20 @@ class TD(XtQuantTraderCallback):
             vn_order.extra = old_order.extra
             if old_order == vn_order:
                 return
+        else:
+            try:
+                from vnpy_common.persistence.strategy_trade_journal import (
+                    get_order_reference,
+                )
+
+                req_reference = get_order_reference(
+                    gateway_name=self.gateway.gateway_name,
+                    orderid=vn_order.orderid,
+                )
+                if req_reference:
+                    vn_order.extra = {"req_reference": req_reference}
+            except Exception:
+                pass
 
         if vn_order.status == Status.REJECTED:
             # 仅在状态刚刚变为 REJECTED 时打印日志，避免重复打印
@@ -307,7 +334,22 @@ class TD(XtQuantTraderCallback):
         if vn_oid is None:
             return
         order = self.orders.get(vn_oid)
-        if order is None:
+        req_reference = ""
+        if order is not None and order.extra:
+            req_reference = str(order.extra.get("req_reference") or "")
+        if not req_reference:
+            try:
+                from vnpy_common.persistence.strategy_trade_journal import (
+                    get_order_reference,
+                )
+
+                req_reference = get_order_reference(
+                    gateway_name=self.gateway.gateway_name,
+                    orderid=vn_oid,
+                )
+            except Exception:
+                req_reference = ""
+        if order is None and not req_reference:
             return
         trd_typ = TO_VN_Trade_Type[trade.order_type]
         trade_ = TradeData(
@@ -319,8 +361,28 @@ class TD(XtQuantTraderCallback):
             price=trade.traded_price,
             datetime=timestamp_to_datetime(trade.traded_time),
             volume=trade.traded_volume,
-            direction=trd_typ
+            direction=trd_typ,
+            offset=Offset.OPEN if trd_typ == Direction.LONG else Offset.CLOSE,
         )
+        if req_reference:
+            trade_.extra = {"req_reference": req_reference}
+            try:
+                from vnpy_common.persistence.strategy_trade_journal import record_trade
+
+                record_trade(
+                    gateway_name=self.gateway.gateway_name,
+                    tradeid=trade_.tradeid,
+                    orderid=trade_.orderid,
+                    vt_symbol=trade_.vt_symbol,
+                    direction=trade_.direction.value,
+                    offset=trade_.offset.value,
+                    price=trade_.price,
+                    volume=trade_.volume,
+                    datetime_value=trade_.datetime,
+                    reference=req_reference,
+                )
+            except Exception:
+                pass
 
         self.write_log(
             f"成交 {trade_.vt_tradeid} order={trade_.vt_orderid} {trade_.vt_symbol} {trade_.direction.value} price={trade_.price} volume={trade_.volume}"

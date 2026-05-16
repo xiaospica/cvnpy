@@ -1,5 +1,21 @@
 # WORKLOG
 
+## 2026-05-16 — run_ml_headless 清库后 replay 结果不一致
+
+结论:
+- 已复现用户反馈：两轮 `reset_sim_state.py --all` 后运行 `run_ml_headless.py`，修复前 `selections.parquet` / `metrics.json` 一致，但 `replay_settle` 权益值不同。
+- 根因是 ML replay 调仓读取当前持仓时走 `MainEngine/OmsEngine` 异步缓存；快速回放里 sim counter 已同步更新，但 OMS 事件可能落后一拍，导致同一信号生成不同交易路径。
+- 本机推理 Python 还存在 polars 导入问题：`RuntimeError: unknown feature flag: 'sse3'`，需要给推理子进程跳过误报的 CPU 检查。
+
+已修改:
+- `vnpy_ml_strategy/template.py`：sim gateway 下 `_get_long_positions()` 直接读取 `gateway.td.counter.positions`，实盘仍走 OMS fallback。
+- `vnpy_ml_strategy/predictors/qlib_predictor.py`：推理子进程默认注入 `POLARS_SKIP_CPU_CHECK=1`。
+- `vnpy_common/services/strategy_equity_journal_service.py`：跳过 `replay_status=running` 策略，避免显式 replay 期间写入不稳定的 `sim_live_settle` 抽样点。
+
+验证:
+- 两轮清库自测：`run_selftest.py --runs 2 --timeout 1200` -> MATCH；`replay_settle` 134 行、预测/选股/指标产物 402 个，两轮 SHA256 都是 `f85d60fc4e36a752cd8eac77db0bc1ac20948e598d4b79748fe0e211174bffb9`。
+- `F:/Program_Home/vnpy/python.exe -m pytest vnpy_common/test/test_strategy_equity_journal_service.py vnpy_ml_strategy/test/test_ml_strategy_replay.py -q --basetemp .pytest_tmp_replay_fix` -> 23 passed。
+
 ## 2026-05-16 通用策略权益 Journal 重构启动
 
 ### 已确认结论
@@ -42,6 +58,24 @@
 - `F:\Program_Home\vnpy\python.exe -m pytest vnpy_common/test/test_strategy_equity_journal.py vnpy_ml_strategy/test/test_template_replay_persist.py vnpy_qmt_sim/test/test_sim_replay_controller.py -q`：12 passed。
 - `F:\Program_Home\vnpy\python.exe -m py_compile ...` 覆盖 webtrader/common/qmt_sim/脚本核心改动：通过。
 - `E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.exe -m py_compile ...` 覆盖 mlearnweb live_main/client/sync/live_trading_service：通过。
+
+### 2026-05-16 补充收口：webtrader e2e 与 broker-live 精确归因
+
+已处理：
+- `broker_live_close` 写入触发时间从硬编码收敛到 `VNPY_BROKER_LIVE_EOD_JOURNAL_TIME`，默认 `16:00`。
+- 新增 `strategy_trade_journal`，在 QMT 真实柜台路径记录 `OrderRequest.reference` 与 broker order id 的映射，并持久化成交归属。
+- `StrategyEquityJournalService` 在多策略共享真实账户时，优先用每策略初始资金 + 成交流水 + 收盘持仓市值计算 `strategy_value`，并保留真实账户总权益到 `account_equity`；条件不足时回退到账户级权益并在 raw_variables 标记 fallback。
+- 新增 webtrader `/api/v1/strategy/equity-journal` HTTP route 测试，覆盖 query 透传与 RPC 错误解包。
+- 已更新 `.env.example`、`AGENTS.md`、`IMPLEMENTATION_PLAN.md`、`docs/architecture.md`，记录 env 配置、归因原理与风险边界。
+
+验证结果：
+- `F:\Program_Home\vnpy\python.exe -m py_compile vnpy_common\services\strategy_equity_journal_service.py vnpy_common\persistence\strategy_trade_journal.py vnpy_qmt\td.py vnpy_webtrader\test\test_strategy_equity_journal_http.py vnpy_common\test\test_strategy_equity_journal_service.py`：通过。
+- `F:\Program_Home\vnpy\python.exe -m pytest vnpy_common\test\test_strategy_equity_journal_service.py vnpy_common\test\test_strategy_equity_journal.py vnpy_ml_strategy\test\test_template_replay_persist.py vnpy_webtrader\test\test_strategy_equity_journal_http.py -q`：15 passed，1 个 pytz 第三方 deprecation warning。
+
+风险与注意：
+- 当前 `TradeData` 没有手续费/印花税字段，真实柜台精确归因的现金暂不扣交易费用，已写入 `raw_variables.fee_note`。
+- 精确归因依赖策略订单 reference；手工下单或旧订单没有 reference 时不会被分配到策略。
+- `VNPY_STRATEGY_INITIAL_CAPITALS` 是共享账户精确归因的关键配置，key 支持 `gateway:engine:strategy`、`engine:strategy`、`strategy`。
 
 ## 2026-05-12 RedisLiveSim v2 前端收益率为 0
 
