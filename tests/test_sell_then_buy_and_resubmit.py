@@ -94,6 +94,48 @@ def test_get_account_asset_uses_equity_balance() -> None:
     assert st.get_account_asset("G1") == 12345.0
 
 
+def test_replay_get_account_asset_reads_sim_counter_not_stale_oms() -> None:
+    from vnpy_signal_strategy_plus.strategies.csv_replay_test_strategy import (
+        CsvReplayTestStrategy,
+    )
+
+    class _Pos:
+        volume = 20
+        price = 10.0
+
+    class _Counter:
+        capital = 1000.0
+        positions = {"600000.SSE.Long": _Pos()}
+
+    class _Gateway:
+        md = object()
+
+        class _Td:
+            counter = _Counter()
+
+        td = _Td()
+
+        def enable_auto_settle(self, enabled: bool) -> None:
+            return
+
+    class _ReplayMainEngine(_DummyMainEngine):
+        def __init__(self):
+            super().__init__([
+                AccountData(accountid="ACC", balance=1.0, frozen=0.0, gateway_name="G1")
+            ])
+            self._gateway = _Gateway()
+
+        def get_gateway(self, gateway_name: str):
+            return self._gateway if gateway_name == "G1" else None
+
+    st = object.__new__(CsvReplayTestStrategy)
+    st.gateway = "G1"
+    st.signal_engine = _DummySignalEngine(_ReplayMainEngine())
+    st.write_log = lambda msg: None
+
+    assert st.get_account_asset("G1") == 1200.0
+
+
 def test_resubmit_send_order_clears_live_test_case_tag() -> None:
     class _S(AutoResubmitMixinPlus):
         def __init__(self) -> None:

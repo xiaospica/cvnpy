@@ -162,36 +162,37 @@ class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
     # ------------------------------------------------------------------
 
     def get_account_asset(self, gateway_name: str) -> float:
-        """覆盖父类：返回总权益 = 现金 + 持仓市值，而非仅 balance（现金）。
+        """Return simulator equity for replay sizing.
 
-        ⚠️ 关键修复：mysql_signal_strategy.process_signal 用 ``total_capital * pct``
-        算目标股数，``total_capital`` 默认取自 OMS account.balance（即现金）。但
-        CSV 的 pct = amt * price / equity_total，equity_total = 现金 + 持仓市值。
-
-        seed 持仓引导后 sim 现金被扣到 ~2752 元（持仓占了 99.7w），如果策略用
-        balance=2752 算 vol_int，所有信号 vol_int 都 < 100 股 → 全部"下单数量
-        为 0"被跳过 → sim 一笔不下。
-
-        修复：本类返回 balance + sum(pos.volume * pos.price)，与 CSV 的 equity_total
-        口径对齐。生产场景下持仓 mark-to-market 后两者基本守恒，本 override 也不
-        会让生产策略行为变化（前提是该策略只在 e2e 测试中加载）。
+        Replay consumes signals much faster than a live gateway. Reading cash from
+        ``MainEngine.get_all_accounts()`` can observe a stale OMS account event, so
+        two otherwise identical sim gateways may calculate different target lots.
+        The simulator counter is the synchronous source of truth for both cash and
+        positions during replay.
         """
-        base = super().get_account_asset(gateway_name)
         sim_gw = self._get_sim_gateway()
         if sim_gw is None or gateway_name != self.gateway:
-            return base
+            return super().get_account_asset(gateway_name)
+
         try:
+            counter = sim_gw.td.counter
+            base = float(counter.capital)
             positions_value = sum(
                 float(p.volume) * float(p.price)
-                for p in sim_gw.td.counter.positions.values()
+                for p in counter.positions.values()
                 if float(p.volume) > 0
             )
-        except Exception:
-            positions_value = 0.0
+        except Exception as exc:
+            self.write_log(
+                f"[equity] direct sim counter read failed: {type(exc).__name__}: {exc}; "
+                "fallback to OMS account"
+            )
+            return super().get_account_asset(gateway_name)
+
         equity = base + positions_value
         if positions_value > 0:
             self.write_log(
-                f"[equity] cash={base:,.0f} + positions_mv={positions_value:,.0f} "
+                f"[equity] counter_cash={base:,.0f} + positions_mv={positions_value:,.0f} "
                 f"= equity={equity:,.0f}"
             )
         return equity
