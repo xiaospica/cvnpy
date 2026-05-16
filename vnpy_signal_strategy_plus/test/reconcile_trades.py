@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -34,11 +35,28 @@ from typing import Optional
 
 import pandas as pd
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from vnpy_common.data_paths import ensure_vnpy_data_env, state_dir  # noqa: E402
+
 
 def resolve_setting_path(template_path: Path) -> Path:
     """优先 ``.local.json`` 副本，fallback 到模板。"""
     local = template_path.with_name(template_path.stem + ".local.json")
     return local if local.exists() else template_path
+
+
+def _expand_config_path(value: object) -> str:
+    ensure_vnpy_data_env()
+    return os.path.expandvars(str(value)).strip()
+
+
+def _resolve_sim_state_dir(setting: dict) -> Path:
+    sim = setting["sim"]
+    raw = sim.get("db_dir") or sim.get("connect_setting", {}).get("持久化目录")
+    return Path(_expand_config_path(raw)) if raw else state_dir()
 
 
 JQ_TO_VNPY_EXCHANGE = {
@@ -69,7 +87,7 @@ class ReconcileConfig:
     @classmethod
     def from_test_setting(cls, setting: dict) -> "ReconcileConfig":
         sim = setting["sim"]
-        sim_db_dir = Path(sim["db_dir"])
+        sim_db_dir = _resolve_sim_state_dir(setting)
         sim_db_path = sim_db_dir / f"sim_{sim['account_id']}.db"
 
         rec = setting["reconcile"]

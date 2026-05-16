@@ -21,11 +21,13 @@ sys.path.insert(0, str(ROOT))
 
 import pandas as pd
 from vnpy.event import EventEngine
+from vnpy_common.data_paths import merged_snapshots_dir
 from vnpy_qmt_sim import QmtSimGateway
 
 
 def main() -> int:
-    daily_merged = Path(r"D:/vnpy_data/snapshots/merged/daily_merged_20260422.parquet")
+    merged_root = merged_snapshots_dir()
+    daily_merged = merged_root / "daily_merged_20260422.parquet"
     if not daily_merged.exists():
         print(f"FAIL: {daily_merged} 不存在，无法跑端到端验证")
         return 1
@@ -52,7 +54,7 @@ def main() -> int:
                 "账户": "phase5_smoke",
                 "模拟资金": 1_000_000.0,
                 "行情源": "merged_parquet",
-                "merged_parquet_merged_root": r"D:/vnpy_data/snapshots/merged",
+                "merged_parquet_merged_root": str(merged_root),
                 "merged_parquet_reference_kind": "today_open",
                 "merged_parquet_fallback_days": 5,
                 "merged_parquet_stale_warn_hours": 48,

@@ -36,7 +36,7 @@ from vnpy_common.data_paths import (  # noqa: E402
 
 # Default sim state and ML output locations are derived from VNPY_DATA_ROOT.
 TRADING_STATE_DIR = sim_state_dir()
-ML_OUTPUT_ROOT = ml_output_root()
+ML_OUTPUT_ROOT_PATH = ml_output_root()
 
 # --all also clears the strategy equity journal database.
 def _strategy_equity_journal_db_path() -> Path:
@@ -90,7 +90,7 @@ def main() -> int:
     args = ap.parse_args()
 
     persist_files = _list_persistence_files(TRADING_STATE_DIR, args.gateway)
-    ml_dirs = _list_ml_output_dirs(ML_OUTPUT_ROOT, args.gateway) if args.all else []
+    ml_dirs = _list_ml_output_dirs(ML_OUTPUT_ROOT_PATH, args.gateway) if args.all else []
 
     # --all 时把 strategy_equity_journal.db (+ -shm / -wal) 也列入待删.
     # --gateway 过滤不适用此 db (它按 engine/strategy/source 列存,跨策略选择性删需要 SQL,
@@ -112,7 +112,7 @@ def main() -> int:
         print("    (无)")
 
     if args.all:
-        print(f"\nml_output 根: {ML_OUTPUT_ROOT}")
+        print(f"\nml_output 根: {ML_OUTPUT_ROOT_PATH}")
         print(f"  待清子目录 ({len(ml_dirs)}):")
         for d in ml_dirs:
             child_count = sum(1 for _ in d.iterdir())

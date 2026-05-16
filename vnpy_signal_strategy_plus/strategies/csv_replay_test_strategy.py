@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import traceback
@@ -40,6 +41,7 @@ from typing import Optional
 from vnpy.trader.constant import Direction, Exchange
 from vnpy.trader.object import PositionData
 
+from vnpy_common.data_paths import data_path, ensure_vnpy_data_env
 from vnpy_signal_strategy_plus.base import APP_NAME
 from vnpy_signal_strategy_plus.mysql_signal_strategy import (
     MySQLSignalStrategyPlus,
@@ -52,6 +54,7 @@ from vnpy_ml_strategy.utils.trade_calendar import StaleCalendarError, make_calen
 # 4/14 快照初始化逻辑用：从 instrument(`名元股份(003003.XSHE)`) 提取代码
 _INSTRUMENT_RE = re.compile(r"\((\d{6}\.[A-Z]+)\)")
 _JQ_TO_VNPY = {"XSHG": "SSE", "XSHE": "SZSE"}
+DEFAULT_CALENDAR_PROVIDER_URI = str(data_path("qlib_data_bin"))
 
 # 测试配置文件路径：strategies/csv_replay_test_strategy.py
 #   .parent       = strategies/
@@ -60,6 +63,11 @@ _JQ_TO_VNPY = {"XSHG": "SSE", "XSHE": "SZSE"}
 def _resolve_setting_path(template_path: Path) -> Path:
     local = template_path.with_name(template_path.stem + ".local.json")
     return local if local.exists() else template_path
+
+
+def _expand_path_setting(value: object) -> str:
+    ensure_vnpy_data_env()
+    return os.path.expandvars(str(value)).strip()
 
 
 TEST_SETTING_PATH = _resolve_setting_path(
@@ -120,9 +128,11 @@ class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
             replay_cfg.get("rebase_remark_to_today", False)
         )
         self._calendar_provider_uri: str = str(
-            replay_cfg.get("calendar_provider_uri")
-            or setting.get("calendar_provider_uri")
-            or "D:/vnpy_data/qlib_data_bin"
+            _expand_path_setting(
+                replay_cfg.get("calendar_provider_uri")
+                or setting.get("calendar_provider_uri")
+                or DEFAULT_CALENDAR_PROVIDER_URI
+            )
         )
         self._trade_calendar = None
         self._calendar_warning_logged = False
@@ -136,7 +146,7 @@ class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
         self._csv_encoding: str = "gbk"
         csv_cfg = setting.get("csv", {}) or {}
         if csv_cfg.get("position_path"):
-            self._csv_position_path = Path(csv_cfg["position_path"])
+            self._csv_position_path = Path(_expand_path_setting(csv_cfg["position_path"]))
             self._csv_encoding = csv_cfg.get("encoding", "gbk")
 
         password_mask = "***" if self.db_password else ""
@@ -347,7 +357,7 @@ class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
     def _get_trade_calendar(self):
         """Return the replay trading calendar, preferring local qlib calendar file."""
         if not hasattr(self, "_calendar_provider_uri"):
-            self._calendar_provider_uri = "D:/vnpy_data/qlib_data_bin"
+            self._calendar_provider_uri = DEFAULT_CALENDAR_PROVIDER_URI
         if not hasattr(self, "_trade_calendar"):
             self._trade_calendar = None
         if self._trade_calendar is None:

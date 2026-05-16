@@ -22,7 +22,10 @@ from typing import Dict, List, Tuple
 import pandas as pd
 
 _ROOT = Path(__file__).resolve().parents[2]  # vnpy_strategy_dev
+sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "vendor" / "qlib_strategy_core"))  # qlib (unpickle Position)
+
+from vnpy_common.data_paths import data_path, state_dir
 
 # Ground truth 按 strategy_name 隔离: set E2E_STRATEGY_NAME=...
 import os as _os
@@ -30,9 +33,9 @@ _STRATEGY_NAME = _os.environ.get("E2E_STRATEGY_NAME", "csi300_lgb_headless")
 QLIB_BT = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest") / _STRATEGY_NAME
 VNPY_DB = Path(_os.environ.get(
     "E2E_VNPY_SIM_DB",
-    r"F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300.db",
+    str(state_dir() / "sim_QMT_SIM_csi300.db"),
 ))
-DAILY_MERGED = Path(r"D:/vnpy_data/stock_data/daily_merged_all_new.parquet")
+DAILY_MERGED = data_path("stock_data", "daily_merged_all_new.parquet")
 
 
 def vt_to_ts(vt: str) -> str:

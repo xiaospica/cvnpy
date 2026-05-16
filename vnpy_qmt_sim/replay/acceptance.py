@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from vnpy_common.data_paths import strategy_equity_journal_db_path
+from vnpy_common.data_paths import state_dir, strategy_equity_journal_db_path
 
 
 DEFAULT_STRATEGIES = [
@@ -20,9 +20,9 @@ DEFAULT_STRATEGIES = [
     "csi300_lgb_headless_2",
 ]
 DEFAULT_SQLITE_DBS = [
-    Path(r"D:/vnpy_data/state/sim_QMT_SIM.db"),
-    Path(r"D:/vnpy_data/state/sim_QMT_SIM_csi300.db"),
-    Path(r"D:/vnpy_data/state/sim_QMT_SIM_csi300_2.db"),
+    state_dir() / "sim_QMT_SIM.db",
+    state_dir() / "sim_QMT_SIM_csi300.db",
+    state_dir() / "sim_QMT_SIM_csi300_2.db",
     strategy_equity_journal_db_path(),
     Path(r"F:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db"),
 ]

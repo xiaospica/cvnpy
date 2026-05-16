@@ -70,13 +70,15 @@ sys.path.insert(0, r"F:\Quant\code\qlib_strategy_dev")
 from vnpy.event import EventEngine
 from vnpy.trader.engine import MainEngine
 from vnpy_ml_strategy import MLStrategyApp, APP_NAME as ML_APP
+from vnpy_common.data_paths import data_path, ml_output_root
 from vnpy_webtrader import WebTraderApp
 from vnpy_webtrader.engine import APP_NAME as WEB_APP_NAME
 
 BUNDLE = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab2711178313491f9900b5695b47fa98"
 # OUT 指向 backfill 目录 —— 让 adapter 的 _load_latest_topk 能读到 backfill 写的
 # selections.parquet (prod 语义: 每日 persist_selections 写的地方)
-OUT = r"D:/ml_output/phase27_backfill"
+OUT = os.getenv("SMOKE_ML_OUTPUT_ROOT", str(ml_output_root() / "phase27_backfill"))
+PROVIDER_URI = os.getenv("ML_QLIB_DIR", str(data_path("qlib_data_bin")))
 STRATEGY_NAME = "phase27_test"
 TEST_LIVE_END = _d(2026, 1, 10)
 
@@ -97,7 +99,10 @@ TRIGGER_PIPELINE_ON_STARTUP = False
 # 聚合 + SQLite 暴露层"的角色.
 SPAWN_MLEARNWEB = True
 MLEARNWEB_BACKEND = r"F:/Quant/code/qlib_strategy_dev/mlearnweb/backend"
-PY311 = r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe"
+PY311 = os.getenv(
+    "INFERENCE_PYTHON",
+    r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
+)
 
 
 def main() -> int:
@@ -118,8 +123,8 @@ def main() -> int:
 
     strat = eng.add_strategy("QlibMLStrategy", STRATEGY_NAME, {
         "bundle_dir": BUNDLE,
-        "inference_python": r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
-        "provider_uri": r"F:/Quant/code/qlib_strategy_dev/factor_factory/qlib_data_bin",
+        "inference_python": PY311,
+        "provider_uri": PROVIDER_URI,
         "output_root": OUT,
         "gateway": "QMT_SIM",
         "trigger_time": "21:00",

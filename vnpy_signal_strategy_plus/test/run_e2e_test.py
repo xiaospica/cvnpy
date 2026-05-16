@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -65,7 +66,23 @@ def resolve_setting_path(template_path: Path) -> Path:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # vnpy_strategy_dev/
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from vnpy_common.data_paths import ensure_vnpy_data_env, logs_root, state_dir  # noqa: E402
+
 PYTHON_EXE = sys.executable  # 用当前解释器，正常情况就是 F:\Program_Home\vnpy\python.exe
+
+
+def _expand_config_path(value: object) -> str:
+    ensure_vnpy_data_env()
+    return os.path.expandvars(str(value)).strip()
+
+
+def _resolve_sim_state_dir(setting: dict) -> Path:
+    sim = setting["sim"]
+    raw = sim.get("db_dir") or sim.get("connect_setting", {}).get("持久化目录")
+    return Path(_expand_config_path(raw)) if raw else state_dir()
 
 
 @dataclass
@@ -90,7 +107,7 @@ class E2EConfig:
         with open(setting_path, "r", encoding="utf-8") as f:
             setting = json.load(f)
         sim = setting["sim"]
-        sim_db_path = Path(sim["db_dir"]) / f"sim_{sim['account_id']}.db"
+        sim_db_path = _resolve_sim_state_dir(setting) / f"sim_{sim['account_id']}.db"
         return cls(
             setting_path=setting_path,
             setting=setting,
@@ -219,7 +236,7 @@ def make_bridge_setting(cfg: E2EConfig, logger: logging.Logger) -> Path:
             }
         ],
         "log": {
-            "dir": str(PROJECT_ROOT / "logs" / "redis_bridge_e2e"),
+            "dir": str(logs_root() / "redis_bridge_e2e"),
             "level": "INFO",
         },
     }
@@ -250,7 +267,7 @@ def start_bridge(
     # 这里 stdout 重定向到独立日志文件而不是 PIPE：避免 PIPE buffer 写满后
     # bridge 子进程 print 阻塞、停止消费 redis（曾出现 8 秒就 hang 的 bug）。
     bridge_stdout = (
-        PROJECT_ROOT / "logs" / "redis_bridge_e2e"
+        logs_root() / "redis_bridge_e2e"
         / f"bridge_subprocess_{datetime.now().strftime('%Y%m%d_%H%M%S')}.stdout.log"
     )
     bridge_stdout.parent.mkdir(parents=True, exist_ok=True)

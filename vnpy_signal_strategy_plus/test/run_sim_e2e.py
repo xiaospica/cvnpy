@@ -62,12 +62,33 @@ from vnpy.trader.engine import MainEngine  # noqa: E402
 from vnpy_qmt_sim import QmtSimGateway  # noqa: E402
 from vnpy_signal_strategy_plus import SignalStrategyPlusApp  # noqa: E402
 from vnpy_webtrader import WebTraderApp  # noqa: E402
+from vnpy_common.data_paths import ensure_vnpy_data_env, state_dir, vnpy_data_root  # noqa: E402
 
 
 def resolve_setting_path(template_path: Path) -> Path:
     """优先 ``.local.json`` 副本，fallback 到模板。"""
     local = template_path.with_name(template_path.stem + ".local.json")
     return local if local.exists() else template_path
+
+
+def _expand_config_path(value: object) -> str:
+    ensure_vnpy_data_env()
+    return os.path.expandvars(str(value)).strip()
+
+
+def _expand_paths_in_obj(value):
+    if isinstance(value, dict):
+        return {k: _expand_paths_in_obj(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_paths_in_obj(v) for v in value]
+    if isinstance(value, str):
+        return _expand_config_path(value)
+    return value
+
+
+def _resolve_sim_state_dir(sim_cfg: dict, connect_setting: dict) -> Path:
+    raw = sim_cfg.get("db_dir") or connect_setting.get("持久化目录")
+    return Path(_expand_config_path(raw)) if raw else state_dir()
 
 
 def _setup_logger() -> logging.Logger:
@@ -92,7 +113,10 @@ def boot(setting_path: Path, logger: logging.Logger):
 
     sim_cfg = setting["sim"]
     gateway_name = sim_cfg.get("gateway_name", "QMT_SIM")
-    connect_setting = dict(sim_cfg.get("connect_setting", {}))
+    connect_setting = _expand_paths_in_obj(dict(sim_cfg.get("connect_setting", {})))
+    sim_state_dir = _resolve_sim_state_dir(sim_cfg, connect_setting)
+    sim_cfg["db_dir"] = str(sim_state_dir)
+    connect_setting["持久化目录"] = str(sim_state_dir)
     # 显式传入"账户"以确保 persistence 文件名 = sim_{gateway_name}.db
     connect_setting.setdefault("账户", sim_cfg.get("account_id", gateway_name))
 
@@ -197,10 +221,11 @@ def boot(setting_path: Path, logger: logging.Logger):
                 child_env = dict(os.environ)
                 child_env["VNPY_WEB_REQ_ADDRESS"] = rep
                 child_env["VNPY_WEB_SUB_ADDRESS"] = pub
-                # 让 vnpy_qmt_sim history_positions 能找到正确的 sim db
-                sim_db_dir = str(sim_cfg.get("db_dir", ""))
-                if sim_db_dir:
-                    child_env["VNPY_QMT_SIM_TRADING_STATE"] = sim_db_dir
+                child_env["VNPY_DATA_ROOT"] = str(vnpy_data_root())
+                # 让 vnpy_qmt_sim history_positions 能找到正确的 sim db.
+                # 默认统一走 VNPY_DATA_ROOT/state；只有测试显式改到 root 外目录时才使用高级覆盖。
+                if sim_state_dir.resolve() != state_dir().resolve():
+                    child_env["VNPY_QMT_SIM_TRADING_STATE"] = str(sim_state_dir)
                 web_proc = subprocess.Popen(
                     cmd,
                     cwd=str(_PROJECT_ROOT),

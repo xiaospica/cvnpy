@@ -1,4 +1,4 @@
-"""[DEPRECATED · A1/B2 解耦] 一次性脚本：从 D:/ml_output/{strategy}/{yyyymmdd}/ 回填
+"""[DEPRECATED · A1/B2 解耦] 一次性脚本：从 ${VNPY_DATA_ROOT}/ml_output/{strategy}/{yyyymmdd}/ 回填
 ml_metric_snapshots + ml_prediction_daily 到 mlearnweb.db。
 
 ⚠️ 本脚本已废弃 (commit A1 Step 1):
@@ -34,9 +34,10 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from vnpy_common.data_paths import ml_output_root  # noqa: E402
 from vnpy_ml_strategy.mlearnweb_writer import write_replay_ml_metric_snapshot  # noqa: E402
 
-OUTPUT_ROOT = Path(r"D:/ml_output")
+OUTPUT_ROOT = ml_output_root()
 NODE_ID = "local"
 ENGINE = "MlStrategy"
 

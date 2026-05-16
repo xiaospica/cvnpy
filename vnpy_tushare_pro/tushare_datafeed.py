@@ -174,7 +174,7 @@ class TushareDatafeedPro(BaseDatafeed):
         """按 env 变量构造 DailyIngestPipeline (Phase 4 v2).
 
         VNPY_DATA_ROOT 驱动所有路径默认, 单变量即可启用:
-          VNPY_DATA_ROOT=D:/vnpy_data
+          VNPY_DATA_ROOT=<your-data-root>
 
         默认布局:
           {VNPY_DATA_ROOT}/stock_data/daily_merged_all_new.parquet     (活动 merged, 观察档)

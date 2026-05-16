@@ -13,7 +13,7 @@
 #   1. 显式 -ParamName <值> (调用方 explicit)
 #   2. .env.production 字段 (KEY=VALUE 行解析)
 #   3. 自动检测 (Python: py launcher / 注册表 / 常见位置)
-#   4. 安全默认值 (D:\vnpy_data, D:\vnpy_logs, D:\backups, ...)
+#   4. 安全默认值 (D:\vnpy_data 及其 logs/backups/ml_output/models 子目录)
 
 
 function Read-EnvFile {

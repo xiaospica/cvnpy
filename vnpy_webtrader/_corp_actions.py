@@ -12,7 +12,7 @@ HTTP 客户端.
 
 复用 ``DailyIngestPipeline`` 同一份 ``snapshots/merged`` 目录约定, 路径优先级:
     1. env ``ML_SNAPSHOT_DIR`` (绝对路径)
-    2. ``${VNPY_DATA_ROOT}/snapshots`` (默认 D:/vnpy_data/snapshots)
+    2. ``${VNPY_DATA_ROOT}/snapshots`` (默认数据根下的 snapshots)
 
 不依赖 EventEngine / RpcServer — 纯本地文件 + pandas 算法, 给 HTTP layer 直接调.
 """

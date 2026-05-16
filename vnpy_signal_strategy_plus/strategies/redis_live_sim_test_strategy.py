@@ -13,6 +13,8 @@ from typing import Optional
 
 from vnpy_signal_strategy_plus.strategies.csv_replay_test_strategy import (
     CsvReplayTestStrategy,
+    DEFAULT_CALENDAR_PROVIDER_URI,
+    _expand_path_setting,
     _resolve_setting_path,
 )
 
@@ -81,9 +83,11 @@ class RedisLiveSimTestStrategy(CsvReplayTestStrategy):
         )
         self._idle_settle_seconds = float(replay_cfg.get("idle_settle_seconds", 30))
         self._calendar_provider_uri = str(
-            replay_cfg.get("calendar_provider_uri")
-            or setting.get("calendar_provider_uri")
-            or "D:/vnpy_data/qlib_data_bin"
+            _expand_path_setting(
+                replay_cfg.get("calendar_provider_uri")
+                or setting.get("calendar_provider_uri")
+                or DEFAULT_CALENDAR_PROVIDER_URI
+            )
         )
         self._trade_calendar = None
         self._calendar_warning_logged = False

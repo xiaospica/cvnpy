@@ -24,11 +24,6 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-# 同机部署默认路径 (与 vnpy_qmt_sim/persistence.py 一致)
-_DEFAULT_TRADING_STATE = Path(__file__).resolve().parent / ".trading_state"
-_DEFAULT_DAILY_MERGED = Path(r"D:/vnpy_data/stock_data/daily_merged_all_new.parquet")
-
-
 def _vt_to_ts(vt: str) -> str:
     if vt.endswith(".SZSE"): return vt[:-5] + ".SZ"
     if vt.endswith(".SSE"):  return vt[:-4] + ".SH"

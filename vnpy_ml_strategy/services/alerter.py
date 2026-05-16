@@ -34,6 +34,7 @@ from typing import Any, Dict, Optional
 
 from vnpy.event import Event
 from vnpy.trader.setting import SETTINGS
+from vnpy_common.data_paths import data_path, logs_root, ml_output_root
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,7 @@ class Alerter:
             f"error:      {error}\n\n"
             f"影响: 21:00 推理可能找不到 filter snapshot 直接 raise; "
             f"建议: 检查 tushare API 连通性 / 磁盘空间 / 聚宽 CSV 是否陈旧.\n"
-            f"详见日志: D:/vnpy_logs/vnpy_headless.log (NSSM 部署) 或控制台输出.\n"
+            f"详见日志: {logs_root()}/vnpy_headless_*.log (NSSM 部署) 或控制台输出.\n"
         )
         self._send_dedup(kind="ingest_failed", identifier=str(trade_date),
                          subject=subject, content=content)
@@ -142,8 +143,8 @@ class Alerter:
             f"status:     {status}\n"
             f"error:      {error}\n\n"
             f"影响: 当日无信号产出, 09:26 rebalance 不下单; "
-            f"建议: 检查 D:/ml_output/{strategy}/{trade_date}/diagnostics.json 详细错误; "
-            f"qlib_data_bin 当日数据是否齐 (calendar 末尾 == {trade_date}); "
+            f"建议: 检查 {ml_output_root()}/{strategy}/{trade_date}/diagnostics.json 详细错误; "
+            f"{data_path('qlib_data_bin')} 当日数据是否齐 (calendar 末尾 == {trade_date}); "
             f"filter snapshot 是否就位.\n"
         )
         self._send_dedup(kind="ml_metrics_failed",

@@ -13,7 +13,7 @@
 #
 # 先决条件 (bootstrap.ps1 -Apply 已搞定 + 用户手工补的部分):
 #   - .env.production / strategies.production.yaml 已配
-#   - bundle 已 rsync 到 ${VNPY_MODEL_ROOT}/<run_id>/, 含 filter_config.json
+#   - bundle 已 rsync 到 ${VNPY_DATA_ROOT}/models/<run_id>/, 含 filter_config.json
 #   - .env.production 的 TUSHARE_TOKEN 已填；或 vt_setting.json 的 datafeed.password 已填
 #   - vnpy 主 Python 已装 (脚本自动从 .env / 检测 / winget 装)
 

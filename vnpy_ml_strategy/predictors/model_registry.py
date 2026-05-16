@@ -12,12 +12,17 @@ subprocess 模式下主进程不加载模型本体, 只需在 on_init 时:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
 SUPPORTED_BUNDLE_VERSIONS = {1}
 FILTER_CONFIG_SCHEMA_VERSIONS = {1}
+DEFAULT_INFERENCE_PYTHON = os.getenv(
+    "INFERENCE_PYTHON",
+    "E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
+)
 
 
 class BundleIncompatibleError(RuntimeError):
@@ -89,7 +94,7 @@ class ModelRegistry:
             raise FilterConfigError(
                 f"bundle {bundle_dir} 缺 filter_config.json (Phase 2 跨端 filter 契约). "
                 f"老 bundle 一次性迁移: 在 qlib_strategy_dev 工程跑 "
-                f"`E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe "
+                f"`{DEFAULT_INFERENCE_PYTHON} "
                 f"scripts/backfill_filter_config.py --apply`"
             )
         try:

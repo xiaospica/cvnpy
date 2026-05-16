@@ -9,7 +9,7 @@
 
 1. **MySQL ``stock_trade``**：``DELETE WHERE stg='etf_rotation_basic'``。
 2. **Redis Stream**：``XTRIM <stream> MAXLEN 0`` 清掉积压消息。
-3. **sim 网关持久化**：删除 ``D:/vnpy_data/state/sim_QMT_SIM.{db,db-shm,db-wal,lock}``
+3. **sim 网关持久化**：删除 ``<VNPY_DATA_ROOT>/state/sim_QMT_SIM.{db,db-shm,db-wal,lock}``
    （仅当未被进程占用时；若占用先杀进程）。
 4. **占用我们端口的残留进程**（**12014/14102/18001 + 旧默认 2014/4102/8001**）：
    仅警告，不主动杀（怕误杀生产 webtrader），用户自行判断。
@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from vnpy_common.data_paths import strategy_equity_journal_db_path  # noqa: E402
+from vnpy_common.data_paths import ensure_vnpy_data_env, state_dir, strategy_equity_journal_db_path  # noqa: E402
 
 
 def resolve_setting_path(template_path: Path) -> Path:
@@ -46,6 +46,17 @@ def resolve_setting_path(template_path: Path) -> Path:
 def load_setting(path: Path) -> dict:
     with open(path, "r", encoding="utf-8-sig") as f:
         return json.load(f)
+
+
+def _expand_config_path(value: object) -> str:
+    ensure_vnpy_data_env()
+    return os.path.expandvars(str(value)).strip()
+
+
+def _resolve_sim_state_dir(setting: dict) -> Path:
+    sim = setting["sim"]
+    raw = sim.get("db_dir") or sim.get("connect_setting", {}).get("持久化目录")
+    return Path(_expand_config_path(raw)) if raw else state_dir()
 
 
 def purge_mysql(setting: dict) -> None:
@@ -78,13 +89,13 @@ def purge_redis(setting: dict) -> None:
 
 def purge_sim_db(setting: dict) -> None:
     sim = setting["sim"]
-    state_dir = Path(sim["db_dir"])
+    sim_state_dir = _resolve_sim_state_dir(setting)
     acc = sim["account_id"]
     candidates = [
-        state_dir / f"sim_{acc}.db",
-        state_dir / f"sim_{acc}.db-shm",
-        state_dir / f"sim_{acc}.db-wal",
-        state_dir / f"sim_{acc}.lock",
+        sim_state_dir / f"sim_{acc}.db",
+        sim_state_dir / f"sim_{acc}.db-shm",
+        sim_state_dir / f"sim_{acc}.db-wal",
+        sim_state_dir / f"sim_{acc}.lock",
     ]
     for p in candidates:
         if p.exists():

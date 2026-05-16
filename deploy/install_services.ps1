@@ -27,7 +27,7 @@
     vnpy 主 Python (3.13). 默认 F:\Program_Home\vnpy\python.exe.
 
 .PARAMETER LogRoot
-    NSSM 日志输出目录. 默认 D:\vnpy_logs.
+    NSSM 日志输出目录. 默认 <VNPY_DATA_ROOT>\logs.
 
 .EXAMPLE
     PS C:\> .\deploy\install_services.ps1

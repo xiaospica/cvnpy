@@ -31,7 +31,7 @@
   - `F:/Program_Home/vnpy/python.exe` (vnpy 主进程 Python 3.13)
   - `E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe` (研究机 Python 3.11, 跑 qlib)
   - bundle: `F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab27...`
-  - provider_uri: `F:/Quant/code/qlib_strategy_dev/factor_factory/qlib_data_bin`
+  - provider_uri: `<VNPY_DATA_ROOT>/qlib_data_bin`
 
 ## 不需要起别的服务
 
@@ -70,9 +70,15 @@ sys.path.insert(0, r"F:\Quant\code\qlib_strategy_dev")
 from vnpy.event import EventEngine
 from vnpy.trader.engine import MainEngine
 from vnpy_ml_strategy import MLStrategyApp, APP_NAME as ML_APP
+from vnpy_common.data_paths import data_path, ml_output_root
 
 BUNDLE = r"F:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/ab2711178313491f9900b5695b47fa98"
-OUT = r"D:/ml_output/smoke_subprocess"
+INFERENCE_PYTHON = os.getenv(
+    "INFERENCE_PYTHON",
+    r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
+)
+PROVIDER_URI = os.getenv("ML_QLIB_DIR", str(data_path("qlib_data_bin")))
+OUT = os.getenv("SMOKE_ML_OUTPUT_ROOT", str(ml_output_root() / "smoke_subprocess"))
 STRATEGY_NAME = "smoke_subprocess"
 TEST_LIVE_END = _d(2026, 1, 20)
 
@@ -101,8 +107,8 @@ def main() -> int:
 
     strat = eng.add_strategy("QlibMLStrategy", STRATEGY_NAME, {
         "bundle_dir": BUNDLE,
-        "inference_python": r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
-        "provider_uri": r"F:/Quant/code/qlib_strategy_dev/factor_factory/qlib_data_bin",
+        "inference_python": INFERENCE_PYTHON,
+        "provider_uri": PROVIDER_URI,
         "output_root": OUT,
         "gateway": "QMT_SIM",
         "trigger_time": "21:00",

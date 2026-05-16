@@ -36,6 +36,7 @@ from __future__ import annotations
 from abc import ABC
 from datetime import date, datetime, timedelta
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -49,7 +50,7 @@ from vnpy.trader.event import EVENT_LOG
 from vnpy.trader.object import LogData, OrderData, OrderRequest, TradeData
 
 from vnpy_order_utils import AutoResubmitMixin
-from vnpy_common.data_paths import ml_output_root
+from vnpy_common.data_paths import data_path, ml_output_root
 
 from .base import (
     APP_NAME,
@@ -74,7 +75,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
     # vnpy 参数系统 (子类覆盖; 注意 gateway 是 AutoResubmitMixin 宿主契约必需项)
     parameters: List[str] = [
-        "bundle_dir",          # 如 D:/vnpy_models/csi300_lgb/ab2711.../
+        "bundle_dir",          # 如 ${VNPY_DATA_ROOT}/models/<run_id>/
         "inference_python",    # 研究机 Python 3.11 路径
         "trigger_time",        # 推荐 "21:00" (配合 TushareProApp 20:00 拉数);
                                # 若用 "09:15", live_end 默认 today 会用昨日 bar,
@@ -87,7 +88,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         "n_drop",
         "risk_degree",         # 等权 cash 系数（qlib TopkDropoutStrategy 同源），默认 0.95
         "gateway",             # 如 "QMT" / "QMT_SIM"; 下单 + mixin 价格查询都用
-        "output_root",         # D:/ml_output 根
+        "output_root",         # 默认 ${VNPY_DATA_ROOT}/ml_output
         "lookback_days",
         "provider_uri",        # qlib bin 根
         "baseline_path",       # 空则用 bundle_dir/baseline.parquet
@@ -120,7 +121,10 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
     # Parameter defaults
     bundle_dir: str = ""
-    inference_python: str = r"E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.exe"
+    inference_python: str = os.getenv(
+        "INFERENCE_PYTHON",
+        r"E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.exe",
+    )
     trigger_time: str = "21:00"   # 20:00 拉数后 1h, live_end=today 数据已齐 → 推理 + persist
     buy_sell_time: str = "09:26"  # 实盘 T+1 开盘交易时间 — 09:25 集合竞价开盘价后立即下单,
                                    # 提高 09:30 撮合概率. on_init 注册第二个 cron 调
@@ -132,7 +136,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     gateway: str = ""
     output_root: str = str(ml_output_root())
     lookback_days: int = 60
-    provider_uri: str = ""
+    provider_uri: str = str(data_path("qlib_data_bin"))
     baseline_path: str = ""
     monitor_window_days: int = 30
     enable_trading: bool = False
@@ -886,6 +890,24 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             main_engine = getattr(self.signal_engine, "main_engine", None)
             if main_engine is None:
                 return positions
+            # In fast sim replay, counter positions are synchronous while OMS
+            # position events may lag by one tick and make reruns nondeterministic.
+            try:
+                gateway = main_engine.get_gateway(self.gateway)
+            except Exception:
+                gateway = None
+            counter = getattr(getattr(gateway, "td", None), "counter", None) if gateway else None
+            counter_positions = getattr(counter, "positions", None) if counter is not None else None
+            if isinstance(counter_positions, dict):
+                for key in sorted(counter_positions):
+                    pos = counter_positions[key]
+                    pos_dir = getattr(pos, "direction", None)
+                    if pos_dir != Direction.LONG and getattr(pos_dir, "value", None) != Direction.LONG.value:
+                        continue
+                    if float(getattr(pos, "volume", 0) or 0) <= 0:
+                        continue
+                    positions[pos.vt_symbol] = pos
+                return positions
             for pos in main_engine.get_all_positions():
                 if getattr(pos, "gateway_name", "") != self.gateway:
                     continue
@@ -1403,8 +1425,9 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         这样 sim 策略在冷启动后能先追历史，再补今天一笔，mlearnweb 卡片就不会长期
         停留在 yesterday 或空白状态。
         """
-        today = date.today()
-        if replay_end >= today:
+        catch_up_day = self._resolve_replay_catch_up_day()
+        today = catch_up_day
+        if replay_end >= catch_up_day:
             return
 
         try:
@@ -1417,7 +1440,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         if now_time < trigger_at:
             return
 
-        today_dir = Path(self.output_root) / self.strategy_name / today.strftime("%Y%m%d")
+        today_dir = Path(self.output_root) / self.strategy_name / catch_up_day.strftime("%Y%m%d")
         if (today_dir / "diagnostics.json").exists():
             self.write_log(f"[replay] 今日 {today} 产物已存在，跳过补跑")
             return
@@ -1433,6 +1456,39 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 f"[replay] 今日补跑失败（保留实时模式 + cron，等待下次触发）: "
                 f"{type(exc).__name__}: {exc}"
             )
+
+    def _resolve_replay_catch_up_day(self) -> date:
+        """Pick the latest locally frozen market day for replay catch-up."""
+        snapshot_day = self._latest_available_merged_snapshot_day()
+        return snapshot_day or date.today()
+
+    def _latest_available_merged_snapshot_day(self) -> Optional[date]:
+        try:
+            from vnpy_common.data_paths import merged_snapshots_dir
+
+            merged_dir = merged_snapshots_dir()
+        except Exception as exc:  # noqa: BLE001
+            self.write_log(f"[replay] resolve merged snapshot dir failed: {exc}")
+            return None
+
+        if not merged_dir.exists():
+            return None
+
+        latest: Optional[date] = None
+        wall_today = date.today()
+        for path in merged_dir.glob("daily_merged_*.parquet"):
+            ymd = path.stem.rsplit("_", 1)[-1]
+            if len(ymd) != 8 or not ymd.isdigit():
+                continue
+            try:
+                day = datetime.strptime(ymd, "%Y%m%d").date()
+            except ValueError:
+                continue
+            if day > wall_today:
+                continue
+            if latest is None or day > latest:
+                latest = day
+        return latest
 
     def _replay_loop_body(self, start: date, end: date, gateway: Any) -> None:
         """Phase 4 加速回放主循环。

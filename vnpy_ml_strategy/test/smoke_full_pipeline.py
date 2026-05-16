@@ -84,7 +84,7 @@ ingest 写两套数据:
 - 端口 2014/4102/8001/8100 空闲
 - qlib bin 已有 >= 70 交易日历史
 - 当日是交易日 (否则 DailyIngestPipeline 会 skipped=True, 继续走推理但 live_end 非今日)
-- `D:\\ml_output\\smoke_full_pipeline\\` 可写
+- `<VNPY_DATA_ROOT>\\ml_output\\smoke_full_pipeline\\` 可写
 
 ## 运行
 
@@ -240,7 +240,10 @@ STRATEGY_NAME: str = "jq41_csi300_2026"
 MLEARNWEB_BACKEND: str = r"F:/Quant/code/qlib_strategy_dev/mlearnweb/backend"
 MLEARNWEB_DB: Path = Path(MLEARNWEB_BACKEND) / "mlearnweb.db"
 # 研究机 Python 3.11 (qlib + mlearnweb live_main 用), 与 vnpy 主进程解释器解耦
-PY311: str = r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe"
+PY311: str = os.getenv(
+    "INFERENCE_PYTHON",
+    r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe",
+)
 
 # --- 7) 内部状态 (运行时 mutate, 非配置) ----------------------------
 # 多日模式下 date.today() 的动态 holder, monkey-patch 通过它读当前模拟日期

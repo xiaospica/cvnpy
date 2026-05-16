@@ -67,9 +67,14 @@ if load_dotenv is not None:
         load_dotenv(_HERE / ".env", override=False)
 
 from vnpy_common.data_paths import (  # noqa: E402
+    ensure_vnpy_data_env,
+    merged_snapshots_dir,
+    state_dir,
     strategy_equity_journal_db_path,
     vnpy_data_root,
 )
+
+ensure_vnpy_data_env()
 
 
 DEFAULT_SETTING_PATH = (
@@ -90,13 +95,26 @@ def _load_json(path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
+def _expand_config_path(value: object) -> str:
+    ensure_vnpy_data_env()
+    return os.path.expandvars(str(value)).strip()
+
+
+def _expand_paths_in_obj(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _expand_paths_in_obj(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_paths_in_obj(v) for v in value]
+    if isinstance(value, str):
+        return _expand_config_path(value)
+    return value
+
+
 def _resolve_sim_state_dir(setting: Dict[str, Any]) -> Path:
     """Return the SQLite state directory used by the configured sim gateways."""
     sim_cfg = setting.get("sim", {}) or {}
-    return Path(
-        sim_cfg.get("db_dir")
-        or (vnpy_data_root() / "state")
-    )
+    raw = sim_cfg.get("db_dir") or (sim_cfg.get("connect_setting", {}) or {}).get("持久化目录")
+    return Path(_expand_config_path(raw)) if raw else state_dir()
 
 
 def _strategy_equity_journal_db() -> Path:
@@ -106,15 +124,15 @@ def _strategy_equity_journal_db() -> Path:
 def _sim_setting(setting: Dict[str, Any], gateway_name: str) -> Dict[str, Any]:
     """Build per-gateway QMT_SIM/FakeQMT connect setting."""
     sim_cfg = setting.get("sim", {}) or {}
-    connect_setting = dict(sim_cfg.get("connect_setting", {}) or {})
+    connect_setting = _expand_paths_in_obj(dict(sim_cfg.get("connect_setting", {}) or {}))
     connect_setting.setdefault("模拟资金", float(setting.get("initial_capital", 1_000_000.0)))
     connect_setting.setdefault("行情源", "merged_parquet")
-    data_root = vnpy_data_root()
-    connect_setting.setdefault("merged_parquet_merged_root", str(data_root / "snapshots" / "merged"))
+    sim_state_dir = _resolve_sim_state_dir(setting)
+    connect_setting.setdefault("merged_parquet_merged_root", str(merged_snapshots_dir()))
     connect_setting.setdefault("merged_parquet_reference_kind", "today_open")
     connect_setting.setdefault("merged_parquet_fallback_days", 10)
     connect_setting.setdefault("启用持久化", "是")
-    connect_setting.setdefault("持久化目录", sim_cfg.get("db_dir") or f"{qs_root}/state")
+    connect_setting.setdefault("持久化目录", str(sim_state_dir))
 
     # 多 gateway 必须使用独立 account_id，否则持久化会写进同一个 sim_*.db。
     connect_setting["账户"] = gateway_name
@@ -295,11 +313,7 @@ def _cleanup_demo_state(
     print("=" * 60)
 
     sim_cfg = setting.get("sim", {}) or {}
-    state_dir = Path(
-        sim_cfg.get("db_dir")
-        or (sim_cfg.get("connect_setting", {}) or {}).get("持久化目录")
-        or (vnpy_data_root() / "state")
-    )
+    state_dir = _resolve_sim_state_dir(setting)
     for gw_name in gateway_names:
         for suffix in (".db", ".db-shm", ".db-wal", ".lock"):
             p = state_dir / f"sim_{gw_name}{suffix}"
@@ -567,9 +581,10 @@ def _start_webtrader(main_engine: Any, setting: Dict[str, Any]) -> Optional[subp
     child_env = dict(os.environ)
     child_env["VNPY_WEB_REQ_ADDRESS"] = rep
     child_env["VNPY_WEB_SUB_ADDRESS"] = pub
-    sim_db_dir = str((setting.get("sim", {}) or {}).get("db_dir", ""))
-    if sim_db_dir:
-        child_env["VNPY_QMT_SIM_TRADING_STATE"] = sim_db_dir
+    child_env["VNPY_DATA_ROOT"] = str(vnpy_data_root())
+    sim_state_dir = _resolve_sim_state_dir(setting)
+    if sim_state_dir.resolve() != state_dir().resolve():
+        child_env["VNPY_QMT_SIM_TRADING_STATE"] = str(sim_state_dir)
 
     proc = subprocess.Popen(
         cmd,
@@ -654,11 +669,7 @@ def _print_verification(
     print("=" * 60)
 
     sim_cfg = setting.get("sim", {}) or {}
-    state_dir = Path(
-        sim_cfg.get("db_dir")
-        or (sim_cfg.get("connect_setting", {}) or {}).get("持久化目录")
-        or (vnpy_data_root() / "state")
-    )
+    state_dir = _resolve_sim_state_dir(setting)
     print("\n# (a) sim DB 隔离: 每个模拟 gateway 一个 sqlite")
     for gw_name in sim_gateway_names:
         print(f"  sqlite3 {state_dir}/sim_{gw_name}.db \"SELECT COUNT(*) FROM sim_trades\"")

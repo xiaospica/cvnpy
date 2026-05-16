@@ -94,6 +94,27 @@ def test_run_pipeline_now_with_as_of_date_overrides_today() -> None:
     assert captured["as_of"] is None
 
 
+def test_replay_catch_up_uses_latest_merged_snapshot(tmp_path, monkeypatch) -> None:
+    bundle = _make_task_json(tmp_path, test_start="2026-01-01")
+    strat = _make_strategy(bundle, trigger_time="00:00")
+    monkeypatch.setenv("VNPY_DATA_ROOT", str(tmp_path))
+
+    merged_dir = tmp_path / "snapshots" / "merged"
+    merged_dir.mkdir(parents=True)
+    (merged_dir / "daily_merged_20260513.parquet").write_bytes(b"")
+    (merged_dir / "daily_merged_20260515.parquet").write_bytes(b"")
+
+    called = []
+
+    def fake_daily_pipeline(as_of_date=None):
+        called.append(as_of_date)
+
+    strat.run_daily_pipeline = fake_daily_pipeline  # type: ignore[method-assign]
+    strat._maybe_catch_up_today_after_replay(date(2026, 5, 13))
+
+    assert called == [date(2026, 5, 15)]
+
+
 # ---- _resolve_replay_window -------------------------------------------
 
 

@@ -4,7 +4,7 @@ vnpy 主进程 / 推理子进程 / scheduler 都用 loguru, 但默认无 rotatio
 几周后磁盘塞满. 本模块在主入口启动时调一次, 给 loguru 加文件 sink + 滚动.
 
 NSSM 自身的 AppRotateFiles=1 / AppRotateBytes=10MB 也开了, 但那只滚动 vnpy
-进程的 stdout/stderr 文件 (D:/vnpy_data/logs/vnpy_headless.log/.err); 框架内部
+进程的 stdout/stderr 文件 (<VNPY_DATA_ROOT>/logs/vnpy_headless.log/.err); 框架内部
 loguru log (gateway / event_engine / scheduler) 默认还是写到 stderr 走 NSSM
 捕获, 没单独文件. 加额外文件 sink 让 loguru 自己管理便于按日期/大小切割.
 
@@ -42,7 +42,7 @@ def setup_logger(
     """配置 loguru: 清掉默认 sink, 重加 console + 滚动文件.
 
     Args:
-        log_root: 日志根目录. 默认取 env LOG_ROOT, 缺省 D:/vnpy_data/logs.
+        log_root: 日志根目录. 默认取 env LOG_ROOT, 缺省 <VNPY_DATA_ROOT>/logs.
         process_name: 文件名前缀, 用以区分 vnpy_headless / mlearnweb 等进程.
         rotation: 单文件大小阈值 (loguru rotation 参数).
         retention: 文件保留期 (老文件 zip 压缩后超期删除).

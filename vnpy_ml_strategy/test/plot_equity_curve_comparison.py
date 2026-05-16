@@ -31,16 +31,28 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 _ROOT = Path(__file__).resolve().parents[2]  # vnpy_strategy_dev
+sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "vendor" / "qlib_strategy_core"))  # qlib (unpickle report)
+from vnpy_common.data_paths import strategy_equity_journal_db_path, vnpy_data_root  # noqa: E402
 
 # qlib ground truth 按 strategy_name 隔离的根目录 (与
 # generate_qlib_ground_truth.py OUT_DIR_BASE 同源).
 QLIB_BT_BASE = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
-MLEARNWEB_DB = Path(r"f:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db")
+_MLEARNWEB_DATA_ROOT = os.getenv("MLEARNWEB_DATA_ROOT")
+MLEARNWEB_DB = Path(
+    os.getenv(
+        "MLEARNWEB_DB_PATH",
+        str(
+            (Path(_MLEARNWEB_DATA_ROOT) / "db" / "mlearnweb.db")
+            if _MLEARNWEB_DATA_ROOT
+            else Path(r"f:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db")
+        ),
+    )
+)
 VNPY_EQUITY_JOURNAL_DB = Path(
     os.getenv(
         "VNPY_STRATEGY_EQUITY_JOURNAL_DB",
-        r"D:/vnpy_data/state/strategy_equity_journal.db",
+        str(strategy_equity_journal_db_path()),
     )
 )
 OUT_DIR = Path(__file__).resolve().parent / "result"
@@ -144,7 +156,7 @@ def main(strategy_name: str = "csi300_lgb_headless"):
     ax.set_ylabel("累积收益率 (%)", fontsize=11)
     ax.set_title(
         f"vnpy 回放 vs qlib backtest 累积收益率对比 — strategy={strategy_name}\n"
-        f"同 D:/vnpy_data 数据源 / 同 bundle / qlib deal_price=$open / 重叠 {len(overlap)} 个交易日 ({overlap[0].date()} ~ {overlap[-1].date()})",
+        f"同 {vnpy_data_root().as_posix()} 数据源 / 同 bundle / qlib deal_price=$open / 重叠 {len(overlap)} 个交易日 ({overlap[0].date()} ~ {overlap[-1].date()})",
         fontsize=12,
     )
     ax.legend(loc="upper left", fontsize=10)

@@ -1,6 +1,6 @@
 """为 vnpy E2E 测试生成 qlib backtest ground truth.
 
-用 D:/vnpy_data/qlib_data_bin 作为 provider_uri (与 vnpy 推理同源) 跑 qlib
+用 ${VNPY_DATA_ROOT}/qlib_data_bin 作为 provider_uri (与 vnpy 推理同源) 跑 qlib
 TopkDropoutStrategy backtest, 输出 vnpy 实盘回放 E2E 测试需要的 ground truth:
   - {OUT_DIR_BASE}/{strategy_name}/pred.pkl                  qlib 端推理结果
   - {OUT_DIR_BASE}/{strategy_name}/positions_normal_1day.pkl 每日 Position 对象
@@ -47,6 +47,8 @@ from pathlib import Path
 
 import pandas as pd
 
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, r"f:/Quant/code/qlib_strategy_dev/vendor/qlib_strategy_core")
 sys.path.insert(0, r"f:/Quant/code/qlib_strategy_dev")  # 让 factor_factory.alphas.* 能导入
 
@@ -56,6 +58,7 @@ install_finder()
 
 import qlib  # noqa: E402
 from qlib_strategy_core.inference import predict_from_bundle  # noqa: E402
+from vnpy_common.data_paths import data_path, filtered_snapshots_dir  # noqa: E402
 
 # 默认值仅作 fallback (单 bundle 老用法), 双 bundle 时**必须**显式传
 # --strategy-name + BUNDLE_DIR env 否则两次跑会共用一个子目录互相覆盖.
@@ -66,13 +69,13 @@ DEFAULT_BUNDLE_DIR = Path(
         r"f:/Quant/code/qlib_strategy_dev/qs_exports/rolling_exp/f6017411b44c4c7790b63c5766b93964",
     )
 )
-PROVIDER_URI = r"D:/vnpy_data/qlib_data_bin"
+PROVIDER_URI = str(data_path("qlib_data_bin"))
 OUT_DIR_BASE = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
 
 # 与训练时 PortAnaRecord config 对齐 (reproduce.stdout.log:76-94)
 BACKTEST_KWARGS = {
     "account": 1_000_000,
-    # D:/vnpy_data/qlib_data_bin 不含指数代码 (000300.SH)，daily_ingest 只 dump csi300
+    # VNPY_DATA_ROOT/qlib_data_bin 不含指数代码 (000300.SH)，daily_ingest 只 dump csi300
     # 成分股数据。benchmark 仅用于算 excess return，我们对比 positions/sells/buys，
     # 用 csi300 内任意股代替即可不影响 backtest 决策。
     "benchmark": "600519.SH",  # 茅台，csi300 大盘股
@@ -129,6 +132,8 @@ def main() -> int:
         help="策略名 (决定输出子目录: {OUT_DIR_BASE}/{strategy_name}/). "
              "双 bundle 时必须传, 否则两次跑会写到同一子目录导致后跑覆盖前跑.",
     )
+    parser.add_argument("--start-time", default=START_TIME, help="Backtest start date, YYYY-MM-DD.")
+    parser.add_argument("--end-time", default=END_TIME, help="Backtest end date, YYYY-MM-DD.")
     args = parser.parse_args()
 
     bundle_dir = DEFAULT_BUNDLE_DIR  # env BUNDLE_DIR 在模块顶部已经解析进来
@@ -147,7 +152,7 @@ def main() -> int:
         (bundle_dir / "filter_config.json").read_text(encoding="utf-8")
     )
     filter_id = filter_cfg["filter_id"]
-    filter_dir = Path(r"D:/vnpy_data/snapshots/filtered")
+    filter_dir = filtered_snapshots_dir()
     pattern = _re.compile(rf"^{_re.escape(filter_id)}_(\d{{8}})\.parquet$")
     candidates = []
     for entry in filter_dir.iterdir():
@@ -164,15 +169,15 @@ def main() -> int:
     print(f"[ground_truth] filter_id = {filter_id}")
     print(f"[ground_truth] filter_parquet (最新 snapshot) = {latest_path.name}")
 
-    # 1. 用 D:/vnpy_data/qlib_data_bin 初始化 qlib
+    # 1. 用 VNPY_DATA_ROOT/qlib_data_bin 初始化 qlib
     # kernels=2 限制 joblib worker 数量, 避免 30+ worker 各 200MB 拉爆 Windows page file
     qlib.init(provider_uri=PROVIDER_URI, region="cn", kernels=2)
 
     # 2. 用 bundle 推理拿 pred (live_end=END_TIME, lookback 大点 cover 整个回放区间)
-    print(f"=== Step 1: predict_from_bundle ({START_TIME} ~ {END_TIME}) ===")
+    print(f"=== Step 1: predict_from_bundle ({args.start_time} ~ {args.end_time}) ===")
     pred_df, task = predict_from_bundle(
         bundle_dir=bundle_dir,
-        live_end=pd.Timestamp(END_TIME),
+        live_end=pd.Timestamp(args.end_time),
         lookback_days=160,  # 160 天回看, 覆盖整个回放区间
         handler_overrides={
             "filter_parquet": str(latest_path),
@@ -195,8 +200,8 @@ def main() -> int:
 
     # backtest segment = 重叠的回放区间
     pred_dates = pred_df.index.get_level_values(0)
-    bt_start = max(pd.Timestamp(START_TIME), pred_dates.min())
-    bt_end = min(pd.Timestamp(END_TIME), pred_dates.max())
+    bt_start = max(pd.Timestamp(args.start_time), pred_dates.min())
+    bt_end = min(pd.Timestamp(args.end_time), pred_dates.max())
 
     portfolio_metric, indicator = normal_backtest(
         executor=EXECUTOR_CONFIG,
@@ -226,7 +231,7 @@ def main() -> int:
         }
         print(f"  {d.date()}: holdings={list(holdings.keys())}")
 
-    print(f"\n[OK] qlib backtest with D:/vnpy_data/qlib_data_bin done.")
+    print(f"\n[OK] qlib backtest with {PROVIDER_URI} done.")
     print(f"     ground truth dir: {out_dir}")
     return 0
 

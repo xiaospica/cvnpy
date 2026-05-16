@@ -20,6 +20,7 @@ from typing import Optional, Tuple
 import pandas as pd
 
 from vnpy.trader.utility import extract_vt_symbol
+from vnpy_common.data_paths import merged_snapshots_dir
 
 from ..utils import From_VN_Exchange_map
 from .base import BarQuote, SimBarSource
@@ -49,13 +50,13 @@ class MergedParquetBarSource(SimBarSource):
 
     def __init__(
         self,
-        merged_root: str = r"D:\vnpy_data\snapshots\merged",
+        merged_root: str = "",
         reference_kind: str = "today_open",
         fallback_days: int = 10,
         stale_warn_hours: int = 48,
         cache_max: int = 3,
     ) -> None:
-        self.merged_root = Path(merged_root)
+        self.merged_root = Path(merged_root) if merged_root else merged_snapshots_dir()
         self.reference_kind = reference_kind
         self.fallback_days = int(fallback_days)
         self.stale_warn_hours = float(stale_warn_hours)

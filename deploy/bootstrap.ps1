@@ -3,7 +3,7 @@
 # 干啥:
 #   一台空 Windows server 上从零跑通推理端 stack 的最少必要步骤. 涵盖:
 #     1. 前置检查 (Python 解释器 / NSSM / 7zip / .env / yaml)
-#     2. 数据目录创建 (${VNPY_DATA_ROOT}, ML_OUTPUT_ROOT, LOG_ROOT, 备份盘)
+#     2. 数据目录创建 (${VNPY_DATA_ROOT} 及其 ml_output/logs/backups 子目录)
 #     3. Python 依赖安装 (vnpy 主 + 推理子两个 env, 关键 wheel)
 #     4. (可选) NTP 同步 (configure_ntp.ps1)
 #     5. (可选) NSSM 服务化 (install_services.ps1)

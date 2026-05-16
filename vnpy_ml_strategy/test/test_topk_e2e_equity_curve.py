@@ -24,12 +24,18 @@ from __future__ import annotations
 import os
 import pickle
 import sqlite3
+import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pandas as pd
 import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from vnpy_common.data_paths import strategy_equity_journal_db_path  # noqa: E402
 
 
 # E2E 切策略 (默认 csi300_lgb_headless): set E2E_STRATEGY_NAME=...
@@ -39,7 +45,11 @@ QLIB_BT_REPORT = (
     Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
     / _STRATEGY_NAME / "report_normal_1day.pkl"
 )
-MLEARNWEB_DB = Path(r"f:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db")
+VNPY_EQUITY_DB = Path(os.environ.get(
+    "E2E_VNPY_EQUITY_DB",
+    str(strategy_equity_journal_db_path()),
+))
+MLEARNWEB_DB = VNPY_EQUITY_DB  # legacy skip-message compatibility
 INIT_CASH = 1_000_000.0
 
 
@@ -55,12 +65,12 @@ def qlib_equity_curve() -> Dict[date, float]:
 @pytest.fixture(scope="module")
 def vnpy_equity_curve() -> Dict[date, float]:
     """vnpy 回放 strategy_equity_snapshots replay_settle 转 {date: total_value}."""
-    if not MLEARNWEB_DB.exists():
+    if not VNPY_EQUITY_DB.exists():
         pytest.skip(f"mlearnweb db 不存在: {MLEARNWEB_DB}")
-    conn = sqlite3.connect(str(MLEARNWEB_DB))
+    conn = sqlite3.connect(str(VNPY_EQUITY_DB))
     cur = conn.cursor()
     cur.execute(
-        """SELECT ts, strategy_value FROM strategy_equity_snapshots
+        """SELECT ts, strategy_value FROM strategy_equity_journal
            WHERE strategy_name=? AND source_label='replay_settle'
            ORDER BY ts ASC""",
         (_STRATEGY_NAME,),

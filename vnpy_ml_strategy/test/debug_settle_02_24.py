@@ -21,13 +21,15 @@ _ROOT = _HERE.parents[2]  # vnpy_strategy_dev
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "vendor" / "qlib_strategy_core"))
 
+from vnpy_common.data_paths import merged_snapshots_dir, state_dir
+
 from vnpy.event import EventEngine
 from vnpy.trader.constant import Direction, Exchange, Offset, OrderType, Status
 from vnpy.trader.object import OrderRequest, TradeData, OrderData
 
 from vnpy_qmt_sim import QmtSimGateway
 
-SIM_DB = Path(r"F:/Quant/vnpy/vnpy_strategy_dev/vnpy_qmt_sim/.trading_state/sim_QMT_SIM_csi300.db")
+SIM_DB = state_dir() / "sim_QMT_SIM_csi300.db"
 
 
 def _vt2symbol_exchange(vt: str):
@@ -48,7 +50,7 @@ def main():
         "报单上报延迟毫秒": 0,
         "卖出持仓不足拒单": "是",
         "行情源": "merged_parquet",
-        "merged_parquet_merged_root": r"D:/vnpy_data/snapshots/merged",
+        "merged_parquet_merged_root": str(merged_snapshots_dir()),
         "merged_parquet_reference_kind": "today_open",
         "merged_parquet_fallback_days": 10,
         "merged_parquet_stale_warn_hours": 48,

@@ -5,7 +5,7 @@ Bug 2 (template.py:486) 历史 bug：
 修复后:
   weight = risk_degree / len(sel_df)   # 正确 0.95/7 = 13.57%
 
-D:/ml_output/csi300_lgb_headless/{yyyymmdd}/selections.parquet 86+ 个文件需要回填。
+${VNPY_DATA_ROOT}/ml_output/csi300_lgb_headless/{yyyymmdd}/selections.parquet 86+ 个文件需要回填。
 """
 from __future__ import annotations
 import sys
@@ -13,7 +13,13 @@ from pathlib import Path
 
 import pandas as pd
 
-OUTPUT_ROOT = Path(r"D:/ml_output")
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from vnpy_common.data_paths import ml_output_root  # noqa: E402
+
+OUTPUT_ROOT = ml_output_root()
 RISK_DEGREE = 0.95
 
 

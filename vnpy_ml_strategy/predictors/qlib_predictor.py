@@ -321,6 +321,7 @@ class QlibPredictor:
         env["PYTHONPATH"] = str(self.core_path) + (os.pathsep + existing if existing else "")
         # 让子进程 stdout/stderr 用 UTF-8, 避免 Windows GBK 和 qlib 中文输出打架
         env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("POLARS_SKIP_CPU_CHECK", "1")
 
         # P1-5: monitored runner (RSS + 超时双监控) 替代 subprocess.run.
         # OOM / timeout 抛 InferenceOOM / InferenceTimeout, 由调用方分支处理.
@@ -426,6 +427,7 @@ class QlibPredictor:
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(self.core_path) + (os.pathsep + existing if existing else "")
         env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("POLARS_SKIP_CPU_CHECK", "1")
 
         # P1-5: monitored runner (RSS + 超时双监控) 替代 subprocess.run.
         result = _run_subprocess_monitored(
