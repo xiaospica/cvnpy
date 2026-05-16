@@ -30,6 +30,12 @@ from pathlib import Path
 import redis
 from sqlalchemy import create_engine, text
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from vnpy_common.data_paths import strategy_equity_journal_db_path  # noqa: E402
+
 
 def resolve_setting_path(template_path: Path) -> Path:
     """优先 ``.local.json`` 副本（含真实密码、加 .gitignore），fallback 到模板。"""
@@ -91,25 +97,24 @@ def purge_sim_db(setting: dict) -> None:
             print(f"[sim] 跳过 {p}（不存在）")
 
 
-def purge_replay_history(setting: dict) -> None:
-    """Clear vnpy replay equity snapshots for the configured strategy."""
+def purge_strategy_equity_journal(setting: dict) -> None:
+    """Clear vnpy strategy equity journal rows for the configured strategy."""
     stg = setting["strategy_name"]
-    state_dir = Path(setting.get("sim", {}).get("db_dir", r"D:/vnpy_data/state"))
-    db_path = state_dir / "replay_history.db"
+    db_path = strategy_equity_journal_db_path()
     if not db_path.exists():
-        print(f"[replay-history] skip {db_path} (not exists)")
+        print(f"[strategy-equity-journal] skip {db_path} (not exists)")
         return
 
     try:
         with sqlite3.connect(str(db_path), timeout=20.0) as conn:
             res = conn.execute(
-                "DELETE FROM replay_equity_snapshots WHERE strategy_name=?",
+                "DELETE FROM strategy_equity_journal WHERE strategy_name=?",
                 (stg,),
             )
             conn.commit()
-        print(f"[replay-history] DELETE strategy_name='{stg}' -> {res.rowcount} rows")
+        print(f"[strategy-equity-journal] DELETE strategy_name='{stg}' -> {res.rowcount} rows")
     except sqlite3.Error as exc:
-        print(f"[replay-history] delete failed {db_path}: {exc}")
+        print(f"[strategy-equity-journal] delete failed {db_path}: {exc}")
 
 
 def warn_port_holders(setting: dict) -> None:
@@ -164,7 +169,7 @@ def main() -> None:
     parser.add_argument("--skip-mysql", action="store_true")
     parser.add_argument("--skip-redis", action="store_true")
     parser.add_argument("--skip-sim-db", action="store_true")
-    parser.add_argument("--skip-replay-history", action="store_true")
+    parser.add_argument("--skip-equity-journal", action="store_true")
     args = parser.parse_args()
 
     setting = load_setting(Path(args.config))
@@ -178,8 +183,8 @@ def main() -> None:
         purge_redis(setting)
     if not args.skip_sim_db:
         purge_sim_db(setting)
-    if not args.skip_replay_history:
-        purge_replay_history(setting)
+    if not args.skip_equity_journal:
+        purge_strategy_equity_journal(setting)
 
     print("[purge] 完成")
 

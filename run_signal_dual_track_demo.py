@@ -66,6 +66,11 @@ if load_dotenv is not None:
     elif (_HERE / ".env").exists():
         load_dotenv(_HERE / ".env", override=False)
 
+from vnpy_common.data_paths import (  # noqa: E402
+    strategy_equity_journal_db_path,
+    vnpy_data_root,
+)
+
 
 DEFAULT_SETTING_PATH = (
     _HERE / "vnpy_signal_strategy_plus" / "test" / "redis_live_sim_setting.json"
@@ -90,18 +95,12 @@ def _resolve_sim_state_dir(setting: Dict[str, Any]) -> Path:
     sim_cfg = setting.get("sim", {}) or {}
     return Path(
         sim_cfg.get("db_dir")
-        or f"{os.environ.get('QS_DATA_ROOT', 'D:/vnpy_data')}/state"
+        or (vnpy_data_root() / "state")
     )
 
 
-def _configure_replay_history_db(setting: Dict[str, Any]) -> Path:
-    """Pin replay_history.db to the same directory as the sim account DBs."""
-    replay_db = Path(
-        os.environ.get("REPLAY_HISTORY_DB")
-        or (_resolve_sim_state_dir(setting) / "replay_history.db")
-    )
-    os.environ["REPLAY_HISTORY_DB"] = str(replay_db)
-    return replay_db
+def _strategy_equity_journal_db() -> Path:
+    return strategy_equity_journal_db_path()
 
 
 def _sim_setting(setting: Dict[str, Any], gateway_name: str) -> Dict[str, Any]:
@@ -110,8 +109,8 @@ def _sim_setting(setting: Dict[str, Any], gateway_name: str) -> Dict[str, Any]:
     connect_setting = dict(sim_cfg.get("connect_setting", {}) or {})
     connect_setting.setdefault("模拟资金", float(setting.get("initial_capital", 1_000_000.0)))
     connect_setting.setdefault("行情源", "merged_parquet")
-    qs_root = os.environ.get("QS_DATA_ROOT", "D:/vnpy_data")
-    connect_setting.setdefault("merged_parquet_merged_root", f"{qs_root}/snapshots/merged")
+    data_root = vnpy_data_root()
+    connect_setting.setdefault("merged_parquet_merged_root", str(data_root / "snapshots" / "merged"))
     connect_setting.setdefault("merged_parquet_reference_kind", "today_open")
     connect_setting.setdefault("merged_parquet_fallback_days", 10)
     connect_setting.setdefault("启用持久化", "是")
@@ -299,7 +298,7 @@ def _cleanup_demo_state(
     state_dir = Path(
         sim_cfg.get("db_dir")
         or (sim_cfg.get("connect_setting", {}) or {}).get("持久化目录")
-        or f"{os.environ.get('QS_DATA_ROOT', 'D:/vnpy_data')}/state"
+        or (vnpy_data_root() / "state")
     )
     for gw_name in gateway_names:
         for suffix in (".db", ".db-shm", ".db-wal", ".lock"):
@@ -311,26 +310,23 @@ def _cleanup_demo_state(
                 except OSError as exc:
                     print(f"  ⚠️ 删 {p} 失败: {exc}")
 
-    replay_db = Path(
-        os.environ.get("REPLAY_HISTORY_DB")
-        or (_resolve_sim_state_dir(setting) / "replay_history.db")
-    )
-    if replay_db.exists():
+    journal_db = _strategy_equity_journal_db()
+    if journal_db.exists():
         try:
-            con = sqlite3.connect(str(replay_db), timeout=2)
+            con = sqlite3.connect(str(journal_db), timeout=2)
             names = list(strategy_names)
             if names:
                 placeholders = ",".join("?" * len(names))
                 deleted = con.execute(
-                    f"DELETE FROM replay_equity_snapshots "
+                    f"DELETE FROM strategy_equity_journal "
                     f"WHERE strategy_name IN ({placeholders})",
                     names,
                 ).rowcount
                 con.commit()
-                print(f"  删 replay_history.db 策略快照: {deleted}")
+                print(f"  删 strategy_equity_journal.db 策略快照: {deleted}")
             con.close()
         except Exception as exc:
-            print(f"  ⚠️ 清 replay_history.db 失败: {exc}")
+            print(f"  ⚠️ 清 strategy_equity_journal.db 失败: {exc}")
 
     mlearnweb_db_path = os.getenv("MLEARNWEB_DB")
     if mlearnweb_db_path:
@@ -661,7 +657,7 @@ def _print_verification(
     state_dir = Path(
         sim_cfg.get("db_dir")
         or (sim_cfg.get("connect_setting", {}) or {}).get("持久化目录")
-        or f"{os.environ.get('QS_DATA_ROOT', 'D:/vnpy_data')}/state"
+        or (vnpy_data_root() / "state")
     )
     print("\n# (a) sim DB 隔离: 每个模拟 gateway 一个 sqlite")
     for gw_name in sim_gateway_names:
@@ -683,7 +679,14 @@ def _print_verification(
             "GROUP BY stg;"
         )
 
-    print("\n# (d) WebTrader")
+    print("\n# (d) strategy_equity_journal")
+    print(
+        f"  sqlite3 {_strategy_equity_journal_db()} "
+        "\"SELECT engine, strategy_name, source_label, COUNT(*), MIN(ts), MAX(ts) "
+        "FROM strategy_equity_journal GROUP BY engine, strategy_name, source_label\""
+    )
+
+    print("\n# (e) WebTrader")
     print("  http://127.0.0.1:8001/docs")
 
 
@@ -721,7 +724,7 @@ def main() -> None:
     parser.add_argument(
         "--no-cleanup",
         action="store_true",
-        help="跳过清理 sim DB、replay_history、shadow MySQL rows",
+        help="跳过清理 sim DB、strategy_equity_journal、shadow MySQL rows",
     )
     parser.add_argument(
         "--no-webtrader",
@@ -739,7 +742,7 @@ def main() -> None:
     if not setting_path.exists():
         raise FileNotFoundError(f"config not found: {setting_path}")
     setting = _load_json(setting_path)
-    replay_db = _configure_replay_history_db(setting)
+    journal_db = _strategy_equity_journal_db()
     source_stg = args.source_stg or str(setting.get("strategy_name") or "etf_rotation_basic")
     shadow_stg = args.shadow_stg or f"{source_stg}_shadow"
 
@@ -759,7 +762,7 @@ def main() -> None:
     print(f"模式:       {cfg['label']}")
     print(f"GATEWAYS:   {gateway_names}")
     print(f"STRATEGIES: {strategy_names}")
-    print(f"REPLAY_HISTORY_DB: {replay_db}")
+    print(f"strategy_equity_journal.db: {journal_db}")
     if cfg["mirror"]:
         print(f"MySQL mirror: {source_stg!r} -> {shadow_stg!r}")
     print()

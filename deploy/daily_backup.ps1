@@ -3,7 +3,7 @@
 # 备份范围 (按重要度由高到低):
 #   1. mlearnweb.db          — 训练记录 + 部署元数据 + 历史快照 (跨工程, 在监控端)
 #                              ⚠️ 跨机部署时由监控端独立备份, 推理端跳过
-#   2. replay_history.db     — vnpy 端本地回放权益历史 (A1/B2)
+#   2. strategy_equity_journal.db — vnpy 端本地策略权益 journal
 #   3. sim_<gateway>.db × N  — 模拟柜台状态 (持仓 / 资金 / 订单 / 成交)
 #   4. .vntrader/database.db — vnpy bar 数据库 (历史 K 线)
 #   5. .vntrader/vt_setting.json — tushare token / miniqmt 路径 / email 凭据
@@ -64,7 +64,7 @@ if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
 # 1. vnpy local SQLite journal/state
-foreach ($dbName in @("replay_history.db", "event_journal.db")) {
+foreach ($dbName in @("strategy_equity_journal.db", "event_journal.db")) {
     $dbPath = Join-Path $VnpyDataRoot "state\$dbName"
     if (Test-Path $dbPath) {
         Copy-Item $dbPath $staging -ErrorAction SilentlyContinue
@@ -75,7 +75,7 @@ foreach ($dbName in @("replay_history.db", "event_journal.db")) {
 }
 
 # 2. sim_<gateway>.db × N (模拟柜台状态; .lock 跳过)
-# [A2] state files live under ${VNPY_DATA_ROOT}/state/ with replay_history.db and event_journal.db.
+# [A2] state files live under ${VNPY_DATA_ROOT}/state/ with strategy_equity_journal.db and event_journal.db.
 $simStateDir = Join-Path $VnpyDataRoot "state"
 if (Test-Path $simStateDir) {
     $simDbs = Get-ChildItem $simStateDir -Filter "sim_*.db"

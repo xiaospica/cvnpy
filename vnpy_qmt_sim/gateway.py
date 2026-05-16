@@ -45,7 +45,8 @@ class QmtSimGateway(BaseGateway):
         "merged_parquet_fallback_days": 10,
         "merged_parquet_stale_warn_hours": 48,
         "启用持久化": "是",
-        # [A2] 默认放在 D:/vnpy_data/state/ 与其他状态文件 (replay_history.db)
+        # [A2] 默认放在 VNPY_DATA_ROOT/state/ 与其他状态文件
+        # (strategy_equity_journal.db)
         # 集中, 便于备份 / 跨机部署. 旧路径 vnpy_qmt_sim/.trading_state/ 已废弃,
         # 升级时 mv 即可 (无 DB schema 变化, 文件位置变化).
         "持久化目录": str(sim_state_dir()),

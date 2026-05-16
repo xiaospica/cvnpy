@@ -18,7 +18,6 @@ LEGACY_PATH_ENV_VARS = {
     "VNPY_MODEL_ROOT",
     "LOG_ROOT",
     "BACKUP_ROOT",
-    "REPLAY_HISTORY_DB",
     "ML_SNAPSHOT_DIR",
     "VNPY_QMT_SIM_TRADING_STATE",
 }
@@ -58,9 +57,8 @@ def state_dir() -> Path:
     return data_path("state")
 
 
-def replay_history_db_path() -> Path:
-    explicit = os.getenv("REPLAY_HISTORY_DB")
-    return Path(explicit).expanduser() if explicit else state_dir() / "replay_history.db"
+def strategy_equity_journal_db_path() -> Path:
+    return state_dir() / "strategy_equity_journal.db"
 
 
 def event_journal_db_path() -> Path:

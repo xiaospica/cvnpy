@@ -1452,6 +1452,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         adapter = MLStrategyReplayAdapter(self, gateway)
         controller = SimReplayController(
             gateway,
+            engine=APP_NAME,
             strategy_name=self.strategy_name,
             is_trade_day=self._is_trade_day,
             write_log=self.write_log,
@@ -1525,8 +1526,8 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
                 except Exception as exc:
                     self.write_log(f"[replay] day {day_iso} settle 失败: {exc}")
 
-            # 4. 写权益快照到本地 replay_history.db (A1/B2 解耦后的新路径,
-            # ts=回放逻辑日 15:00). mlearnweb 端 replay_equity_sync_service
+            # 4. 写权益快照到本地 strategy_equity_journal.db
+            # (ts=回放逻辑日 15:00). mlearnweb 端 strategy_equity_journal_sync_service
             # 通过 vnpy_webtrader endpoint 增量 fanout 拉.
             if gateway is not None:
                 self._persist_replay_equity_snapshot(day, gateway)
@@ -1536,9 +1537,9 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
     def _persist_replay_equity_snapshot(self, day: date, gateway: Any) -> None:
         """从 gateway 当前 cash + 持仓市值算出"按回放日"的权益值,写入**本地**
-        replay_history.db (A1/B2 解耦后的新路径).
+        strategy_equity_journal.db.
 
-        mlearnweb 端 replay_equity_sync_service 通过 vnpy_webtrader endpoint
+        mlearnweb 端 strategy_equity_journal_sync_service 通过 vnpy_webtrader endpoint
         增量 fanout 拉, UPSERT 到 mlearnweb.db.strategy_equity_snapshots
         (source_label=replay_settle).
 
@@ -1547,7 +1548,10 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
         """
         try:
             from datetime import datetime as _dt, time as _time
-            from .replay_history import write_snapshot
+            from vnpy_common.persistence.strategy_equity_journal import (
+                SOURCE_REPLAY_SETTLE,
+                write_snapshot,
+            )
 
             counter = gateway.td.counter
             cash = float(counter.capital - counter.frozen)
@@ -1566,7 +1570,9 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             # ts: 当日 15:00（A 股收盘）
             ts = _dt.combine(day, _time(hour=15, minute=0, second=0))
             ok = write_snapshot(
+                engine=APP_NAME,
                 strategy_name=self.strategy_name,
+                source_label=SOURCE_REPLAY_SETTLE,
                 ts=ts,
                 strategy_value=equity,
                 account_equity=equity,
@@ -1581,9 +1587,9 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
             # 首日成功写入时 log 一条便于 user 确认链路通
             if not getattr(self, "_replay_persist_logged_first", False):
                 self.write_log(
-                    f"[replay] 本地 replay_history.db 权益快照已开始写入 "
+                    f"[replay] 本地 strategy_equity_journal.db 权益快照已开始写入 "
                     f"(day={day} equity={equity:.0f}); mlearnweb 端 "
-                    f"replay_equity_sync_service 会按 5min 周期 fanout 拉"
+                    f"strategy_equity_journal_sync_service 会按周期 fanout 拉"
                 )
                 self._replay_persist_logged_first = True
         except Exception as exc:

@@ -1,36 +1,48 @@
-"""Persist live/sim-live daily equity facts into replay history.
-
-``MLEngine`` owns vnpy app lifecycle wiring. This service owns the concrete
-daily equity journaling rules so the engine does not grow order/account
-persistence details.
-"""
+"""Common live/sim-live EOD equity journal service."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time
 from typing import Any, Callable, Mapping, Optional, Tuple
 
 from loguru import logger
 
-from ..replay_history import write_snapshot
+from vnpy_common.persistence.strategy_equity_journal import (
+    SOURCE_BROKER_LIVE_CLOSE,
+    SOURCE_SIM_LIVE_SETTLE,
+    write_snapshot,
+)
 
 
-class EodEquityJournalService:
+@dataclass(frozen=True)
+class StrategyProvider:
+    engine: str
+    strategies: Mapping[str, Any]
+
+
+class StrategyEquityJournalService:
     """Journal one EOD equity snapshot per active strategy and trade day."""
 
     def __init__(
         self,
         *,
         main_engine: Any,
-        strategies: Mapping[str, Any],
-        is_trade_day: Callable[[date], bool],
+        is_trade_day: Optional[Callable[[date], bool]] = None,
         now_provider: Callable[[], datetime] = datetime.now,
     ) -> None:
         self.main_engine = main_engine
-        self.strategies = strategies
-        self.is_trade_day = is_trade_day
+        self.is_trade_day = is_trade_day or self._weekday_trade_day
         self.now_provider = now_provider
+        self._providers: list[StrategyProvider] = []
         self._persisted_keys: set[str] = set()
+
+    @staticmethod
+    def _weekday_trade_day(day: date) -> bool:
+        return day.weekday() < 5
+
+    def register_provider(self, *, engine: str, strategies: Mapping[str, Any]) -> None:
+        self._providers.append(StrategyProvider(engine=str(engine), strategies=strategies))
 
     def on_timer(self) -> None:
         """Run all EOD journal producers from the vnpy timer event."""
@@ -38,19 +50,23 @@ class EodEquityJournalService:
             self.persist_sim_live_eod_equity_from_settled_gateways()
             self.persist_broker_live_eod_equity_after_close()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[EodEquityJournal] timer failed: {}", exc)
+            logger.warning("[StrategyEquityJournal] timer failed: {}", exc)
 
-    def _running_strategies_for_gateway(self, gateway_name: str) -> list[Any]:
-        """Return active strategies bound to a gateway."""
-        out: list[Any] = []
-        for strat in self.strategies.values():
+    def _iter_strategies(self):
+        for provider in self._providers:
+            for strategy in provider.strategies.values():
+                yield provider.engine, strategy
+
+    def _running_strategies_for_gateway(self, gateway_name: str) -> list[tuple[str, Any]]:
+        out: list[tuple[str, Any]] = []
+        for engine, strat in self._iter_strategies():
             if getattr(strat, "gateway", "") != gateway_name:
                 continue
             if not getattr(strat, "inited", False):
                 continue
             if not getattr(strat, "trading", False):
                 continue
-            out.append(strat)
+            out.append((engine, strat))
         return out
 
     @staticmethod
@@ -86,7 +102,6 @@ class EodEquityJournalService:
         return cash + market_value, positions_count
 
     def _gateway_account_equity(self, gateway_name: str) -> Optional[Tuple[float, int]]:
-        """Return account-level total equity for non-sim gateways."""
         accounts = [
             acc for acc in self.main_engine.get_all_accounts()
             if getattr(acc, "gateway_name", "") == gateway_name
@@ -103,13 +118,13 @@ class EodEquityJournalService:
     def _write_eod_equity_snapshot(
         self,
         *,
+        engine: str,
         strat: Any,
         settle_day: date,
-        source: str,
+        source_label: str,
         equity: float,
         positions_count: int,
     ) -> bool:
-        """Write one strategy EOD equity row into vnpy replay_history.db."""
         raw_variables: dict[str, Any] = {}
         get_variables = getattr(strat, "get_variables", None)
         if callable(get_variables):
@@ -118,13 +133,15 @@ class EodEquityJournalService:
             except Exception:
                 pass
         raw_variables.update({
-            "journal_source": source,
+            "journal_source": source_label,
             "gateway": getattr(strat, "gateway", ""),
             "settle_date": settle_day.isoformat(),
         })
 
         ok = write_snapshot(
+            engine=engine,
             strategy_name=getattr(strat, "strategy_name", ""),
+            source_label=source_label,
             ts=datetime.combine(settle_day, dt_time(hour=15)),
             strategy_value=equity,
             account_equity=equity,
@@ -133,9 +150,10 @@ class EodEquityJournalService:
         )
         if ok:
             logger.info(
-                "[EodEquityJournal][{}] persisted source={} day={} equity={:.2f}",
+                "[StrategyEquityJournal][{}/{}] persisted source={} day={} equity={:.2f}",
+                engine,
                 getattr(strat, "strategy_name", ""),
-                source,
+                source_label,
                 settle_day,
                 equity,
             )
@@ -145,7 +163,7 @@ class EodEquityJournalService:
         """Persist sim-live EOD equity after QmtSimGateway has settled."""
         gateway_names = {
             getattr(strat, "gateway", "")
-            for strat in self.strategies.values()
+            for _, strat in self._iter_strategies()
             if getattr(strat, "gateway", "")
         }
         for gateway_name in gateway_names:
@@ -162,30 +180,25 @@ class EodEquityJournalService:
             if settle_day is None:
                 continue
             equity, positions_count = self._counter_equity(counter)
-            for strat in self._running_strategies_for_gateway(gateway_name):
+            for engine, strat in self._running_strategies_for_gateway(gateway_name):
                 key = (
-                    f"sim_live_settle:{gateway_name}:"
+                    f"{SOURCE_SIM_LIVE_SETTLE}:{engine}:{gateway_name}:"
                     f"{getattr(strat, 'strategy_name', '')}:{settle_day.isoformat()}"
                 )
                 if key in self._persisted_keys:
                     continue
                 if self._write_eod_equity_snapshot(
+                    engine=engine,
                     strat=strat,
                     settle_day=settle_day,
-                    source="sim_live_settle",
+                    source_label=SOURCE_SIM_LIVE_SETTLE,
                     equity=equity,
                     positions_count=positions_count,
                 ):
                     self._persisted_keys.add(key)
 
     def persist_broker_live_eod_equity_after_close(self) -> None:
-        """Persist broker live EOD equity after A-share close.
-
-        Real broker gateways do not expose ``counter.last_settle_date``. For
-        them, write one account-level total-asset point after 15:10 on trading
-        days. This matches the existing account_equity fallback semantics when
-        multiple strategies share the same broker account.
-        """
+        """Persist broker live EOD equity after A-share close."""
         now = self.now_provider()
         if now.time() < dt_time(hour=15, minute=10):
             return
@@ -195,7 +208,7 @@ class EodEquityJournalService:
 
         gateway_names = {
             getattr(strat, "gateway", "")
-            for strat in self.strategies.values()
+            for _, strat in self._iter_strategies()
             if getattr(strat, "gateway", "")
         }
         for gateway_name in gateway_names:
@@ -209,17 +222,18 @@ class EodEquityJournalService:
             if account_equity is None:
                 continue
             equity, positions_count = account_equity
-            for strat in self._running_strategies_for_gateway(gateway_name):
+            for engine, strat in self._running_strategies_for_gateway(gateway_name):
                 key = (
-                    f"broker_live_close:{gateway_name}:"
+                    f"{SOURCE_BROKER_LIVE_CLOSE}:{engine}:{gateway_name}:"
                     f"{getattr(strat, 'strategy_name', '')}:{settle_day.isoformat()}"
                 )
                 if key in self._persisted_keys:
                     continue
                 if self._write_eod_equity_snapshot(
+                    engine=engine,
                     strat=strat,
                     settle_day=settle_day,
-                    source="broker_live_close",
+                    source_label=SOURCE_BROKER_LIVE_CLOSE,
                     equity=equity,
                     positions_count=positions_count,
                 ):

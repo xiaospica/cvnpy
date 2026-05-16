@@ -25,7 +25,7 @@ P2-1 实盘 / 模拟双轨架构 — 一键演示脚本
     F:/Program_Home/vnpy/python.exe run_dual_track_demo.py --mode v3 --qmt-account YOUR_PAPER_ACCOUNT
 
 特性:
-- 启动前**自动清理**当前 demo 用到的 sim_db / ml_output / replay_history.db (无确认提示)
+- 启动前**自动清理**当前 demo 用到的 sim_db / ml_output / strategy_equity_journal.db (无确认提示)
 - 自动 spawn webtrader uvicorn 8001 (mlearnweb 通过此端拉数据)
 - 启动后提示如何启 mlearnweb 双 uvicorn + 前端
 - Ctrl+C 退出后给出验证 cmd (sim_db 行数 / 信号字节级 / 前端访问入口)
@@ -70,8 +70,8 @@ from vnpy_common.data_paths import (  # noqa: E402
     ensure_vnpy_data_env,
     ml_output_root,
     models_root,
-    replay_history_db_path,
     sim_state_dir,
+    strategy_equity_journal_db_path,
     vnpy_data_root,
 )
 
@@ -146,7 +146,7 @@ WEBTRADER_HTTP_PORT = 8001
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _cleanup_demo_state(strategy_names: List[str], gateway_names: List[str]) -> None:
-    """清理 demo 涉及的 sim_db / ml_output / replay_history.db.
+    """清理 demo 涉及的 sim_db / ml_output / strategy_equity_journal.db.
 
     与 scripts/reset_sim_state.py --all 等价的 inline 实现, 跳过 confirm.
     仅清 demo 涉及到的策略 / gateway, **不影响** 其他用户已有数据.
@@ -179,10 +179,10 @@ def _cleanup_demo_state(strategy_names: List[str], gateway_names: List[str]) -> 
             except OSError as exc:
                 print(f"  ⚠️ 删 {d} 失败: {exc}")
 
-    # 1c. replay_history.db (demo 重置后由 vnpy 端按需重写)
-    replay_db = replay_history_db_path()
+    # 1c. strategy_equity_journal.db (demo 重置后由 vnpy 端按需重写)
+    journal_db = strategy_equity_journal_db_path()
     for suffix in ("", "-shm", "-wal"):
-        p = Path(str(replay_db) + suffix)
+        p = Path(str(journal_db) + suffix)
         if p.exists():
             try:
                 p.unlink()
@@ -471,7 +471,7 @@ def _print_mlearnweb_hint(strategy_names: List[str]) -> None:
     print("    cd <mlearnweb-repo-root>   # 视部署机布局而定, 与本仓库无关")
     print("    start_mlearnweb.bat <python-3.11>")
     print()
-    print("# 2. 等待 ~5 min 让 replay_equity_sync_loop 拉到回放数据后, 浏览器访问:")
+    print("# 2. 等待 strategy_equity_journal_sync_loop 拉到回放数据后, 浏览器访问:")
     print("    http://localhost:5173/live-trading")
     print(f"    期望: 看到 {len(strategy_names)} 个策略卡片, 名字 = {strategy_names}")
     print("    带 mode badge (实盘红 / 模拟绿), 各自一条权益曲线")
@@ -508,9 +508,9 @@ def _print_verification(mode: str, strategy_names: List[str], gateway_names: Lis
         print(f"  \"")
         print(f"  # 期望: 全部 EQUAL (双轨信号同步)")
 
-    print("\n# (c) replay_history.db 回放权益已写本地 (A1/B2 解耦):")
-    print(f"  sqlite3 D:/vnpy_data/state/replay_history.db \\")
-    print(f"    \"SELECT strategy_name, COUNT(*), MIN(ts), MAX(ts) FROM replay_equity_snapshots GROUP BY strategy_name\"")
+    print("\n# (c) strategy_equity_journal.db 策略权益 journal 已写本地:")
+    print(f"  sqlite3 {_VNPY_DATA_ROOT}/state/strategy_equity_journal.db \\")
+    print(f"    \"SELECT engine, strategy_name, source_label, COUNT(*), MIN(ts), MAX(ts) FROM strategy_equity_journal GROUP BY engine, strategy_name, source_label\"")
 
     print("\n# (d) mlearnweb 拉到 (启 mlearnweb 等 5 min 后):")
     print(f"  sqlite3 $MLEARNWEB_DB \\")
@@ -538,7 +538,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--no-cleanup", action="store_true",
-        help="跳过自动清理 (默认会清 sim_db / ml_output / replay_history.db / mlearnweb.db demo 行)",
+        help="跳过自动清理 (默认会清 sim_db / ml_output / strategy_equity_journal.db / mlearnweb.db demo 行)",
     )
     args = parser.parse_args()
 

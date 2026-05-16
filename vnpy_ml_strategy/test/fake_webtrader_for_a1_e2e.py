@@ -1,7 +1,7 @@
 """[A1 E2E 验证用] 极简 fake webtrader uvicorn 服务,模拟 vnpy 节点对外 HTTP API.
 
-绕过 vnpy MainEngine + RPC server, 直接 import replay_history.list_snapshots.
-仅暴露 mlearnweb 当前所有 ml_snapshot_loop / replay_equity_sync_loop / health
+绕过 vnpy MainEngine + RPC server, 直接读取 common strategy equity journal.
+仅暴露 mlearnweb 当前所有 ml_snapshot_loop / strategy_equity_journal_sync_loop / health
 discovery 用到的端点, 让 mlearnweb 端能完整跑通 fanout sync 链路验证.
 
 ⚠️ 仅用于 A1 E2E 冒烟. 不是生产代码 — vnpy_webtrader 真实实现见
@@ -26,7 +26,7 @@ import uvicorn
 
 # parents[2] = vnpy_strategy_dev repo root (本文件在 vnpy_ml_strategy/test/)
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from vnpy_ml_strategy.replay_history import list_snapshots
+from vnpy_common.persistence.strategy_equity_journal import list_snapshots
 
 
 app = FastAPI(title="fake_webtrader (A1 E2E 验证)")
@@ -49,7 +49,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 @app.get("/api/v1/ml/health")
 async def ml_health() -> Dict[str, Any]:
-    """返回 (注入到 replay_history.db 的) 策略列表.
+    """返回 (注入到 strategy_equity_journal.db 的) 策略列表.
 
     真实 vnpy_webtrader.routes_ml 用 unwrap_result() 解包 envelope, 直接返
     内层 data; 这里 fake 也不包 envelope, 与真实行为一致.
@@ -58,6 +58,7 @@ async def ml_health() -> Dict[str, Any]:
         "strategies": [
             {
                 "name": "csi300_lgb_headless",
+                "engine": "MlStrategy",
                 "last_run_date": "",
                 "last_status": "ok",
                 "last_error": "",
@@ -67,6 +68,7 @@ async def ml_health() -> Dict[str, Any]:
             },
             {
                 "name": "csi300_lgb_headless_2",
+                "engine": "MlStrategy",
                 "last_run_date": "",
                 "last_status": "ok",
                 "last_error": "",
@@ -78,16 +80,24 @@ async def ml_health() -> Dict[str, Any]:
     }
 
 
-# ---- A1 新增的回放权益快照 ----
+# ---- 通用策略权益 journal ----
 
-@app.get("/api/v1/ml/strategies/{name}/replay/equity_snapshots")
-async def ml_replay_equity_snapshots(
-    name: str,
+@app.get("/api/v1/strategy/equity-journal")
+async def strategy_equity_journal(
+    engine: str,
+    strategy_name: str,
     since: Optional[str] = Query(None),
+    source_label: Optional[str] = Query(None),
     limit: int = Query(10000, ge=1, le=100000),
 ) -> List[Dict[str, Any]]:
-    """直接调 vnpy 端的 replay_history.list_snapshots."""
-    return list_snapshots(name, since_iso=since, limit=limit)
+    """直接读取 vnpy 端 strategy_equity_journal.db."""
+    return list_snapshots(
+        engine=engine,
+        strategy_name=strategy_name,
+        source_label=source_label,
+        since_ts=since,
+        limit=limit,
+    )
 
 
 # ---- 兜底: mlearnweb 其他 loop 调到的端点不要 500, 返空就行 (无 envelope) ----
@@ -130,5 +140,5 @@ async def node_info() -> Dict[str, Any]:
 
 if __name__ == "__main__":
     print("[fake_webtrader] 启动在 http://127.0.0.1:8001")
-    print("[fake_webtrader] /api/v1/ml/strategies/<name>/replay/equity_snapshots 直读 D:/vnpy_data/state/replay_history.db")
+    print("[fake_webtrader] /api/v1/strategy/equity-journal 直读 VNPY_DATA_ROOT/state/strategy_equity_journal.db")
     uvicorn.run(app, host="127.0.0.1", port=8001, log_level="warning")

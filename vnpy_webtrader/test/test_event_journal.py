@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vnpy_webtrader.event_journal import append_event, list_events
+from vnpy_common.persistence.event_journal import append_event, list_events
 
 
 def test_event_journal_append_and_list(tmp_path):

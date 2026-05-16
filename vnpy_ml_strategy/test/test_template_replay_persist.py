@@ -1,9 +1,7 @@
-"""[A1 Step 2a 闭环] 验证 template._persist_replay_equity_snapshot 真的把
-回放权益写到 replay_history.db (而非旧的 mlearnweb.db).
+"""Verify ML replay and live settlement write the common equity journal.
 
-这条测试是 A1/B2 解耦改动的最终防回归: 单元层面证明 vnpy 主进程在回放
-settle 后调用本方法, 数据落到 vnpy 本地 SQLite, 由 mlearnweb 端 sync
-service 接力同步.
+vnpy writes local ``strategy_equity_journal.db``; mlearnweb pulls it through
+webtrader and materializes chart snapshots.
 """
 from __future__ import annotations
 
@@ -20,12 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 @pytest.fixture
 def isolated_replay_db(tmp_path, monkeypatch):
-    """让 replay_history.db 写到 tmp_path (避免污染 D:/vnpy_data/state/)."""
-    db_path = tmp_path / "replay_history.db"
-    monkeypatch.setenv("REPLAY_HISTORY_DB", str(db_path))
-    # 清模块级 init 缓存, 让新 db_path 走 DDL
-    from vnpy_ml_strategy import replay_history
-    replay_history._init_done.clear()
+    """Redirect strategy_equity_journal.db to tmp_path."""
+    db_path = tmp_path / "state" / "strategy_equity_journal.db"
+    monkeypatch.setenv("VNPY_DATA_ROOT", str(tmp_path))
+    from vnpy_common.persistence import strategy_equity_journal
+
+    strategy_equity_journal._init_done.clear()
     return db_path
 
 
@@ -62,9 +60,13 @@ def _make_gateway_stub(cash: float, positions: list):
     return gateway
 
 
-def test_persist_writes_to_replay_history_db(isolated_replay_db):
-    """E2E 桩调用: 调 _persist_replay_equity_snapshot, 验证 replay_history.db 落了一行."""
-    from vnpy_ml_strategy.replay_history import count_snapshots, list_snapshots
+def test_persist_writes_to_strategy_equity_journal(isolated_replay_db):
+    """E2E stub call verifies one replay journal row is persisted."""
+    from vnpy_common.persistence.strategy_equity_journal import (
+        SOURCE_REPLAY_SETTLE,
+        count_snapshots,
+        list_snapshots,
+    )
 
     stub = _make_strategy_stub("csi300_test")
     gateway = _make_gateway_stub(
@@ -78,9 +80,18 @@ def test_persist_writes_to_replay_history_db(isolated_replay_db):
     stub._persist_replay_equity_snapshot(date(2026, 4, 30), gateway)
 
 
-    # 验证 replay_history.db 有了一行
-    assert count_snapshots("csi300_test", db_path=isolated_replay_db) == 1
-    rows = list_snapshots("csi300_test", db_path=isolated_replay_db)
+    assert count_snapshots(
+        engine="MlStrategy",
+        strategy_name="csi300_test",
+        source_label=SOURCE_REPLAY_SETTLE,
+        db_path=isolated_replay_db,
+    ) == 1
+    rows = list_snapshots(
+        engine="MlStrategy",
+        strategy_name="csi300_test",
+        source_label=SOURCE_REPLAY_SETTLE,
+        db_path=isolated_replay_db,
+    )
     r = rows[0]
     # equity = (500_000) + (1000×100 + 5_000) + (500×200 + (-2_000)) = 500_000 + 105_000 + 98_000 = 703_000
     # 注意 cash = capital - frozen, capital 桩中已经按 cash + 持仓市值算
@@ -101,14 +112,22 @@ def test_persist_writes_to_replay_history_db(isolated_replay_db):
 
 def test_persist_no_positions(isolated_replay_db):
     """空仓场景: 仅 cash, market_value=0, equity=cash."""
-    from vnpy_ml_strategy.replay_history import list_snapshots
+    from vnpy_common.persistence.strategy_equity_journal import (
+        SOURCE_REPLAY_SETTLE,
+        list_snapshots,
+    )
 
     stub = _make_strategy_stub("csi300_empty")
     gateway = _make_gateway_stub(cash=1_000_000.0, positions=[])
 
     stub._persist_replay_equity_snapshot(date(2026, 4, 28), gateway)
 
-    rows = list_snapshots("csi300_empty", db_path=isolated_replay_db)
+    rows = list_snapshots(
+        engine="MlStrategy",
+        strategy_name="csi300_empty",
+        source_label=SOURCE_REPLAY_SETTLE,
+        db_path=isolated_replay_db,
+    )
     assert len(rows) == 1
     assert rows[0]["strategy_value"] == pytest.approx(1_000_000.0)
     assert rows[0]["positions_count"] == 0
@@ -116,7 +135,11 @@ def test_persist_no_positions(isolated_replay_db):
 
 def test_persist_idempotent_same_day(isolated_replay_db):
     """同一 day 多次调 _persist (重跑回放) 应保持 1 行 (UPSERT)."""
-    from vnpy_ml_strategy.replay_history import count_snapshots, list_snapshots
+    from vnpy_common.persistence.strategy_equity_journal import (
+        SOURCE_REPLAY_SETTLE,
+        count_snapshots,
+        list_snapshots,
+    )
 
     stub = _make_strategy_stub("csi300_idempotent")
     g1 = _make_gateway_stub(cash=1_000_000.0, positions=[])
@@ -125,16 +148,27 @@ def test_persist_idempotent_same_day(isolated_replay_db):
     stub._persist_replay_equity_snapshot(date(2026, 4, 30), g1)
     stub._persist_replay_equity_snapshot(date(2026, 4, 30), g2)
 
-    assert count_snapshots("csi300_idempotent", db_path=isolated_replay_db) == 1
-    rows = list_snapshots("csi300_idempotent", db_path=isolated_replay_db)
+    assert count_snapshots(
+        engine="MlStrategy",
+        strategy_name="csi300_idempotent",
+        source_label=SOURCE_REPLAY_SETTLE,
+        db_path=isolated_replay_db,
+    ) == 1
+    rows = list_snapshots(
+        engine="MlStrategy",
+        strategy_name="csi300_idempotent",
+        source_label=SOURCE_REPLAY_SETTLE,
+        db_path=isolated_replay_db,
+    )
     assert rows[0]["strategy_value"] == pytest.approx(1_050_000.0)
 
 
 def test_persist_does_not_raise_on_db_unavailable(monkeypatch, capfd):
     """db 路径写权限失败时, _persist 应只 log warn 不 raise (保护回放主循环)."""
-    monkeypatch.setenv("REPLAY_HISTORY_DB", "/nonexistent/dir/that/cannot/be/created/replay.db")
-    from vnpy_ml_strategy import replay_history
-    replay_history._init_done.clear()
+    monkeypatch.setenv("VNPY_DATA_ROOT", "Z:/nonexistent/dir/that/cannot/be/created")
+    from vnpy_common.persistence import strategy_equity_journal
+
+    strategy_equity_journal._init_done.clear()
 
     stub = _make_strategy_stub("csi300_db_fail")
     gateway = _make_gateway_stub(cash=1_000_000.0, positions=[])
@@ -144,9 +178,15 @@ def test_persist_does_not_raise_on_db_unavailable(monkeypatch, capfd):
 
 
 def test_service_persists_sim_live_eod_snapshot(isolated_replay_db):
-    """sim-live settlement should also journal EOD equity to replay_history.db."""
-    from vnpy_ml_strategy.replay_history import count_snapshots, list_snapshots
-    from vnpy_ml_strategy.services.eod_equity_journal import EodEquityJournalService
+    """sim-live settlement should also journal EOD equity."""
+    from vnpy_common.persistence.strategy_equity_journal import (
+        SOURCE_SIM_LIVE_SETTLE,
+        count_snapshots,
+        list_snapshots,
+    )
+    from vnpy_common.services.strategy_equity_journal_service import (
+        StrategyEquityJournalService,
+    )
 
     main_engine = MagicMock()
 
@@ -162,18 +202,28 @@ def test_service_persists_sim_live_eod_snapshot(isolated_replay_db):
     gateway.td.counter.last_settle_date = date(2026, 5, 15)
     main_engine.get_gateway.return_value = gateway
 
-    service = EodEquityJournalService(
+    service = StrategyEquityJournalService(
         main_engine=main_engine,
-        strategies=strategies,
         is_trade_day=lambda d: True,
     )
+    service.register_provider(engine="MlStrategy", strategies=strategies)
 
     service.persist_sim_live_eod_equity_from_settled_gateways()
     service.persist_sim_live_eod_equity_from_settled_gateways()
 
-    assert count_snapshots("csi300_live", db_path=isolated_replay_db) == 1
-    row = list_snapshots("csi300_live", db_path=isolated_replay_db)[0]
+    assert count_snapshots(
+        engine="MlStrategy",
+        strategy_name="csi300_live",
+        source_label=SOURCE_SIM_LIVE_SETTLE,
+        db_path=isolated_replay_db,
+    ) == 1
+    row = list_snapshots(
+        engine="MlStrategy",
+        strategy_name="csi300_live",
+        source_label=SOURCE_SIM_LIVE_SETTLE,
+        db_path=isolated_replay_db,
+    )[0]
     assert row["ts"] == "2026-05-15T15:00:00"
     assert row["strategy_value"] == pytest.approx(1_000_000.0)
-    assert row["raw_variables"]["journal_source"] == "sim_live_settle"
+    assert row["raw_variables"]["journal_source"] == SOURCE_SIM_LIVE_SETTLE
     assert row["raw_variables"]["settle_date"] == "2026-05-15"

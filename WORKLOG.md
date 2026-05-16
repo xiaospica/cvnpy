@@ -1,5 +1,48 @@
 # WORKLOG
 
+## 2026-05-16 通用策略权益 Journal 重构启动
+
+### 已确认结论
+
+- 日终权益 journal 必须是 vnpy 节点级通用事实源，不能只挂在 `vnpy_ml_strategy`。
+- webtrader 只负责读取并暴露事实源，不负责拥有事实数据写入。
+- 通用持久化统一放到 `vnpy_common/persistence/`。
+- 新权益库使用 `<VNPY_DATA_ROOT>/state/strategy_equity_journal.db`。
+- 不做向后兼容：旧 `replay_history.db`、旧 `REPLAY_HISTORY_DB` 默认入口、旧 ML replay equity API 都按新契约替换。
+
+### 本轮计划
+
+- 已新增 `IMPLEMENTATION_PLAN.md`，按 P0-P4 拆分通用持久化、通用 service、webtrader/mlearnweb 同步、测试和文档。
+- 第一阶段先实现 P0/P1：`strategy_equity_journal` 存储与通用日终权益 service。
+- 第二阶段改造 webtrader 与 mlearnweb sync，删除旧 ML 专用接口。
+
+### 注意事项
+
+- 当前工作区已有用户迁移文档造成的 `docs/architecture.md` 新文件与旧根目录文档删除，本轮只在此基础上增量补充。
+- 当前仍有两个本地策略 JSON 改动，不纳入 journal 重构：
+  - `vnpy_signal_strategy_plus/mysql_signal_setting.json`
+  - `vnpy_signal_strategy_plus/test/redis_live_sim_setting.json`
+
+### 2026-05-16 进展更新
+
+- 已将权益 journal 存储迁入 `vnpy_common/persistence/strategy_equity_journal.py`，DB 路径为 `<VNPY_DATA_ROOT>/state/strategy_equity_journal.db`。
+- 已将原 ML 专属日终权益 service 迁入 `vnpy_common/services/strategy_equity_journal_service.py`，并接入 `vnpy_ml_strategy` 与 `vnpy_signal_strategy_plus` 两个策略引擎。
+- 已将 webtrader 对外接口切换为 `/api/v1/strategy/equity-journal`，旧 ML replay equity endpoint 不再作为运行时契约。
+- 已将 mlearnweb 同步 loop 切换为 `strategy_equity_journal_sync_service`，按 `(node_id, engine, strategy_name, source_label)` 增量拉取 `replay_settle`、`sim_live_settle`、`broker_live_close`。
+- 已更新 `docs/architecture.md` 和 `AGENTS.md`，明确 vnpy 不直接写 mlearnweb.db、mlearnweb 只通过 webtrader 拉取事实源。
+
+待验证：
+- `vnpy_common/test/test_strategy_equity_journal.py`
+- `vnpy_ml_strategy/test/test_template_replay_persist.py`
+- `vnpy_qmt_sim/test/test_sim_replay_controller.py`
+- `mlearnweb/tests/test_backend/test_strategy_equity_journal_sync.py`
+
+验证结果：
+- `E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.exe -m pytest tests/test_backend/test_strategy_equity_journal_sync.py -q`：8 passed。
+- `F:\Program_Home\vnpy\python.exe -m pytest vnpy_common/test/test_strategy_equity_journal.py vnpy_ml_strategy/test/test_template_replay_persist.py vnpy_qmt_sim/test/test_sim_replay_controller.py -q`：12 passed。
+- `F:\Program_Home\vnpy\python.exe -m py_compile ...` 覆盖 webtrader/common/qmt_sim/脚本核心改动：通过。
+- `E:\ssd_backup\Pycharm_project\python-3.11.0-amd64\python.exe -m py_compile ...` 覆盖 mlearnweb live_main/client/sync/live_trading_service：通过。
+
 ## 2026-05-12 RedisLiveSim v2 前端收益率为 0
 
 背景：

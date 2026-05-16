@@ -248,24 +248,29 @@ class StrategyEngineAdapter:
             return StrategyOpResult(False, "初始化返回 False")
         return StrategyOpResult(True, "inited")
 
-    # ---- 回放权益快照 (引擎无关, 读本地 replay_history.db) -----------------
+    # ---- 通用策略权益 journal ---------------------------------------------
 
-    def get_replay_equity_snapshots(
+    def get_strategy_equity_journal(
         self,
         name: str,
         since: Optional[str] = None,
+        source_label: Optional[str] = None,
         limit: int = 10000,
     ) -> List[Dict[str, Any]]:
-        """读本地 replay_history.db 回放权益快照 (A1/B2 解耦).
+        """读取本引擎策略的通用权益 journal.
 
-        所有引擎通用 — 只要策略调用过 vnpy_ml_strategy.replay_history.write_snapshot,
-        mlearnweb 的 replay_equity_sync_service 就能通过本接口拉到数据.
+        Journal 由 ``vnpy_common.persistence.strategy_equity_journal`` 统一管理,
+        同时覆盖 replay_settle / sim_live_settle / broker_live_close 等来源。
         """
-        try:
-            from vnpy_ml_strategy.replay_history import list_snapshots
-        except ImportError:
-            return []
-        return list_snapshots(name, since_iso=since, limit=limit)
+        from vnpy_common.persistence.strategy_equity_journal import list_snapshots
+
+        return list_snapshots(
+            engine=self.app_name,
+            strategy_name=name,
+            source_label=source_label,
+            since_ts=since,
+            limit=limit,
+        )
 
     # ---- 通用健康检查 -------------------------------------------------------
 

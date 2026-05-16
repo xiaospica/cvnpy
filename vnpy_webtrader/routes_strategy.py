@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from .deps import get_access, get_fast_rpc_client, get_rpc_client, unwrap_result
@@ -99,6 +99,32 @@ def get_strategy(
     engine: str, name: str, access: bool = Depends(get_access)
 ) -> Dict[str, Any]:
     return unwrap_result(get_fast_rpc_client().get_strategy(engine, name))
+
+
+@router.get("/equity-journal")
+def list_strategy_equity_journal(
+    engine: str,
+    strategy_name: str,
+    since: Optional[str] = Query(
+        None,
+        description="ISO datetime; 仅返回 ts > since 的 journal 行",
+    ),
+    source_label: Optional[str] = Query(
+        None,
+        description="可选来源过滤: replay_settle / sim_live_settle / broker_live_close",
+    ),
+    limit: int = Query(10000, ge=1, le=100000),
+    access: bool = Depends(get_access),
+) -> List[Dict[str, Any]]:
+    """读取通用策略权益 journal.
+
+    该接口属于 strategy 域而不是 ML 域, 因为日终权益 journal 对所有策略引擎生效。
+    """
+    return unwrap_result(
+        get_fast_rpc_client().get_strategy_equity_journal(
+            engine, strategy_name, since, source_label, limit,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

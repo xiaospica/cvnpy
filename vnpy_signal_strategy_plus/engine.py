@@ -36,6 +36,9 @@ from vnpy.trader.constant import (
 )
 from vnpy.trader.utility import load_json, save_json, round_to
 from vnpy.trader.converter import OffsetConverter
+from vnpy_common.services.strategy_equity_journal_service import (
+    StrategyEquityJournalService,
+)
 
 from .base import APP_NAME
 from .template import SignalTemplatePlus
@@ -59,6 +62,13 @@ class SignalEnginePlus(BaseEngine):
         self.classes: Dict[str, Type[SignalTemplatePlus]] = {}
 
         self.offset_converter: OffsetConverter = OffsetConverter(self.main_engine)
+        self._strategy_equity_journal = StrategyEquityJournalService(
+            main_engine=self.main_engine,
+        )
+        self._strategy_equity_journal.register_provider(
+            engine=self.engine_name,
+            strategies=self.strategies,
+        )
 
     def init_engine(self) -> None:
         """
@@ -171,6 +181,7 @@ class SignalEnginePlus(BaseEngine):
 
     def process_timer_event(self, event: Event) -> None:
         """"""
+        self._strategy_equity_journal.on_timer()
         for strategy in self.strategies.values():
             if strategy.inited:
                 self.call_strategy_func(strategy, strategy.on_timer)

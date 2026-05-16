@@ -2,15 +2,15 @@
 
 用法:
     F:\\Program_Home\\vnpy\\python.exe scripts\\reset_sim_state.py              # 默认清持久化 + lock，不动 ml_output
-    F:\\Program_Home\\vnpy\\python.exe scripts\\reset_sim_state.py --all        # 持久化 + lock + ml_output + replay_history.db 全清（强制重新批量推理）
+    F:\\Program_Home\\vnpy\\python.exe scripts\\reset_sim_state.py --all        # 持久化 + lock + ml_output + strategy_equity_journal.db 全清
     F:\\Program_Home\\vnpy\\python.exe scripts\\reset_sim_state.py --dry-run    # 只显示会删什么，不实际删
     F:\\Program_Home\\vnpy\\python.exe scripts\\reset_sim_state.py --gateway QMT_SIM_csi300  # 只清单个 gateway
 
 清的位置:
     1. {trading_state}/sim_*.db / .db-shm / .db-wal / .lock  (账户/持仓/订单 SQLite)
     2. ml_output/{strategy_name}/  (--all 才清；包含 batch 推理产出 + selections)
-    3. {VNPY_DATA_ROOT}/state/replay_history.db  (--all 才清；vnpy 本地回放权益历史,
-       Phase 解耦 mlearnweb.db 后由 vnpy 端写本地 + mlearnweb fanout 拉)
+    3. {VNPY_DATA_ROOT}/state/strategy_equity_journal.db  (--all 才清；vnpy 本地策略权益 journal,
+       mlearnweb 通过 webtrader fanout 拉)
 
 不清的位置（给你保留）:
     - daily_merged_*.parquet 行情数据（你 tushare cron 拉的，不该动）
@@ -28,15 +28,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from vnpy_common.data_paths import ml_output_root, replay_history_db_path, sim_state_dir  # noqa: E402
+from vnpy_common.data_paths import (  # noqa: E402
+    ml_output_root,
+    sim_state_dir,
+    strategy_equity_journal_db_path,
+)
 
 # Default sim state and ML output locations are derived from VNPY_DATA_ROOT.
 TRADING_STATE_DIR = sim_state_dir()
 ML_OUTPUT_ROOT = ml_output_root()
 
-# --all also clears the replay history database.
-def _replay_history_db_path() -> Path:
-    return replay_history_db_path()
+# --all also clears the strategy equity journal database.
+def _strategy_equity_journal_db_path() -> Path:
+    return strategy_equity_journal_db_path()
 
 
 def _list_persistence_files(trading_dir: Path, gateway_filter: str | None) -> list[Path]:
@@ -88,16 +92,16 @@ def main() -> int:
     persist_files = _list_persistence_files(TRADING_STATE_DIR, args.gateway)
     ml_dirs = _list_ml_output_dirs(ML_OUTPUT_ROOT, args.gateway) if args.all else []
 
-    # --all 时把 replay_history.db (+ -shm / -wal) 也列入待删. --gateway 过滤
-    # 不适用此 db (它按 strategy_name 列存,所有策略共表;跨策略选择性删需要 SQL,
+    # --all 时把 strategy_equity_journal.db (+ -shm / -wal) 也列入待删.
+    # --gateway 过滤不适用此 db (它按 engine/strategy/source 列存,跨策略选择性删需要 SQL,
     # 不在本脚本范围. --gateway 场景下用户应自己 sqlite3 删行).
-    replay_db_files: list[Path] = []
+    journal_db_files: list[Path] = []
     if args.all and not args.gateway:
-        replay_db = _replay_history_db_path()
+        journal_db = _strategy_equity_journal_db_path()
         for suffix in ("", "-shm", "-wal"):
-            p = Path(str(replay_db) + suffix)
+            p = Path(str(journal_db) + suffix)
             if p.exists():
-                replay_db_files.append(p)
+                journal_db_files.append(p)
 
     print(f"trading_state 目录: {TRADING_STATE_DIR}")
     print(f"  待清文件 ({len(persist_files)}):")
@@ -116,19 +120,19 @@ def main() -> int:
         if not ml_dirs:
             print("    (无)")
 
-        print(f"\nreplay_history.db: {_replay_history_db_path()}")
-        print(f"  待清文件 ({len(replay_db_files)}):")
-        for p in replay_db_files:
+        print(f"\nstrategy_equity_journal.db: {_strategy_equity_journal_db_path()}")
+        print(f"  待清文件 ({len(journal_db_files)}):")
+        for p in journal_db_files:
             size = p.stat().st_size if p.exists() else 0
             print(f"    {p.name:40s} {size/1024:>8.1f} KB")
-        if not replay_db_files:
+        if not journal_db_files:
             print("    (无 — 文件不存在或 --gateway 过滤模式跳过)")
 
     if args.dry_run:
         print("\n[dry-run] 未实际删除")
         return 0
 
-    if not persist_files and not ml_dirs and not replay_db_files:
+    if not persist_files and not ml_dirs and not journal_db_files:
         print("\n无可清，退出")
         return 0
 
@@ -154,7 +158,7 @@ def main() -> int:
             print(f"  删 {d} 失败: {exc}")
             n_failed += 1
 
-    for p in replay_db_files:
+    for p in journal_db_files:
         try:
             p.unlink()
             print(f"  删 {p}")

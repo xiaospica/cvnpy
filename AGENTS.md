@@ -13,6 +13,7 @@
   - `vnpy_qmt/`: QMT 柜台接口
   - `vnpy/trader/`: 交易业务逻辑与数据结构
   - `vnpy/event/`: 事件驱动引擎
+  - `docs/architecture.md`: 本工程架构文档，涉及跨模块持久化、webtrader/mlearnweb 对接、策略权益 journal 等关键设计时必须同步更新
 
 ## 2. 编码规范 (Python)
 
@@ -56,6 +57,15 @@ A 股策略通常继承自 `CtaTemplate` 或自定义策略基类。
 - `OrderData`: 委托
 - `TradeData`: 成交
 - `PositionData`: 持仓 (注意区分 `Exchange.SSE` 和 `Exchange.SZSE`)
+
+### 3.4 数据根目录与持久化边界
+
+- 默认部署只配置 `VNPY_DATA_ROOT`，运行态默认路径都从该 root 派生：`state/`、`ml_output/`、`snapshots/`、`models/`、`logs/`、`backups/`。
+- 通用策略权益事实源固定为 `<VNPY_DATA_ROOT>/state/strategy_equity_journal.db`，读写入口是 `vnpy_common.persistence.strategy_equity_journal`。
+- 日终权益 journal 对所有策略引擎生效，不属于 ML 专属能力。回放、模拟实时、真实柜台收盘分别使用 `replay_settle`、`sim_live_settle`、`broker_live_close`，并且必须带 `(engine, strategy_name)`。
+- webtrader 对外只暴露通用接口 `/api/v1/strategy/equity-journal`；不要再新增或恢复 ML 专属 replay equity API。
+- 旧 `vnpy_ml_strategy/replay_history.py`、`REPLAY_HISTORY_DB`、`replay_history.db` 不再作为运行时契约使用；新增脚本、测试、文档不要继续依赖这些旧名。
+- vnpy 不直接写 mlearnweb.db。mlearnweb 通过 HTTP 拉取 vnpy 事实源并写自己的展示库，跨工程边界必须保持 HTTP/RPC 解耦。
 
 ## 4. 常用命令与操作
 

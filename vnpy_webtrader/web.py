@@ -139,7 +139,7 @@ from .routes_node import router as node_router
 from .routes_strategy import router as strategy_router
 from .routes_ml import router as ml_router
 from .routes_reference import router as reference_router
-from .event_journal import append_event, list_events
+from vnpy_common.persistence.event_journal import append_event, list_events
 
 
 # ---------------------------------------------------------------------------

@@ -99,7 +99,7 @@ class WebEngine(BaseEngine):
         self.server.register(self.get_ml_prediction_dates)
         self.server.register(self.get_ml_prediction_summary_by_date)
         self.server.register(self.get_ml_health)
-        self.server.register(self.get_ml_replay_equity_snapshots)
+        self.server.register(self.get_strategy_equity_journal)
 
     def start_server(self, rep_address: str, pub_address: str) -> None:
         """启动 RPC 服务器。"""
@@ -356,7 +356,7 @@ class WebEngine(BaseEngine):
 
         优先找 MlStrategy adapter; 若未注册则 fanout 到所有已注册 adapter,
         汇总各引擎的策略列表. 这样 SignalStrategyPlus / CtaStrategy 等非 ML
-        引擎的策略同样能被 mlearnweb replay_equity_sync_service 发现.
+        引擎的策略同样能被 mlearnweb strategy_equity_journal_sync_service 发现.
         """
         ml_adapter = self._ml_adapter()
         if ml_adapter is not None:
@@ -372,35 +372,38 @@ class WebEngine(BaseEngine):
                 pass
         return {"ok": True, "message": "", "data": {"strategies": all_strategies}}
 
-    def get_ml_replay_equity_snapshots(
+    def get_strategy_equity_journal(
         self,
+        engine: str,
         name: str,
         since: Optional[str] = None,
+        source_label: Optional[str] = None,
         limit: int = 10000,
     ) -> Dict[str, Any]:
-        """读本地 replay_history.db 回放权益快照 (A1/B2 解耦, 引擎无关).
+        """读取通用策略权益 journal.
 
-        优先走 MlStrategy adapter; 若未注册则在所有 adapter 中找持有该策略的引擎.
-        mlearnweb replay_equity_sync_service 用 since=local_max(inserted_at) 增量拉.
+        ``engine`` 是必选身份边界, 避免不同策略引擎出现同名策略时串数据。
+        mlearnweb 用 since=local_max(ts) 增量拉取。
         """
-        # 优先 MlStrategy adapter
-        ml_adapter = self._ml_adapter()
-        if ml_adapter is not None:
-            rows = ml_adapter.get_replay_equity_snapshots(name, since=since, limit=limit)
+        adapter = self.adapters.get(engine)
+        if adapter is not None:
+            rows = adapter.get_strategy_equity_journal(
+                name,
+                since=since,
+                source_label=source_label,
+                limit=limit,
+            )
             return {"ok": True, "message": "", "data": rows}
 
-        # Fallback: 遍历所有 adapter, 找持有该策略名的引擎
-        for adapter in self.adapters.values():
-            if adapter._exists(name):
-                rows = adapter.get_replay_equity_snapshots(name, since=since, limit=limit)
-                return {"ok": True, "message": "", "data": rows}
+        from vnpy_common.persistence.strategy_equity_journal import list_snapshots
 
-        # 策略不在任何引擎里也不报错, 直接读 replay_history.db
-        try:
-            from vnpy_ml_strategy.replay_history import list_snapshots
-            rows = list_snapshots(name, since_iso=since, limit=limit)
-        except ImportError:
-            rows = []
+        rows = list_snapshots(
+            engine=engine,
+            strategy_name=name,
+            source_label=source_label,
+            since_ts=since,
+            limit=limit,
+        )
         return {"ok": True, "message": "", "data": rows}
 
     # ------------------------------------------------------------------

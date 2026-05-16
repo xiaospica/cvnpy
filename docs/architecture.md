@@ -8,6 +8,79 @@
 
 VeighNa 采用了经典的 **微内核 + 插件 (Microkernel + Plugins)** 架构。系统的核心非常轻量，仅负责事件分发（EventEngine）和模块管理（MainEngine）。所有的业务逻辑——包括连接柜台（Gateway）和交易策略（App）——都作为插件挂载到内核上。
 
+### 1.0 本工程运行时边界与数据目录
+
+本工程在标准 vn.py 微内核之上增加了三个工程化边界：
+
+1. **策略引擎边界**：`vnpy_ml_strategy`、`vnpy_signal_strategy_plus`、CTA 等策略引擎都只负责本引擎内策略生命周期、订单路由和策略变量，不直接写监控端数据库。
+2. **webtrader 边界**：`vnpy_webtrader` 是 mlearnweb 唯一允许访问 vnpy 运行态的 HTTP/RPC 门面，负责鉴权、统一路由和跨策略引擎适配。
+3. **监控端边界**：mlearnweb 不 import vnpy 模块，不直连 vnpy SQLite 文件；它只通过 webtrader API 拉取事实源，再写自己的展示库。
+
+```mermaid
+flowchart LR
+    subgraph VNPY["vnpy_strategy_dev"]
+        ML["MlStrategy 引擎"]
+        SIG["SignalStrategyPlus 引擎"]
+        COMMON["vnpy_common<br/>路径解析 + 持久化服务"]
+        J[(VNPY_DATA_ROOT/state/<br/>strategy_equity_journal.db)]
+        WT["vnpy_webtrader<br/>/api/v1/strategy/equity-journal"]
+    end
+
+    subgraph WEB["mlearnweb"]
+        SYNC["strategy_equity_journal_sync_service"]
+        SNAP[(mlearnweb.db<br/>strategy_equity_snapshots)]
+        UI["live-trading 前端权益曲线"]
+    end
+
+    ML --> COMMON
+    SIG --> COMMON
+    COMMON --> J
+    WT --> J
+    SYNC --> WT
+    SYNC --> SNAP
+    SNAP --> UI
+```
+
+部署时默认只配置一个根目录：
+
+| 根目录 | 关键子路径 | 说明 |
+|---|---|---|
+| `VNPY_DATA_ROOT` | `state/strategy_equity_journal.db` | 所有策略引擎共用的权益事实源 |
+| `VNPY_DATA_ROOT` | `state/sim_<gateway>.db` | QMT_SIM 模拟柜台资金、持仓、订单、成交 |
+| `VNPY_DATA_ROOT` | `state/event_journal.db` | webtrader 事件/日志 journal |
+| `VNPY_DATA_ROOT` | `ml_output/` | ML 策略推理输出 |
+| `VNPY_DATA_ROOT` | `snapshots/`、`models/`、`logs/`、`backups/` | 行情快照、模型、日志、备份 |
+
+旧的 `QS_DATA_ROOT`、`ML_OUTPUT_ROOT` 等变量只作为高级覆盖或迁移提示，不再是默认部署入口；`REPLAY_HISTORY_DB` 与 `replay_history.db` 已退出运行时契约。
+
+### 1.0.1 通用策略权益 Journal
+
+`strategy_equity_journal.db` 是 vnpy 侧可重建监控曲线的事实源。它不是 ML 专属表，而是所有策略引擎共享的日终权益 journal。
+
+| 字段 | 含义 |
+|---|---|
+| `engine` | 策略引擎名，例如 `MlStrategy`、`SignalStrategyPlus` |
+| `strategy_name` | 策略实例名 |
+| `source_label` | 来源：`replay_settle`、`sim_live_settle`、`broker_live_close` |
+| `ts` | 交易逻辑日时间戳，通常为当日 15:00 |
+| `strategy_value` / `account_equity` | 用于曲线展示与收益计算的权益值 |
+| `raw_variables_json` | 策略变量、settle_date、gateway 等诊断信息 |
+
+写入入口统一为 `vnpy_common.persistence.strategy_equity_journal.write_snapshot()`：
+
+- **回放**：`SimReplayController` 或策略模板在每日 settle 后写 `replay_settle`。
+- **模拟实时**：`StrategyEquityJournalService` 监听 timer，在 QMT_SIM 的 `last_settle_date` 更新后写 `sim_live_settle`。
+- **真实柜台**：`StrategyEquityJournalService` 在交易日 15:10 后，从 `MainEngine.get_all_accounts()` / `get_all_positions()` 取账户权益写 `broker_live_close`。
+
+读取入口统一为 webtrader `/api/v1/strategy/equity-journal`。mlearnweb 的 `strategy_equity_journal_sync_service` 按 `(node_id, engine, strategy_name, source_label)` 增量拉取，并写入监控端 `strategy_equity_snapshots`。因此 mlearnweb 重启、换服务器或清空展示库后，只要 vnpy 节点与 `VNPY_DATA_ROOT` 还在，就可以重新补拉历史权益曲线。
+
+关键不变量：
+
+- journal 主身份必须包含 `(engine, strategy_name, source_label, ts)`，不能只用策略名。
+- vnpy 不能直接写 mlearnweb.db；跨工程同步只走 webtrader HTTP/RPC。
+- 前端和 mlearnweb 后端不解析 vnpy 原始订单/日志来推断权益；权益事实由 vnpy 后端归一后提供。
+- 旧 `vnpy_ml_strategy/replay_history.py`、`REPLAY_HISTORY_DB`、`/api/v1/ml/strategies/{name}/replay/equity_snapshots` 不再使用。
+
 ### 1.1 分层架构图
 
 ```mermaid

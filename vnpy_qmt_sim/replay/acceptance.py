@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from vnpy_common.data_paths import strategy_equity_journal_db_path
+
 
 DEFAULT_STRATEGIES = [
     "etf_rotation_basic",
@@ -21,7 +23,7 @@ DEFAULT_SQLITE_DBS = [
     Path(r"D:/vnpy_data/state/sim_QMT_SIM.db"),
     Path(r"D:/vnpy_data/state/sim_QMT_SIM_csi300.db"),
     Path(r"D:/vnpy_data/state/sim_QMT_SIM_csi300_2.db"),
-    Path(r"D:/vnpy_data/state/replay_history.db"),
+    strategy_equity_journal_db_path(),
     Path(r"F:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db"),
 ]
 
@@ -69,7 +71,7 @@ def export_sqlite(
             except Exception:
                 cols = []
             if table in {
-                "replay_equity_snapshots",
+                "strategy_equity_journal",
                 "strategy_equity_snapshots",
                 "ml_metric_snapshots",
                 "ml_prediction_daily",
@@ -292,7 +294,7 @@ def compare(args: argparse.Namespace) -> int:
         "sim_orders.jsonl",
         "sim_positions.jsonl",
         "sim_accounts.jsonl",
-        "replay_equity_snapshots.jsonl",
+        "strategy_equity_journal.jsonl",
         "strategy_equity_snapshots.jsonl",
         "stock_trade.jsonl",
     }

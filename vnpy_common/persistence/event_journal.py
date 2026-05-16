@@ -1,8 +1,5 @@
-"""SQLite event journal for webtrader WS/RPC events.
+"""SQLite event journal shared by webtrader and node services."""
 
-This is a lightweight fact source for small personal deployments. It stores
-events before websocket fanout so mlearnweb can backfill after restart.
-"""
 from __future__ import annotations
 
 import json
@@ -63,7 +60,15 @@ def _extract_strategy_name(data: Any) -> str:
     return ""
 
 
-def append_event(*, topic: str, node_id: str, engine: str = "", data: Any = None, event_ts: Optional[float] = None, db_path: Optional[Path] = None) -> Optional[int]:
+def append_event(
+    *,
+    topic: str,
+    node_id: str,
+    engine: str = "",
+    data: Any = None,
+    event_ts: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> Optional[int]:
     payload = data if isinstance(data, dict) else {"value": data}
     event_ts = float(event_ts or time.time())
     event_id = f"{node_id}:{topic}:{event_ts:.6f}:{uuid.uuid4().hex[:10]}"
@@ -91,9 +96,20 @@ def append_event(*, topic: str, node_id: str, engine: str = "", data: Any = None
         return None
 
 
-def list_events(*, since_seq: int = 0, limit: int = 1000, topic: str = "", strategy_name: str = "", db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
+def list_events(
+    *,
+    since_seq: int = 0,
+    limit: int = 1000,
+    topic: str = "",
+    strategy_name: str = "",
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
     limit = max(1, min(int(limit), 10000))
-    sql = "SELECT seq, event_id, topic, node_id, engine, strategy_name, event_ts, data_json, created_at FROM event_journal WHERE seq > ?"
+    sql = (
+        "SELECT seq, event_id, topic, node_id, engine, strategy_name, event_ts, "
+        "       data_json, created_at "
+        "FROM event_journal WHERE seq > ?"
+    )
     args: list[Any] = [int(since_seq)]
     if topic:
         sql += " AND topic = ?"

@@ -6,7 +6,11 @@ from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable, Iterable, Iterator, Protocol, Sequence
 
-from .snapshot import calculate_gateway_equity, resolve_replay_history_db, write_replay_snapshot
+from .snapshot import (
+    calculate_gateway_equity,
+    resolve_strategy_equity_journal_db,
+    write_replay_snapshot,
+)
 
 
 class ReplayStrategyAdapter(Protocol):
@@ -50,11 +54,13 @@ class SimReplayController:
         self,
         gateway: Any,
         *,
+        engine: str,
         strategy_name: str,
         is_trade_day: TradeDayPredicate | None = None,
         write_log: LogFunc | None = None,
     ) -> None:
         self.gateway = gateway
+        self.engine = engine
         self.strategy_name = strategy_name
         self.is_trade_day = is_trade_day or self._weekday_trade_day
         self.write_log = write_log or self._default_write_log
@@ -223,6 +229,7 @@ class SimReplayController:
             equity, positions_count = calculate_gateway_equity(self.gateway)
             ts = datetime.combine(day, time(hour=15))
             ok = write_replay_snapshot(
+                engine=self.engine,
                 strategy_name=self.strategy_name,
                 ts=ts,
                 strategy_value=equity,
@@ -238,7 +245,7 @@ class SimReplayController:
             elif not ok:
                 self.write_log(
                     f"[replay] write_snapshot({day}) returned False; "
-                    f"db={resolve_replay_history_db()}"
+                    f"db={resolve_strategy_equity_journal_db()}"
                 )
         except Exception as exc:
             self.write_log(f"[replay] write_snapshot({day}) failed: {type(exc).__name__}: {exc}")

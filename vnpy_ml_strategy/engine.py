@@ -20,6 +20,9 @@ from vnpy.event import EventEngine, Event, EVENT_TIMER
 from vnpy.trader.engine import BaseEngine, MainEngine
 
 from vnpy_common.scheduler import DailyTimeTaskScheduler
+from vnpy_common.services.strategy_equity_journal_service import (
+    StrategyEquityJournalService,
+)
 
 from .base import APP_NAME, EVENT_ML_METRICS, EVENT_ML_METRICS_ALERT, EVENT_ML_STRATEGY
 from .monitoring.cache import MetricsCache
@@ -27,7 +30,6 @@ from .monitoring.cache_loader import reload_history_from_disk
 from .monitoring.publisher import publish_metrics as _publish_metrics
 from .predictors.qlib_predictor import QlibPredictor
 from .predictors.model_registry import ModelRegistry
-from .services.eod_equity_journal import EodEquityJournalService
 from .services.ic_backfill import IcBackfillService, IcBackfillResult
 from .utils.trade_calendar import make_calendar
 
@@ -73,13 +75,16 @@ class MLEngine(BaseEngine):
         # pipeline 可在 run_daily_pipeline 里读此 flag, 若 failed 则发警告事件.
         self._last_ingest_status: Dict[str, Any] = {"status": "unknown"}
 
-        # Batch replay writes replay_history.db inside MLStrategyTemplate. Once
+        # Batch replay writes strategy_equity_journal.db inside MLStrategyTemplate. Once
         # a strategy enters live / sim-live mode, vnpy still needs a daily EOD
         # equity fact source so mlearnweb can rebuild curves after restart.
-        self._eod_equity_journal = EodEquityJournalService(
+        self._strategy_equity_journal = StrategyEquityJournalService(
             main_engine=self.main_engine,
-            strategies=self.strategies,
             is_trade_day=self.is_trade_day,
+        )
+        self._strategy_equity_journal.register_provider(
+            engine=APP_NAME,
+            strategies=self.strategies,
         )
 
     # ------------------------------------------------------------------
@@ -138,7 +143,7 @@ class MLEngine(BaseEngine):
 
     def _on_timer(self, event: Event) -> None:
         """Timer hook for live/sim-live EOD equity journaling."""
-        self._eod_equity_journal.on_timer()
+        self._strategy_equity_journal.on_timer()
 
     # ------------------------------------------------------------------
     # 策略生命周期 — 被 MLStrategyAdapter 调用 (Phase 2.6)

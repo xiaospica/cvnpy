@@ -80,10 +80,14 @@ class ExplicitAdapter:
 
 
 def test_dynamic_signal_replay_settles_gap_days(tmp_path, monkeypatch) -> None:
-    db_path = tmp_path / "replay_history.db"
-    monkeypatch.setenv("REPLAY_HISTORY_DB", str(db_path))
+    monkeypatch.setenv("VNPY_DATA_ROOT", str(tmp_path))
+    db_path = tmp_path / "state" / "strategy_equity_journal.db"
     gateway = FakeGateway()
-    controller = SimReplayController(gateway, strategy_name="etf_rotation_basic")
+    controller = SimReplayController(
+        gateway,
+        engine="SignalStrategyPlus",
+        strategy_name="etf_rotation_basic",
+    )
 
     controller.on_external_signal_day(date(2026, 1, 2))
     controller.mark_signal_day(date(2026, 1, 2))
@@ -101,18 +105,26 @@ def test_dynamic_signal_replay_settles_gap_days(tmp_path, monkeypatch) -> None:
 
     with sqlite3.connect(db_path) as conn:
         count = conn.execute(
-            "SELECT COUNT(*) FROM replay_equity_snapshots WHERE strategy_name=?",
-            ("etf_rotation_basic",),
+            "SELECT COUNT(*) FROM strategy_equity_journal WHERE engine=? AND strategy_name=?",
+            ("SignalStrategyPlus", "etf_rotation_basic"),
         ).fetchone()[0]
+        labels = conn.execute(
+            "SELECT DISTINCT source_label FROM strategy_equity_journal WHERE strategy_name=?",
+            ("etf_rotation_basic",),
+        ).fetchall()
     assert count == 3
+    assert labels == [("replay_settle",)]
 
 
 def test_explicit_replay_runs_adapter_hooks(tmp_path, monkeypatch) -> None:
-    db_path = tmp_path / "replay_history.db"
-    monkeypatch.setenv("REPLAY_HISTORY_DB", str(db_path))
+    monkeypatch.setenv("VNPY_DATA_ROOT", str(tmp_path))
     gateway = FakeGateway()
     adapter = ExplicitAdapter()
-    controller = SimReplayController(gateway, strategy_name="demo")
+    controller = SimReplayController(
+        gateway,
+        engine="SignalStrategyPlus",
+        strategy_name="demo",
+    )
 
     controller.run_explicit(date(2026, 1, 2), date(2026, 1, 6), adapter)
 

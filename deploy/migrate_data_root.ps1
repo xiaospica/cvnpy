@@ -7,7 +7,7 @@
     verifies, but never deletes legacy files.
 
     Target layout:
-      <VNPY_DATA_ROOT>\state\replay_history.db
+      <VNPY_DATA_ROOT>\state\strategy_equity_journal.db
       <VNPY_DATA_ROOT>\state\event_journal.db
       <VNPY_DATA_ROOT>\state\sim_<gateway>.db
       <VNPY_DATA_ROOT>\ml_output\
@@ -93,8 +93,8 @@ Add-Candidate $candidates "legacy_state_dir" "D:\vnpy_data\state" $stateRoot "di
 Add-Candidate $candidates "repo_trading_state" (Join-Path $VnpyRoot "vnpy_qmt_sim\.trading_state") $stateRoot "directory_merge"
 Add-Candidate $candidates "legacy_ml_output" "D:\ml_output" (Join-Path $DataRoot "ml_output") "directory"
 Add-Candidate $candidates "repo_ml_output" (Join-Path $VnpyRoot "ml_output") (Join-Path $DataRoot "ml_output") "directory"
-Add-Candidate $candidates "repo_replay_history" (Join-Path $VnpyRoot "replay_history.db") (Join-Path $stateRoot "replay_history.db") "file"
-Add-Candidate $candidates "qmt_sim_replay_history" (Join-Path $VnpyRoot "vnpy_qmt_sim\replay_history.db") (Join-Path $stateRoot "replay_history.db") "file"
+Add-Candidate $candidates "repo_strategy_equity_journal" (Join-Path $VnpyRoot "strategy_equity_journal.db") (Join-Path $stateRoot "strategy_equity_journal.db") "file"
+Add-Candidate $candidates "qmt_sim_strategy_equity_journal" (Join-Path $VnpyRoot "vnpy_qmt_sim\strategy_equity_journal.db") (Join-Path $stateRoot "strategy_equity_journal.db") "file"
 
 foreach ($extra in $ExtraLegacyPaths) {
     $leaf = Split-Path -Leaf $extra

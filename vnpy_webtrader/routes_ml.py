@@ -8,20 +8,18 @@
     GET /api/v1/ml/strategies/{name}/metrics?days=30
     GET /api/v1/ml/strategies/{name}/prediction/latest/summary
     GET /api/v1/ml/strategies/{name}/prediction/{yyyymmdd}
-    GET /api/v1/ml/strategies/{name}/replay/equity_snapshots?since=&limit=
     GET /api/v1/ml/health
 
 下游:
     - mlearnweb ``ml_snapshot_loop`` 按 60s 轮询 metrics/latest, prediction/...
-    - mlearnweb ``replay_equity_sync_service`` 按 5min 轮询 replay/equity_snapshots
-      (增量 fanout 拉, A1/B2 解耦后 vnpy 不再直写 mlearnweb.db)
+    - mlearnweb 通过 ``/api/v1/strategy/equity-journal`` 同步通用策略权益 journal
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
 from .deps import get_access, get_fast_rpc_client, unwrap_result
 
@@ -84,27 +82,6 @@ def ml_prediction_summary_by_date(
     pred_mean/std + n_symbols + model_run_id).
     """
     return unwrap_result(get_fast_rpc_client().get_ml_prediction_summary_by_date(name, yyyymmdd))
-
-
-@router.get("/strategies/{name}/replay/equity_snapshots")
-def ml_replay_equity_snapshots(
-    name: str,
-    since: Optional[str] = Query(
-        None,
-        description="ISO datetime; 仅返回 inserted_at >= since 的行 (增量同步用)",
-    ),
-    limit: int = Query(10000, ge=1, le=100000, description="单次返回最多行数"),
-    access: bool = Depends(get_access),
-) -> List[Dict[str, Any]]:
-    """vnpy 端本地 replay_history.db 的回放权益快照 (A1/B2 解耦后新增).
-
-    mlearnweb 端 ``replay_equity_sync_service`` 每 5 分钟通过 fanout 调本端点,
-    用本地 ``MAX(inserted_at)`` 作 ``since`` 拉增量, UPSERT 到 mlearnweb.db
-    的 ``strategy_equity_snapshots(source_label='replay_settle')``.
-
-    返回空列表 = 该策略当前未发生过回放, 不算错误.
-    """
-    return unwrap_result(get_fast_rpc_client().get_ml_replay_equity_snapshots(name, since, limit))
 
 
 @router.get("/health")

@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from vnpy_qmt_sim.replay import SimReplayController
 
+from .base import APP_NAME
 from .mysql_signal_strategy import Stock
 from .utils import convert_code_to_vnpy_type
 
@@ -41,6 +42,7 @@ class StockTradeSignalReplayAdapter:
         self.batch_limit = int(batch_limit)
         self.controller = SimReplayController(
             gateway,
+            engine=APP_NAME,
             strategy_name=self.strategy_name,
             is_trade_day=is_trade_day,
             write_log=strategy.write_log,
