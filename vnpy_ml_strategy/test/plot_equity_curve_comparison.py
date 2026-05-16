@@ -3,7 +3,7 @@
 输出: vnpy_ml_strategy/test/result/equity_curve_comparison_{strategy_name}.png
 
 数据源:
-  - vnpy: mlearnweb db strategy_equity_snapshots replay_settle
+  - vnpy: strategy_equity_journal.db replay_settle, with mlearnweb cache fallback
   - qlib: {QLIB_BT_BASE}/{strategy_name}/report_normal_1day.pkl (account 列)
 
 ⚠️ 每个 strategy 读自己的 ground truth 子目录 — 之前所有策略读同一份
@@ -19,6 +19,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import os
 import pickle
 import sqlite3
 import sys
@@ -36,6 +37,12 @@ sys.path.insert(0, str(_ROOT / "vendor" / "qlib_strategy_core"))  # qlib (unpick
 # generate_qlib_ground_truth.py OUT_DIR_BASE 同源).
 QLIB_BT_BASE = Path(r"C:/Users/richard/AppData/Local/Temp/qlib_d_backtest")
 MLEARNWEB_DB = Path(r"f:/Quant/code/qlib_strategy_dev/mlearnweb/backend/mlearnweb.db")
+VNPY_EQUITY_JOURNAL_DB = Path(
+    os.getenv(
+        "VNPY_STRATEGY_EQUITY_JOURNAL_DB",
+        r"D:/vnpy_data/state/strategy_equity_journal.db",
+    )
+)
 OUT_DIR = Path(__file__).resolve().parent / "result"
 INIT_CASH = 1_000_000.0
 
@@ -59,17 +66,7 @@ def load_qlib_curve(strategy_name: str):
     return series
 
 
-def load_vnpy_curve(strategy_name: str):
-    conn = sqlite3.connect(str(MLEARNWEB_DB))
-    cur = conn.cursor()
-    cur.execute(
-        """SELECT ts, strategy_value FROM strategy_equity_snapshots
-           WHERE strategy_name=? AND source_label='replay_settle'
-           ORDER BY ts ASC""",
-        (strategy_name,),
-    )
-    rows = cur.fetchall()
-    conn.close()
+def _parse_curve_rows(rows):
     data = []
     for ts_str, val in rows:
         try:
@@ -80,13 +77,48 @@ def load_vnpy_curve(strategy_name: str):
     return pd.Series({d: v for d, v in data}).sort_index()
 
 
+def _journal_read_uri(path: Path) -> str:
+    # Read-only plot: immutable avoids touching WAL/shm state left by smoke runs.
+    return f"file:///{path.as_posix()}?mode=ro&immutable=1"
+
+
+def load_vnpy_curve(strategy_name: str):
+    if VNPY_EQUITY_JOURNAL_DB.exists():
+        conn = sqlite3.connect(_journal_read_uri(VNPY_EQUITY_JOURNAL_DB), uri=True)
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT ts, strategy_value FROM strategy_equity_journal
+               WHERE strategy_name=? AND source_label='replay_settle'
+               ORDER BY datetime(ts) ASC""",
+            (strategy_name,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+        curve = _parse_curve_rows(rows)
+        if not curve.empty:
+            return curve
+
+    conn = sqlite3.connect(str(MLEARNWEB_DB))
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT ts, strategy_value FROM strategy_equity_snapshots
+           WHERE strategy_name=? AND source_label='replay_settle'
+           ORDER BY ts ASC""",
+        (strategy_name,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return _parse_curve_rows(rows)
+
+
 def main(strategy_name: str = "csi300_lgb_headless"):
     q = load_qlib_curve(strategy_name)
     v = load_vnpy_curve(strategy_name)
     if v.empty:
         raise SystemExit(
-            f"vnpy 曲线为空: strategy_name='{strategy_name}' 在 strategy_equity_snapshots "
-            f"中无 replay_settle 记录。检查 vnpy 实盘进程是否已用此 strategy_name 跑完回放。"
+            f"vnpy 曲线为空: strategy_name='{strategy_name}' 在 "
+            f"{VNPY_EQUITY_JOURNAL_DB} 或 strategy_equity_snapshots 中无 "
+            f"replay_settle 记录。检查 vnpy 是否已用此 strategy_name 跑完回放。"
         )
     overlap = sorted(set(q.index) & set(v.index))
     q_aligned = q.loc[overlap]
