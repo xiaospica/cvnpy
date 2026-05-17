@@ -294,8 +294,8 @@ def _sim_setting(setting: Dict[str, Any], gateway_name: str) -> Dict[str, Any]:
 def _qmt_live_setting(qmt_account: str) -> Dict[str, Any]:
     """Build real QMT gateway connect setting."""
     return {
-        "资金账号": qmt_account,
-        "客户端路径": os.getenv(
+        "交易账号": qmt_account,
+        "mini路径": os.getenv(
             "QMT_CLIENT_PATH",
             r"E:/迅投极速交易终端 睿智融科版/userdata_mini",
         ),
@@ -464,6 +464,18 @@ def _validate_config(gateways: List[Dict[str, Any]], strategies: List[Dict[str, 
             raise ValueError(f"非法 gateway kind={kind!r}")
         expected = "live" if kind in {"fake_live", "live"} else "sim"
         validate_gateway_name(gw["name"], expected_class=expected)
+        if kind == "live":
+            live_setting = gw.get("setting") or {}
+            missing = [
+                key
+                for key in ("交易账号", "mini路径")
+                if not str(live_setting.get(key) or "").strip()
+            ]
+            if missing:
+                raise ValueError(
+                    f"真实 QMT gateway {gw['name']} 缺少连接配置字段: {missing}; "
+                    "请传 --qmt-account 并配置 QMT_CLIENT_PATH"
+                )
         gw_names.add(gw["name"])
 
     for strategy in strategies:

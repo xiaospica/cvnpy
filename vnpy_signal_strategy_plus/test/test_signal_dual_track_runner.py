@@ -22,7 +22,10 @@ def test_v3_source_is_live_only_and_not_armed_by_default():
 
     source = cfg["STRATEGIES"][0]
     shadow = cfg["STRATEGIES"][1]
+    qmt_gateway = cfg["GATEWAYS"][0]
 
+    assert qmt_gateway["setting"]["交易账号"] == "paper-account"
+    assert qmt_gateway["setting"]["mini路径"]
     assert source["gateway_name"] == "QMT"
     assert source["runtime"]["role"] == "source-live"
     assert source["runtime"]["replay_enabled"] is False
