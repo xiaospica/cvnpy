@@ -8,6 +8,7 @@ QMT_SIM 撮合和 WebTrader/mlearnweb 展示这条链路。
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -20,9 +21,21 @@ from vnpy_signal_strategy_plus.strategies.csv_replay_test_strategy import (
 )
 
 
-REDIS_LIVE_SIM_SETTING_PATH = _resolve_setting_path(
-    Path(__file__).resolve().parent.parent / "test" / "redis_live_sim_setting.json"
-)
+def _default_setting_path() -> Path:
+    explicit = os.getenv("SIGNAL_DUAL_TRACK_CONFIG", "").strip()
+    if explicit:
+        return Path(os.path.expandvars(explicit)).expanduser()
+    data_root = os.getenv("VNPY_DATA_ROOT", "").strip()
+    if data_root:
+        return (
+            Path(os.path.expandvars(data_root)).expanduser()
+            / "config"
+            / "signal_dual_track.json"
+        )
+    return Path(__file__).resolve().parent.parent / "test" / "redis_live_sim_setting.json"
+
+
+REDIS_LIVE_SIM_SETTING_PATH = _resolve_setting_path(_default_setting_path())
 
 
 class RedisLiveSimTestStrategy(CsvReplayTestStrategy):
@@ -36,7 +49,7 @@ class RedisLiveSimTestStrategy(CsvReplayTestStrategy):
     """
 
     author = "redis-live-sim"
-    strategy_name = "etf_rotation_basic"
+    strategy_name = "harvester_micro_cap_1"
 
     @staticmethod
     def _parse_day(value: object) -> date | None:
@@ -84,7 +97,7 @@ class RedisLiveSimTestStrategy(CsvReplayTestStrategy):
         """加载近实盘链路配置，并显式禁用 CSV 持仓引导。"""
         if not REDIS_LIVE_SIM_SETTING_PATH.exists():
             self.write_log(
-                f"[redis-live-sim] 未找到测试配置: {REDIS_LIVE_SIM_SETTING_PATH}"
+                f"[redis-live-sim] 未找到运行配置: {REDIS_LIVE_SIM_SETTING_PATH}"
             )
             return
 

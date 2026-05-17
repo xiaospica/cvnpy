@@ -28,7 +28,7 @@
 | 文件                          | 职责                                                    |
 | ----------------------------- | ------------------------------------------------------- |
 | `test_setting.json`           | CSV 回归链路配置（CSV 路径 / 凭证 / Redis / MySQL / sim / 端口）|
-| `redis_live_sim_setting.json` | 聚宽近实盘模拟链路配置（无 `position.csv` 持仓引导） |
+| `redis_live_sim_setting.json` | 历史手工测试配置，仅作旧用例参考；正式双轨启动使用 `<VNPY_DATA_ROOT>/config/signal_dual_track.json` |
 | `csv_to_redis_replay.py`      | CSV 成交流水 → Redis Stream 注入                        |
 | `reconcile_trades.py`         | 三维对账（市值占比 + 股数 + 拒单）                      |
 | `run_sim_e2e.py`              | 命令行启动器：sim 网关 + 策略 + WebTrader（无 GUI）     |
@@ -40,9 +40,9 @@
 | 链路 | 策略类 | 策略实例名 | 配置 | 适用场景 |
 | --- | --- | --- | --- | --- |
 | CSV 回归链路 | `CsvReplayTestStrategy` | `etf_intra_test` | `test_setting.json` / `test_setting.local.json` | 用本地 `transaction.csv` / `position.csv` 快速复现历史回归结果 |
-| 聚宽近实盘模拟链路 | `RedisLiveSimTestStrategy` | `etf_rotation_basic` | `redis_live_sim_setting.json` / `redis_live_sim_setting.local.json` | 聚宽回测写 Redis，bridge 写 MySQL，vnpy 通过 QMT_SIM 模拟成交，mlearnweb 观察结果 |
+| 聚宽近实盘模拟链路 | `RedisLiveSimTestStrategy` | `harvester_micro_cap_1` | `<VNPY_DATA_ROOT>/config/signal_dual_track.json` | 聚宽回测写 Redis，bridge 写 MySQL，vnpy 通过 QMT_SIM/FakeQMT 模拟成交，mlearnweb 观察结果 |
 
-近实盘模拟链路不读取 `position.csv`，不做持仓引导，QMT_SIM 应从 `模拟资金=1000000` 纯现金开始。切换真实网关时，保留 `etf_rotation_basic` 策略实例和 MySQL 信号语义，将启动入口的 `QMT_SIM` 换成实盘网关，并把 `replay.mode` 改为 `live`。
+近实盘模拟链路不读取 `position.csv`，不做持仓引导，QMT_SIM 应从 `模拟资金=1000000` 纯现金开始。正式双轨启动入口为 `run_signal_dual_track.py`，配置默认读取 `<VNPY_DATA_ROOT>/config/signal_dual_track.json`，不再默认读取本目录下的历史 test JSON。
 
 ## 3. 配置
 
@@ -183,13 +183,13 @@ F:/Program_Home/vnpy/python.exe `
 
 ### 5.3 启动聚宽近实盘模拟链路
 
-近实盘模拟链路用于测试：聚宽回测写 Redis -> bridge 写 MySQL -> vnpy 策略下单 -> QMT_SIM 撮合 -> mlearnweb 展示。该链路使用生产 WebTrader 端口 `2014/4102/8001`，方便前端直接看到 `etf_rotation_basic` 策略卡片。
+近实盘模拟链路用于测试：聚宽回测写 Redis -> bridge 写 MySQL -> vnpy 策略下单 -> QMT_SIM/FakeQMT 撮合 -> mlearnweb 展示。正式双轨入口使用生产 WebTrader 端口 `2014/4102/8001`，方便前端直接看到 `harvester_micro_cap_1` 策略卡片。
 
 **终端 1**（保持运行）：
 
 ```powershell
 F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.run_sim_e2e `
-  --config F:/Quant/vnpy/vnpy_strategy_dev/vnpy_signal_strategy_plus/test/redis_live_sim_setting.local.json
+  --config %VNPY_DATA_ROOT%/config/signal_dual_track.json
 ```
 
 **终端 2**（保持运行）：
@@ -199,7 +199,7 @@ F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.scripts.redis_to_my
   --config F:/Quant/vnpy/vnpy_strategy_dev/vnpy_signal_strategy_plus/scripts/redis_bridge_setting.local.json
 ```
 
-随后开启聚宽回测。bridge 配置中必须保持 `stream_key=etf_rotation_basic`、`target_stg=etf_rotation_basic`；vnpy 配置中必须保持 `strategy_name=etf_rotation_basic`、`strategy_class=RedisLiveSimTestStrategy`。
+随后开启聚宽回测。bridge 配置中必须保持 `stream_key=harvester_micro_cap_1`、`target_stg=harvester_micro_cap_1`；vnpy 配置中必须保持 `strategy_name=harvester_micro_cap_1`、`strategy_class=RedisLiveSimTestStrategy`。
 
 ### 5.4 跑端到端编排器
 
@@ -284,7 +284,7 @@ F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.purge_test_str
 
 # 聚宽近实盘模拟链路
 F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.purge_test_strategy `
-  --config vnpy_signal_strategy_plus/test/redis_live_sim_setting.local.json
+  --config %VNPY_DATA_ROOT%/config/signal_dual_track.json
 ```
 
 会清：mysql `trade_signal_events` 中 `stg=<strategy_name>` 的行 + redis stream + sim db 文件

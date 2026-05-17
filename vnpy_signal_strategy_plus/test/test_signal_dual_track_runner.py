@@ -3,6 +3,20 @@ from datetime import datetime
 import run_signal_dual_track as runner
 
 
+def test_default_config_resolves_from_vnpy_data_root(monkeypatch, tmp_path):
+    monkeypatch.delenv(runner.SIGNAL_DUAL_TRACK_CONFIG_ENV, raising=False)
+    monkeypatch.setenv("VNPY_DATA_ROOT", str(tmp_path))
+
+    assert runner._default_setting_path() == tmp_path / "config" / runner.DEFAULT_SETTING_FILENAME
+
+
+def test_config_env_override_is_exact(monkeypatch, tmp_path):
+    cfg = tmp_path / "custom_signal_dual_track.json"
+    monkeypatch.setenv(runner.SIGNAL_DUAL_TRACK_CONFIG_ENV, str(cfg))
+
+    assert runner._default_setting_path() == cfg
+
+
 def test_v3_source_is_live_only_and_not_armed_by_default():
     cfg = runner._build_config(
         "v3",

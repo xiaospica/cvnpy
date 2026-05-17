@@ -51,7 +51,7 @@ flowchart LR
 适用链路：
 
 ```text
-聚宽回测 -> Redis stream(etf_rotation_basic)
+聚宽回测 -> Redis stream(harvester_micro_cap_1)
   -> redis_to_mysql_bridge -> MySQL stock_trade
   -> vnpy signal strategy -> QMT_SIM
   -> replay_history.db -> mlearnweb live-trading 页面
@@ -59,18 +59,18 @@ flowchart LR
 
 步骤：
 
-1. 在 mlearnweb 实盘交易页面删除 `etf_rotation_basic` 策略卡片。
+1. 在 mlearnweb 实盘交易页面删除 `harvester_micro_cap_1` / `harvester_micro_cap_1_shadow` 策略卡片。
 
 2. 清理 vnpy 侧聚宽链路测试状态：
 
 ```powershell
-F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.purge_test_strategy --config F:/Quant/vnpy/vnpy_strategy_dev/vnpy_signal_strategy_plus/test/redis_live_sim_setting.json
+F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.purge_test_strategy --config %VNPY_DATA_ROOT%/config/signal_dual_track.json
 ```
 
 3. 启动 vnpy QMT_SIM、策略和 WebTrader。若需要 mlearnweb 前端直接看到卡片，使用生产端口：
 
 ```powershell
-F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.run_sim_e2e --config F:/Quant/vnpy/vnpy_strategy_dev/vnpy_signal_strategy_plus/test/redis_live_sim_setting.json --use-production-ports
+F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v2 --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow
 ```
 
 4. 另开终端启动 Redis 到 MySQL bridge：
@@ -84,7 +84,7 @@ F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.scripts.redis_to_my
 6. 聚宽回测结束，并等待 vnpy 侧最后一个交易日结算完成后，采集验收快照：
 
 ```powershell
-F:/Program_Home/vnpy/python.exe -m vnpy_qmt_sim.replay.acceptance capture --label jq_etf_rotation_basic --strategies etf_rotation_basic
+F:/Program_Home/vnpy/python.exe -m vnpy_qmt_sim.replay.acceptance capture --label jq_harvester_micro_cap_1 --strategies harvester_micro_cap_1,harvester_micro_cap_1_shadow
 ```
 
 ## CSV 链路重测
@@ -166,7 +166,7 @@ F:/Program_Home/vnpy/python.exe -m vnpy_qmt_sim.replay.acceptance capture --labe
 如果需要比较重构前后的结果，先在修改前采集 baseline：
 
 ```powershell
-F:/Program_Home/vnpy/python.exe -m vnpy_qmt_sim.replay.acceptance capture --label pre_refactor --strategies etf_rotation_basic,csi300_lgb_headless,csi300_lgb_headless_2
+F:/Program_Home/vnpy/python.exe -m vnpy_qmt_sim.replay.acceptance capture --label pre_refactor --strategies harvester_micro_cap_1,harvester_micro_cap_1_shadow,csi300_lgb_headless,csi300_lgb_headless_2
 ```
 
 修改后运行三策略并比较：

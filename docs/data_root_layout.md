@@ -10,6 +10,7 @@ Recommended layout:
 ```text
 <VNPY_DATA_ROOT>/
   config/
+    signal_dual_track.json
   state/
     replay_history.db
     event_journal.db
@@ -27,6 +28,8 @@ Minimal config:
 
 ```ini
 VNPY_DATA_ROOT=C:/path/to/vnpy_data
+# Optional; omit it to use <VNPY_DATA_ROOT>/config/signal_dual_track.json.
+# SIGNAL_DUAL_TRACK_CONFIG=C:/path/to/signal_dual_track.json
 ```
 
 Migration is dry-run by default and never deletes legacy files:

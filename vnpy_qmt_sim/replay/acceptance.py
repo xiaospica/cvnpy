@@ -5,17 +5,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from vnpy_common.data_paths import state_dir, strategy_equity_journal_db_path
+from vnpy_common.data_paths import config_dir, state_dir, strategy_equity_journal_db_path
 
 
 DEFAULT_STRATEGIES = [
-    "etf_rotation_basic",
+    "harvester_micro_cap_1",
+    "harvester_micro_cap_1_shadow",
     "csi300_lgb_headless",
     "csi300_lgb_headless_2",
 ]
@@ -139,11 +141,17 @@ def export_mysql_stock_trade(
 ) -> None:
     """Export ``stock_trade`` rows for target strategies using local configs."""
     root = Path(__file__).resolve().parents[2]
-    config_candidates = [
-        root / "vnpy_signal_strategy_plus" / "scripts" / "redis_bridge_setting.local.json",
-        root / "vnpy_signal_strategy_plus" / "test" / "redis_live_sim_setting.json",
-        root / "vnpy_signal_strategy_plus" / "test" / "test_setting.json",
-    ]
+    config_candidates: list[Path] = []
+    explicit_signal_cfg = os.getenv("SIGNAL_DUAL_TRACK_CONFIG", "").strip()
+    if explicit_signal_cfg:
+        config_candidates.append(Path(os.path.expandvars(explicit_signal_cfg)).expanduser())
+    config_candidates.extend(
+        [
+            config_dir() / "signal_dual_track.json",
+            root / "vnpy_signal_strategy_plus" / "scripts" / "redis_bridge_setting.local.json",
+            root / "vnpy_signal_strategy_plus" / "test" / "test_setting.json",
+        ]
+    )
 
     last_error = ""
     rows: list[dict[str, Any]] | None = None

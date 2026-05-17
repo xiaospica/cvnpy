@@ -25,6 +25,10 @@
 
 关键入参
 --------
+``--config``
+    运行配置文件。默认读取 ``SIGNAL_DUAL_TRACK_CONFIG``，未设置时读取
+    ``<VNPY_DATA_ROOT>/config/signal_dual_track.json``。正式启动不再默认读取
+    ``vnpy_signal_strategy_plus/test/*.json`` 历史测试配置。
 ``--allow-live-orders``
     仅 v3 有效。显式武装真实 QMT source 腿；不传则真实腿不消费信号、不下单。
 
@@ -129,6 +133,7 @@ if load_dotenv is not None:
         _load_dotenv_compat(_HERE / ".env", override=False)
 
 from vnpy_common.data_paths import (  # noqa: E402
+    config_dir,
     ensure_vnpy_data_env,
     merged_snapshots_dir,
     state_dir,
@@ -139,17 +144,23 @@ from vnpy_common.data_paths import (  # noqa: E402
 ensure_vnpy_data_env()
 
 
-DEFAULT_SETTING_PATH = (
-    _HERE / "vnpy_signal_strategy_plus" / "test" / "redis_live_sim_setting.json"
-)
+SIGNAL_DUAL_TRACK_CONFIG_ENV = "SIGNAL_DUAL_TRACK_CONFIG"
+DEFAULT_SETTING_FILENAME = "signal_dual_track.json"
 WEBTRADER_HTTP_PORT = 8001
 MODE_ALIASES = {"single": "v1", "v1": "v1", "v2": "v2", "v3": "v3"}
 
 
-def _resolve_setting_path(template_path: Path) -> Path:
-    """Prefer a sibling ``.local.json`` file, then fall back to the template."""
-    local = template_path.with_name(template_path.stem + ".local.json")
-    return local if local.exists() else template_path
+def _default_setting_path() -> Path:
+    """Resolve the production dual-track config path.
+
+    Runtime config belongs under VNPY_DATA_ROOT/config by default. The
+    historical vnpy_signal_strategy_plus/test/*.json files are test fixtures,
+    not production startup defaults.
+    """
+    explicit = os.getenv(SIGNAL_DUAL_TRACK_CONFIG_ENV, "").strip()
+    if explicit:
+        return Path(os.path.expandvars(explicit)).expanduser()
+    return config_dir() / DEFAULT_SETTING_FILENAME
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -1046,8 +1057,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--config",
-        default=str(_resolve_setting_path(DEFAULT_SETTING_PATH)),
-        help="RedisLiveSimTestStrategy 配置文件，默认优先 redis_live_sim_setting.local.json",
+        default=str(_default_setting_path()),
+        help=(
+            "Signal dual-track runtime config. Default: SIGNAL_DUAL_TRACK_CONFIG "
+            "or <VNPY_DATA_ROOT>/config/signal_dual_track.json"
+        ),
     )
     parser.add_argument(
         "--source-stg",
@@ -1121,7 +1135,12 @@ def main() -> None:
     mode = _normalize_mode(args.mode)
     setting_path = Path(args.config).resolve()
     if not setting_path.exists():
-        raise FileNotFoundError(f"config not found: {setting_path}")
+        raise FileNotFoundError(
+            f"signal dual-track config not found: {setting_path}. "
+            f"Set {SIGNAL_DUAL_TRACK_CONFIG_ENV} or copy "
+            f"config/signal_dual_track.example.json to "
+            f"{config_dir() / DEFAULT_SETTING_FILENAME}."
+        )
     setting = _load_json(setting_path)
     final_settle_day = _parse_day(args.settle_through)
     if args.settle_through:
@@ -1131,7 +1150,9 @@ def main() -> None:
         if final_settle_day is not None:
             print(f"[config] replay.settle_through={final_settle_day} (latest completed trade day)")
     journal_db = _strategy_equity_journal_db()
-    source_stg = args.source_stg or str(setting.get("strategy_name") or "etf_rotation_basic")
+    source_stg = args.source_stg or str(setting.get("strategy_name") or "").strip()
+    if not source_stg:
+        raise ValueError("strategy_name is required in config unless --source-stg is provided")
     shadow_stg = args.shadow_stg or f"{source_stg}_shadow"
 
     live_signal_cutoff_dt = _resolve_live_signal_cutoff(mode, args.live_signal_cutoff)

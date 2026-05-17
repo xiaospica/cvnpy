@@ -255,3 +255,10 @@ Next:
 待验证:
 - 需要在服务器设置真实存在的 `VNPY_DATA_ROOT` 后重新启动 `run_signal_dual_track.py` 或 `run_ml_headless.py`。
 - 若服务器目录尚未创建，先创建 `<VNPY_DATA_ROOT>` 及其 `state/`、`snapshots/merged/` 等子目录，或执行显式 `-DataRoot` 的迁移脚本。
+
+## 2026-05-17 - Signal dual-track 配置入口收敛
+
+- 用户指出 `vnpy_signal_strategy_plus/test/redis_live_sim_setting.json` 仍是 `etf_rotation_basic` 等旧测试配置，不应作为正式双轨启动默认配置。
+- 排查确认：普通单测未默认加载该文件；实际风险在 `run_signal_dual_track.py` 的 `--config` 默认值仍指向该 test JSON，`RedisLiveSimTestStrategy` 作为历史测试策略类也保留了 test 配置兜底。
+- 已修改 `run_signal_dual_track.py`：默认配置改为 `SIGNAL_DUAL_TRACK_CONFIG` 或 `<VNPY_DATA_ROOT>/config/signal_dual_track.json`，缺失时直接报错；不再隐式读取 `vnpy_signal_strategy_plus/test/*.json`。
+- 新增 `config/signal_dual_track.example.json`，默认策略名为 `harvester_micro_cap_1`，作为复制到数据根目录 config 下的模板。

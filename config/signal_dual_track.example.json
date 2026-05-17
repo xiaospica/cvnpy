@@ -1,14 +1,13 @@
 {
-    "_doc": "历史手工测试配置：聚宽 -> Redis stream(harvester_micro_cap_1) -> redis_to_mysql_bridge -> MySQL trade_signal_events -> RedisLiveSimTestStrategy -> QMT_SIM。正式双轨启动默认使用 <VNPY_DATA_ROOT>/config/signal_dual_track.json。",
-
+    "_doc": "SignalStrategyPlus dual-track runtime config template. Copy this file to <VNPY_DATA_ROOT>/config/signal_dual_track.json or set SIGNAL_DUAL_TRACK_CONFIG to an absolute path.",
     "strategy_class": "RedisLiveSimTestStrategy",
     "strategy_name": "harvester_micro_cap_1",
     "initial_capital": 1000000.0,
 
     "redis": {
-        "_doc": "仅用于链路校验和人工核对；实际 Redis 消费由 scripts/redis_bridge_setting.local.json 控制。",
-        "host": "106.54.63.204",
-        "port": 6888,
+        "_doc": "Redis is used by the JoinQuant-to-MySQL bridge. The runner itself reads MySQL v2 trade_signal_events.",
+        "host": "127.0.0.1",
+        "port": 6379,
         "password": "REPLACE_ME",
         "db": 0,
         "stream_key": "harvester_micro_cap_1"
@@ -21,14 +20,14 @@
     },
 
     "replay": {
-        "_doc": "sim_replay 会按 trade_signal_events.remark 的历史时间顺序推进模拟柜台，适合聚宽回测写历史交易日信号；live 会退回实时当天轮询，便于未来切换实盘网关。",
+        "_doc": "sim_replay replays historical MySQL v2 signal remarks through QMT_SIM/FakeQMT. live only polls current/live signals and is used by the v3 real-source leg.",
         "mode": "sim_replay",
         "consume_historical_remarks": true,
         "idle_settle_seconds": 30
     },
 
     "mysql": {
-        "host": "106.54.63.204",
+        "host": "127.0.0.1",
         "port": 3306,
         "user": "root",
         "password": "REPLACE_ME",
@@ -37,7 +36,7 @@
     },
 
     "sim": {
-        "_doc": "近实盘测试使用 QMT_SIM。切实盘时，应使用同一策略语义但由实盘启动入口加载真实网关。",
+        "_doc": "Simulation gateways persist under <VNPY_DATA_ROOT>/state and always start from pure cash after explicit cleanup.",
         "account_id": "QMT_SIM",
         "gateway_name": "QMT_SIM",
         "db_dir": "%VNPY_DATA_ROOT%/state",
@@ -54,13 +53,12 @@
     },
 
     "webtrader": {
-        "_doc": "近实盘测试默认使用生产 WebTrader 端口，mlearnweb 前端才能直接看到该策略卡片。启动前请确认没有另一个 webtrader 正占用 2014/4102/8001。",
         "enable": true,
         "rep_address": "tcp://127.0.0.1:2014",
         "pub_address": "tcp://127.0.0.1:4102",
         "http_host": "127.0.0.1",
         "http_port": "8001",
-        "node_id": "redis-live-sim"
+        "node_id": "signal-dual-track"
     },
 
     "wait": {

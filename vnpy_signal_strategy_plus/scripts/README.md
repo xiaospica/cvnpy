@@ -46,7 +46,7 @@
     "user": "root", "password": "REPLACE_ME", "db": "mysql"
   },
   "subscriptions": [
-    { "stream_key": "etf_rotation_basic", "target_stg": "etf_rotation_basic" },
+    { "stream_key": "harvester_micro_cap_1", "target_stg": "harvester_micro_cap_1" },
     { "stream_key": "mcap_v3",            "target_stg": "mcap-v3"           }
   ],
   "log": { "dir": "logs/redis_bridge", "level": "INFO" }
