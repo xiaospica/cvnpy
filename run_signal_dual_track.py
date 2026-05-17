@@ -165,8 +165,25 @@ def _default_setting_path() -> Path:
 
 def _load_json(path: Path) -> Dict[str, Any]:
     """Load a UTF-8/UTF-8-SIG JSON file."""
-    with open(path, "r", encoding="utf-8-sig") as f:
-        return json.load(f)
+    text = path.read_text(encoding="utf-8-sig")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        lines = text.splitlines()
+        start = max(1, exc.lineno - 2)
+        end = min(len(lines), exc.lineno + 2)
+        context = "\n".join(
+            f"{line_no:>4}: {lines[line_no - 1]}"
+            for line_no in range(start, end + 1)
+        )
+        hint = ""
+        if "trailing comma" in exc.msg.lower():
+            hint = " Hint: remove the comma before the closing } or ]."
+        raise ValueError(
+            f"Invalid JSON config: {path}\n"
+            f"{exc.msg} at line {exc.lineno}, column {exc.colno}.{hint}\n"
+            f"{context}"
+        ) from exc
 
 
 def _parse_day(value: object) -> date | None:

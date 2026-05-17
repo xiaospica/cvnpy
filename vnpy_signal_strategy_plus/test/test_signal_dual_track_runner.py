@@ -17,6 +17,22 @@ def test_config_env_override_is_exact(monkeypatch, tmp_path):
     assert runner._default_setting_path() == cfg
 
 
+def test_load_json_reports_path_and_context(tmp_path):
+    cfg = tmp_path / "bad.json"
+    cfg.write_text('{"redis": {"stream_key": "harvester_micro_cap_1",}}', encoding="utf-8")
+
+    try:
+        runner._load_json(cfg)
+    except ValueError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - the test must fail if invalid JSON is accepted.
+        raise AssertionError("invalid JSON config was accepted")
+
+    assert str(cfg) in message
+    assert "trailing comma" in message
+    assert "stream_key" in message
+
+
 def test_v3_source_is_live_only_and_not_armed_by_default():
     cfg = runner._build_config(
         "v3",
