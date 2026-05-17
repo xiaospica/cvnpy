@@ -59,14 +59,40 @@ try:
 except ImportError:  # pragma: no cover - dotenv is available in the vnpy env.
     load_dotenv = None
 
+_DOTENV_ENCODINGS = ("utf-8-sig", "utf-8", "gbk", "mbcs")
+
+
+def _load_dotenv_compat(path: Path, *, override: bool = False) -> bool:
+    """Load .env files saved as UTF-8 or Windows ANSI/GBK.
+
+    python-dotenv defaults to UTF-8. On Windows servers, operators may edit
+    .env.production with legacy tools that save Chinese paths as ANSI/GBK.
+    Trying strict UTF-8 first keeps the preferred format intact, while the
+    GBK/mbcs fallbacks prevent deployment scripts from crashing on existing
+    production files.
+    """
+    if load_dotenv is None or not path.exists():
+        return False
+
+    last_error: Exception | None = None
+    for encoding in _DOTENV_ENCODINGS:
+        try:
+            return bool(load_dotenv(path, override=override, encoding=encoding))
+        except (LookupError, UnicodeDecodeError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    return False
+
+
 if load_dotenv is not None:
     _DOTENV_FILE = os.getenv("DOTENV_FILE")
     if _DOTENV_FILE and (_HERE / _DOTENV_FILE).exists():
-        load_dotenv(_HERE / _DOTENV_FILE, override=False)
+        _load_dotenv_compat(_HERE / _DOTENV_FILE, override=False)
     elif (_HERE / ".env.production").exists():
-        load_dotenv(_HERE / ".env.production", override=False)
+        _load_dotenv_compat(_HERE / ".env.production", override=False)
     elif (_HERE / ".env").exists():
-        load_dotenv(_HERE / ".env", override=False)
+        _load_dotenv_compat(_HERE / ".env", override=False)
 
 from vnpy_common.data_paths import (  # noqa: E402
     ensure_vnpy_data_env,

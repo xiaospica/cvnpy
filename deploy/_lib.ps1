@@ -16,6 +16,45 @@
 #   4. 安全默认值 (D:\vnpy_data 及其 logs/backups/ml_output/models 子目录)
 
 
+function Read-TextFileCompat {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) { return $null }
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+
+    # Prefer UTF-8/UTF-8-BOM, but support Windows ANSI/GBK .env files edited
+    # with legacy tools on Chinese Windows servers.
+    $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
+    try {
+        return $utf8Strict.GetString($bytes)
+    } catch {
+        # Windows PowerShell can read the system ANSI code page through Default.
+        # PowerShell 7 may need the code pages provider for CP936.
+        try {
+            [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
+        } catch {
+            # Windows PowerShell 5.1 does not need CodePagesEncodingProvider.
+        }
+
+        foreach ($encoding in @(936, 'Default')) {
+            try {
+                if ($encoding -eq 'Default') {
+                    $fallback = [System.Text.Encoding]::Default
+                } else {
+                    $fallback = [System.Text.Encoding]::GetEncoding($encoding)
+                }
+                return $fallback.GetString($bytes)
+            } catch {
+                continue
+            }
+        }
+
+        throw
+    }
+}
+
+
 function Read-EnvFile {
     <#
     .SYNOPSIS
@@ -28,21 +67,25 @@ function Read-EnvFile {
     #>
     param([string]$Path)
     if (-not (Test-Path $Path)) { return @{} }
+
+    $text = Read-TextFileCompat $Path
+    if ($null -eq $text) { return @{} }
+
     $envMap = @{}
-    Get-Content $Path -ErrorAction SilentlyContinue | ForEach-Object {
+    $text -split "`r?`n" | ForEach-Object {
         $line = $_.Trim()
         if (-not $line -or $line.StartsWith('#')) { return }
         if ($line -match '^([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$') {
+            $key = $matches[1]
             $val = $matches[2].Trim()
             if ($val -match '^"(.*)"$' -or $val -match "^'(.*)'$") {
                 $val = $matches[1]
             }
-            $envMap[$matches[1]] = $val
+            $envMap[$key] = $val
         }
     }
     return $envMap
 }
-
 
 function Find-PythonExe {
     <#
