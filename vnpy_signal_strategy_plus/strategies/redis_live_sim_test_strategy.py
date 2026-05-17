@@ -8,6 +8,7 @@ QMT_SIM 撮合和 WebTrader/mlearnweb 展示这条链路。
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +37,48 @@ class RedisLiveSimTestStrategy(CsvReplayTestStrategy):
 
     author = "redis-live-sim"
     strategy_name = "etf_rotation_basic"
+
+    @staticmethod
+    def _parse_day(value: object) -> date | None:
+        """Parse an optional replay boundary day from config values."""
+        if value in (None, ""):
+            return None
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        text_value = str(value).strip()
+        if not text_value:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y-%m-%d %H:%M:%S", "%Y%m%d %H:%M:%S"):
+            try:
+                return datetime.strptime(text_value, fmt).date()
+            except ValueError:
+                pass
+        return datetime.fromisoformat(text_value).date()
+
+    @classmethod
+    def _resolve_config_final_settle_day(
+        cls,
+        setting: dict,
+        replay_cfg: dict,
+    ) -> date | None:
+        """Resolve an explicit no-signal tail settlement boundary."""
+        for key in ("settle_through", "final_settle_date", "end_date"):
+            day = cls._parse_day(replay_cfg.get(key))
+            if day is not None:
+                return day
+        strategy_cfg = setting.get("strategy", {}) or {}
+        day = cls._parse_day(strategy_cfg.get("settle_through"))
+        if day is not None:
+            return day
+        strategy_end = cls._parse_day(strategy_cfg.get("end_date"))
+        if strategy_end is not None and strategy_end.year < 2030:
+            return strategy_end
+        return None
+
+    @classmethod
+    def _resolve_final_settle_day(cls, setting: dict, replay_cfg: dict) -> date | None:
+        """Resolve an explicit replay settlement boundary from config only."""
+        return cls._resolve_config_final_settle_day(setting, replay_cfg)
 
     def load_external_setting(self) -> None:
         """加载近实盘链路配置，并显式禁用 CSV 持仓引导。"""
@@ -91,7 +134,7 @@ class RedisLiveSimTestStrategy(CsvReplayTestStrategy):
         )
         self._trade_calendar = None
         self._calendar_warning_logged = False
-
+        self._final_settle_day = self._resolve_final_settle_day(setting, replay_cfg)
         # 近实盘链路从纯现金开始，严禁复用 CSV 持仓引导字段。
         self._date_range_start: Optional[str] = None
         self._csv_position_path: Optional[Path] = None
@@ -108,5 +151,6 @@ class RedisLiveSimTestStrategy(CsvReplayTestStrategy):
             f"db={self.db_name} user={self.db_user} pwd={password_mask} "
             f"gateway={self.gateway} replay_mode={replay_mode} "
             f"replay_enabled={self._replay_enabled} csv_seed=disabled "
-            f"idle_settle={self._idle_settle_seconds}s"
+            f"idle_settle={self._idle_settle_seconds}s "
+            f"settle_through={self._final_settle_day}"
         )

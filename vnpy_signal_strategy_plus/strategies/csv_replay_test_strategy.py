@@ -522,5 +522,6 @@ class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
             gateway=sim_gw,
             is_trade_day=self._is_replay_trade_day,
             idle_settle_seconds=getattr(self, "_idle_settle_seconds", 30.0),
+            final_settle_day=getattr(self, "_final_settle_day", None),
         )
         adapter.run_polling_loop()

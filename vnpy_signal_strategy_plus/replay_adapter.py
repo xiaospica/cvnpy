@@ -28,12 +28,14 @@ class SignalJournalReplayAdapter:
         is_trade_day: TradeDayPredicate | None = None,
         idle_settle_seconds: float = 30.0,
         batch_limit: int = 50,
+        final_settle_day: date | None = None,
     ) -> None:
         self.strategy = strategy
         self.strategy_name = str(strategy.strategy_name)
         self.gateway_name = str(strategy.gateway)
         self.idle_settle_seconds = float(idle_settle_seconds)
         self.batch_limit = int(batch_limit)
+        self.final_settle_day = final_settle_day
         self.controller = SimReplayController(
             gateway,
             engine=APP_NAME,
@@ -79,6 +81,7 @@ class SignalJournalReplayAdapter:
                     self.strategy.put_event()
 
                 except Exception as exc:
+                    self._set_replay_status("error")
                     self.strategy.write_log(
                         f"[replay] signal journal polling failed: {exc}\n"
                         f"{traceback.format_exc()}"
@@ -91,7 +94,10 @@ class SignalJournalReplayAdapter:
                             pass
                     time.sleep(1)
         finally:
-            self.controller.finalize(self._last_signal_day)
+            try:
+                self.controller.finalize(self._effective_final_day())
+            finally:
+                self._set_replay_status("idle")
 
     def _query_unconsumed(self, session: Any) -> list[TradeSignalEvent]:
         account_id, gateway_name, engine, strategy_name = self.strategy._application_scope()
@@ -119,11 +125,25 @@ class SignalJournalReplayAdapter:
             return
         if (time.time() - self._last_signal_ts) < self.idle_settle_seconds:
             return
-        self.controller.finalize(self._last_signal_day)
-        self._last_signal_day = None
+        try:
+            self.controller.finalize(self._effective_final_day())
+        finally:
+            self._last_signal_day = None
+            self._set_replay_status("idle")
+
+    def _effective_final_day(self) -> date | None:
+        """Return the day dynamic replay should settle through before finalizing."""
+        if self._last_signal_day is None:
+            return None
+        if self.final_settle_day is None:
+            return self._last_signal_day
+        if self.final_settle_day < self._last_signal_day:
+            return self._last_signal_day
+        return self.final_settle_day
 
     def _process_one_signal(self, session: Any, signal: TradeSignalEvent) -> None:
         signal_day = self._signal_day(signal)
+        self._set_replay_status("running")
         self.controller.on_external_signal_day(signal_day)
         self._refresh_signal_symbol(signal, signal_day)
         self.controller.set_replay_now(signal.remark)
@@ -163,6 +183,13 @@ class SignalJournalReplayAdapter:
         self._last_signal_day = signal_day
         self.controller.mark_signal_day(signal_day)
         time.sleep(0.01)
+
+    def _set_replay_status(self, status: str) -> None:
+        """Expose active replay state so live journal sampling can stay out of batch replay."""
+        try:
+            setattr(self.strategy, "replay_status", status)
+        except Exception:
+            pass
 
     def _refresh_signal_symbol(self, signal: TradeSignalEvent, signal_day: date) -> None:
         try:

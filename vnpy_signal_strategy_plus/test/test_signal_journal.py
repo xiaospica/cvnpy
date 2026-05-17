@@ -1,6 +1,15 @@
-﻿from sqlalchemy import create_engine
+from datetime import date, datetime
+
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from vnpy_signal_strategy_plus import replay_adapter as replay_adapter_module
+from vnpy_signal_strategy_plus.replay_adapter import SignalJournalReplayAdapter
+from vnpy_signal_strategy_plus.strategies import csv_replay_test_strategy as csv_replay_module
+from vnpy_signal_strategy_plus.strategies.csv_replay_test_strategy import CsvReplayTestStrategy
+from vnpy_signal_strategy_plus.strategies.redis_live_sim_test_strategy import (
+    RedisLiveSimTestStrategy,
+)
 from vnpy_signal_strategy_plus.signal_journal import (
     PCT_SEMANTICS,
     SignalJournalBase,
@@ -115,3 +124,130 @@ def test_strategy_application_checkpoint_is_per_scope():
     app = session.query(StrategySignalApplication).one()
     assert app.status == "ordered"
     assert "QMT_SIM.1" in app.order_refs_json
+
+
+def test_csv_replay_passes_final_settle_day_to_adapter(monkeypatch):
+    captured = {}
+
+    class DummyAdapter:
+        def __init__(self, strategy, **kwargs):
+            captured["strategy"] = strategy
+            captured.update(kwargs)
+
+        def run_polling_loop(self):
+            captured["ran"] = True
+
+    monkeypatch.setattr(
+        csv_replay_module,
+        "SignalJournalReplayAdapter",
+        DummyAdapter,
+    )
+    strategy = CsvReplayTestStrategy.__new__(CsvReplayTestStrategy)
+    strategy.gateway = "QMT_SIM"
+    strategy._replay_enabled = True
+    strategy._idle_settle_seconds = 1.5
+    strategy._final_settle_day = date(2026, 5, 11)
+    strategy._get_sim_gateway = lambda: object()
+    strategy._is_replay_trade_day = lambda day: True
+    strategy.write_log = lambda message: None
+
+    strategy.run_polling()
+
+    assert captured["ran"] is True
+    assert captured["final_settle_day"] == date(2026, 5, 11)
+    assert captured["idle_settle_seconds"] == 1.5
+
+
+def test_redis_replay_explicit_settle_day_wins():
+    strategy = RedisLiveSimTestStrategy.__new__(RedisLiveSimTestStrategy)
+
+    day = strategy._resolve_final_settle_day(
+        {},
+        {"settle_through": "2026-05-11"},
+    )
+
+    assert day == date(2026, 5, 11)
+
+
+def test_signal_journal_replay_marks_status_during_batch(monkeypatch):
+    class DummyController:
+        def __init__(self, *args, **kwargs):
+            self.finalized = []
+
+        def start_dynamic(self):
+            pass
+
+        def on_external_signal_day(self, day):
+            pass
+
+        def refresh_symbols(self, symbols, day):
+            pass
+
+        def set_replay_now(self, now):
+            pass
+
+        def mark_signal_day(self, day):
+            pass
+
+        def finalize(self, final_day=None):
+            self.finalized.append(final_day)
+
+    monkeypatch.setattr(
+        replay_adapter_module,
+        "SimReplayController",
+        DummyController,
+    )
+
+    class DummySession:
+        def __init__(self):
+            self.committed = False
+            self.rolled_back = False
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            self.rolled_back = True
+
+    class DummySignal:
+        id = 1
+        code = "518880.SH"
+        remark = datetime(2026, 5, 8, 9, 30)
+
+    class DummyStrategy:
+        strategy_name = "demo"
+        gateway = "QMT_SIM"
+        poll_interval = 0.01
+        is_polling_avtive = True
+        _last_signal_orderids = []
+        last_signal_id = 0
+
+        def write_log(self, message):
+            pass
+
+        def process_signal(self, signal):
+            self._last_signal_orderids = ["QMT_SIM.1"]
+            return True
+
+        def mark_signal_consumed(self, session, signal, *, status, error_msg):
+            self.consumed_status = status
+
+    strategy = DummyStrategy()
+    adapter = SignalJournalReplayAdapter(
+        strategy,
+        gateway=object(),
+        idle_settle_seconds=0,
+    )
+    session = DummySession()
+
+    adapter._process_one_signal(session, DummySignal())
+
+    assert strategy.replay_status == "running"
+    assert strategy.consumed_status == "ordered"
+    assert session.committed is True
+    assert adapter._last_signal_day == date(2026, 5, 8)
+
+    adapter._finalize_after_idle()
+
+    assert strategy.replay_status == "idle"
+    assert adapter.controller.finalized == [date(2026, 5, 8)]

@@ -16,10 +16,10 @@ It targets ``RedisLiveSimTestStrategy`` and supports:
       Real QmtGateway named QMT + QMT_SIM shadow.  Requires a broker paper
       account and a running miniQMT client.
 
-Unlike MLStrategy, RedisLiveSimTestStrategy reads MySQL ``stock_trade`` rows and
-marks them ``processed=True``.  For dual-track modes this script mirrors source
-rows into a shadow ``stg`` so live and shadow can consume independent rows while
-keeping identical signal payloads.
+RedisLiveSimTestStrategy reads the v2 MySQL ``trade_signal_events`` journal.
+For dual-track modes this script mirrors source events into a shadow ``stg`` so
+live and shadow strategies consume independent event rows with identical payload
+semantics.
 
 Examples:
     F:/Program_Home/vnpy/python.exe run_signal_dual_track_demo.py --mode single
@@ -29,6 +29,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -38,6 +39,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import date, datetime, time as datetime_time, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Type
 from urllib.parse import quote_plus
@@ -93,6 +95,70 @@ def _load_json(path: Path) -> Dict[str, Any]:
     """Load a UTF-8/UTF-8-SIG JSON file."""
     with open(path, "r", encoding="utf-8-sig") as f:
         return json.load(f)
+
+
+def _parse_day(value: object) -> date | None:
+    """Parse an optional YYYY-MM-DD style day."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y-%m-%d %H:%M:%S", "%Y%m%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    return datetime.fromisoformat(text).date()
+
+
+def _resolve_calendar_provider_uri(setting: Dict[str, Any]) -> str:
+    """Resolve qlib calendar provider path for replay day decisions."""
+    from vnpy_signal_strategy_plus.strategies.csv_replay_test_strategy import (
+        DEFAULT_CALENDAR_PROVIDER_URI,
+    )
+
+    replay_cfg = setting.get("replay", {}) or {}
+    return _expand_config_path(
+        replay_cfg.get("calendar_provider_uri")
+        or setting.get("calendar_provider_uri")
+        or DEFAULT_CALENDAR_PROVIDER_URI
+    )
+
+
+def _latest_completed_trade_day(setting: Dict[str, Any]) -> date | None:
+    """Return latest completed trade day using the local qlib calendar."""
+    from vnpy_ml_strategy.utils.trade_calendar import StaleCalendarError, make_calendar
+
+    now = datetime.now()
+    today = now.date()
+    calendar = make_calendar(_resolve_calendar_provider_uri(setting))
+
+    if now.time() >= datetime_time(hour=15):
+        try:
+            if calendar.is_trade_day(today):
+                return today
+        except StaleCalendarError as exc:
+            print(f"[config] calendar stale for today, use previous trade day: {exc}")
+        except Exception as exc:
+            print(f"[config] calendar check failed, use previous trade day: {exc}")
+
+    prev_trade_day = getattr(calendar, "prev_trade_day", None)
+    if callable(prev_trade_day):
+        lookup_day = today + timedelta(days=1) if now.time() >= datetime_time(hour=15) else today
+        try:
+            return prev_trade_day(lookup_day)
+        except Exception as exc:
+            print(f"[config] prev_trade_day failed, fallback to weekday: {exc}")
+
+    cursor = today
+    for _ in range(14):
+        if cursor.weekday() < 5:
+            return cursor
+        cursor -= timedelta(days=1)
+    return None
 
 
 def _expand_config_path(value: object) -> str:
@@ -278,6 +344,7 @@ def _make_strategy_class(
     strategy_name: str,
     gateway_name: str,
     setting_path: Path,
+    final_settle_day: date | None = None,
 ) -> Type[Any]:
     """Create a RedisLiveSimTestStrategy subclass bound to one name/gateway."""
     from vnpy_signal_strategy_plus.strategies import redis_live_sim_test_strategy as redis_mod
@@ -287,6 +354,9 @@ def _make_strategy_class(
 
     def load_external_setting(self: Any) -> None:
         base_class.load_external_setting(self)
+        if final_settle_day is not None:
+            self._final_settle_day = final_settle_day
+            self.write_log(f"[dual-track] replay settle_through={final_settle_day}")
         self.gateway = gateway_name
         self.write_log(
             f"[dual-track] strategy_name={strategy_name} gateway override={gateway_name}"
@@ -362,6 +432,8 @@ def _cleanup_demo_state(
             except Exception as exc:
                 print(f"  ⚠️ 清 mlearnweb.db 失败: {exc}")
 
+    _delete_strategy_application_rows(setting, strategy_names)
+
     if shadow_stg:
         _delete_shadow_mysql_rows(setting, shadow_stg)
 
@@ -378,20 +450,62 @@ def _mysql_url(mysql_cfg: Dict[str, Any]) -> str:
 
 
 def _delete_shadow_mysql_rows(setting: Dict[str, Any], shadow_stg: str) -> None:
-    """Delete shadow rows only; source Redis/MySQL rows are never removed here."""
+    """Delete v2 shadow signal rows and their consumption checkpoints."""
     try:
         from sqlalchemy import create_engine, text
 
         engine = create_engine(_mysql_url(setting["mysql"]))
         with engine.begin() as conn:
-            deleted = conn.execute(
-                text("DELETE FROM stock_trade WHERE stg=:stg"),
+            app_deleted = conn.execute(
+                text(
+                    "DELETE FROM strategy_signal_applications "
+                    "WHERE strategy_name=:stg OR signal_event_id IN ("
+                    "  SELECT id FROM trade_signal_events WHERE stg=:stg"
+                    ")"
+                ),
+                {"stg": shadow_stg},
+            ).rowcount
+            event_deleted = conn.execute(
+                text("DELETE FROM trade_signal_events WHERE stg=:stg"),
                 {"stg": shadow_stg},
             ).rowcount
         engine.dispose()
-        print(f"  删 MySQL shadow rows stock_trade.stg={shadow_stg!r}: {deleted}")
+        print(
+            f"  deleted MySQL shadow v2 rows stg={shadow_stg!r}: "
+            f"events={event_deleted} applications={app_deleted}"
+        )
     except Exception as exc:
-        print(f"  ⚠️ 清 MySQL shadow rows 失败: {exc}")
+        print(f"  warn: purge MySQL shadow v2 rows failed: {exc}")
+
+
+def _delete_strategy_application_rows(
+    setting: Dict[str, Any],
+    strategy_names: Iterable[str],
+) -> None:
+    """Delete v2 consumption checkpoints while keeping source signal events."""
+    names = [str(name) for name in strategy_names if str(name)]
+    if not names:
+        return
+    try:
+        from sqlalchemy import bindparam, create_engine, text
+
+        engine = create_engine(_mysql_url(setting["mysql"]))
+        stmt = (
+            text(
+                "DELETE FROM strategy_signal_applications "
+                "WHERE strategy_name IN :names"
+            )
+            .bindparams(bindparam("names", expanding=True))
+        )
+        with engine.begin() as conn:
+            deleted = conn.execute(stmt, {"names": names}).rowcount
+        engine.dispose()
+        print(
+            f"  deleted MySQL v2 application checkpoints "
+            f"strategies={names}: {deleted}"
+        )
+    except Exception as exc:
+        print(f"  warn: purge MySQL v2 application checkpoints failed: {exc}")
 
 
 @dataclass
@@ -401,7 +515,7 @@ class MirrorStats:
 
 
 class MySqlSignalMirror:
-    """Mirror source ``stock_trade`` rows into an independent shadow ``stg``."""
+    """Mirror source v2 signal events into an independent shadow ``stg``."""
 
     def __init__(
         self,
@@ -416,22 +530,30 @@ class MySqlSignalMirror:
         self.source_stg = source_stg
         self.target_stg = target_stg
         self.poll_interval = float(poll_interval)
+        # Kept for CLI compatibility. In v2 the source event is append-only and
+        # checkpoint is per strategy, so existing source events can be mirrored
+        # safely; upsert by deterministic mirror uid keeps the operation idempotent.
         self.mirror_existing_unprocessed = mirror_existing_unprocessed
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self.stats = MirrorStats()
         self._engine = None
+        self._Session = None
 
     def start(self) -> None:
         """Start the background mirror thread."""
         from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from vnpy_signal_strategy_plus.signal_journal import SignalJournalBase
 
         self._engine = create_engine(_mysql_url(self.mysql_cfg), pool_pre_ping=True)
+        SignalJournalBase.metadata.create_all(self._engine)
+        self._Session = sessionmaker(bind=self._engine)
         self._bootstrap_last_id()
         self.thread = threading.Thread(target=self._run, name="mysql-signal-mirror", daemon=True)
         self.thread.start()
         print(
-            f"[mirror] MySQL stock_trade {self.source_stg!r} -> {self.target_stg!r} "
+            f"[mirror] MySQL trade_signal_events {self.source_stg!r} -> {self.target_stg!r} "
             f"started, last_source_id={self.stats.last_source_id}"
         )
 
@@ -445,28 +567,19 @@ class MySqlSignalMirror:
         print(f"[mirror] stopped, copied={self.stats.copied}")
 
     def _bootstrap_last_id(self) -> None:
-        from sqlalchemy import text
-
-        assert self._engine is not None
-        with self._engine.begin() as conn:
+        assert self._Session is not None
+        session = self._Session()
+        try:
             if self.mirror_existing_unprocessed:
-                rows = conn.execute(
-                    text(
-                        "SELECT id, code, pct, `type` AS signal_type, price, "
-                        "remark, empty, amt, raw_payload "
-                        "FROM stock_trade "
-                        "WHERE stg=:source AND processed=0 "
-                        "ORDER BY id ASC"
-                    ),
-                    {"source": self.source_stg},
-                ).mappings().all()
-                self._insert_rows(conn, rows)
-
-            max_id = conn.execute(
-                text("SELECT COALESCE(MAX(id), 0) FROM stock_trade WHERE stg=:source"),
-                {"source": self.source_stg},
-            ).scalar_one()
-            self.stats.last_source_id = int(max_id or 0)
+                rows = self._query_source_rows(session)
+                self._insert_rows(session, rows)
+            self.stats.last_source_id = self._max_source_id(session)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     def _run(self) -> None:
         while not self.stop_event.is_set():
@@ -478,57 +591,92 @@ class MySqlSignalMirror:
             self.stop_event.wait(self.poll_interval)
 
     def _mirror_once(self) -> None:
-        from sqlalchemy import text
-
-        assert self._engine is not None
-        with self._engine.begin() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT id, code, pct, `type` AS signal_type, price, "
-                    "remark, empty, amt, raw_payload "
-                    "FROM stock_trade "
-                    "WHERE stg=:source AND id>:last_id "
-                    "ORDER BY id ASC"
-                ),
-                {"source": self.source_stg, "last_id": self.stats.last_source_id},
-            ).mappings().all()
-            self._insert_rows(conn, rows)
+        assert self._Session is not None
+        session = self._Session()
+        try:
+            rows = self._query_source_rows(session, min_id=self.stats.last_source_id)
+            self._insert_rows(session, rows)
             if rows:
-                self.stats.last_source_id = int(rows[-1]["id"])
+                self.stats.last_source_id = int(rows[-1].id)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
-    def _insert_rows(self, conn: Any, rows: Iterable[Any]) -> None:
-        from sqlalchemy import text
+    def _query_source_rows(self, session: Any, min_id: int | None = None) -> list[Any]:
+        from vnpy_signal_strategy_plus.signal_journal import TradeSignalEvent
+
+        query = session.query(TradeSignalEvent).filter(TradeSignalEvent.stg == self.source_stg)
+        if min_id is not None:
+            query = query.filter(TradeSignalEvent.id > int(min_id))
+        return query.order_by(TradeSignalEvent.id.asc()).all()
+
+    def _max_source_id(self, session: Any) -> int:
+        from sqlalchemy import func
+        from vnpy_signal_strategy_plus.signal_journal import TradeSignalEvent
+
+        value = (
+            session.query(func.coalesce(func.max(TradeSignalEvent.id), 0))
+            .filter(TradeSignalEvent.stg == self.source_stg)
+            .scalar()
+        )
+        return int(value or 0)
+
+    def _insert_rows(self, session: Any, rows: Iterable[Any]) -> None:
+        from vnpy_signal_strategy_plus.signal_journal import (
+            PCT_SEMANTICS,
+            normalize_trade_signal_payload,
+            upsert_trade_signal_event,
+        )
 
         rows = list(rows)
         if not rows:
             return
 
-        params = [
-            {
-                "code": row["code"],
-                "pct": row["pct"],
-                "type": row["signal_type"],
-                "price": row["price"],
-                "stg": self.target_stg,
-                "remark": row["remark"],
-                "empty": row["empty"],
-                "amt": row["amt"],
-                "raw_payload": row["raw_payload"],
-            }
-            for row in rows
-        ]
-        conn.execute(
-            text(
-                "INSERT INTO stock_trade "
-                "(code, pct, `type`, price, stg, remark, processed, empty, amt, raw_payload) "
-                "VALUES "
-                "(:code, :pct, :type, :price, :stg, :remark, 0, :empty, :amt, :raw_payload)"
-            ),
-            params,
-        )
-        self.stats.copied += len(params)
-        print(f"[mirror] copied {len(params)} rows -> {self.target_stg}")
+        copied = 0
+        for row in rows:
+            digest = hashlib.sha1(str(row.signal_uid).encode("utf-8")).hexdigest()[:32]
+            signal_uid = f"mirror:{self.target_stg}:{digest}"
+            try:
+                payload = json.loads(row.raw_payload or "{}")
+                if not isinstance(payload, dict):
+                    payload = {}
+            except Exception:
+                payload = {}
+            payload.update(
+                {
+                    "source": "mirror",
+                    "source_signal_id": f"mirror:{self.target_stg}:{digest}",
+                    "signal_uid": signal_uid,
+                    "code": row.code,
+                    "pct": row.pct,
+                    "pct_semantics": PCT_SEMANTICS,
+                    "amt": row.amt,
+                    "type": row.signal_type,
+                    "price": row.price,
+                    "stg": self.target_stg,
+                    "remark": row.remark.strftime("%Y-%m-%d %H:%M:%S"),
+                    "empty": int(bool(row.empty)),
+                    "source_event_id": row.id,
+                    "source_stg": self.source_stg,
+                }
+            )
+            normalized = normalize_trade_signal_payload(
+                payload,
+                target_stg=self.target_stg,
+                stream_key=row.stream_key,
+                redis_id=row.redis_id,
+                source="mirror",
+            )
+            _target_row, created = upsert_trade_signal_event(session, normalized)
+            if created:
+                copied += 1
 
+        if copied:
+            self.stats.copied += copied
+            print(f"[mirror] copied {copied} v2 events -> {self.target_stg}")
 
 def _drain_proc_output(proc: subprocess.Popen[str], prefix: str) -> None:
     if proc.stdout is None:
@@ -606,6 +754,7 @@ def _start_vnpy(
     strategies: List[Dict[str, Any]],
     *,
     start_webtrader: bool = True,
+    final_settle_day: date | None = None,
 ) -> tuple[Any, Optional[subprocess.Popen[str]], List[str]]:
     """Start MainEngine, gateways, SignalStrategyPlus and strategy instances."""
     from vnpy.event import EventEngine
@@ -640,6 +789,7 @@ def _start_vnpy(
             strategy_def["strategy_name"],
             strategy_def["gateway_name"],
             setting_path,
+            final_settle_day,
         )
         signal_engine.add_strategy(cls)
         name = strategy_def["strategy_name"]
@@ -683,11 +833,16 @@ def _print_verification(
             )
 
     if shadow_stg:
-        print("\n# (c) MySQL shadow 信号复制检查")
+        print("\n# (c) MySQL v2 shadow signal mirror check")
         print(
-            "  SELECT stg, COUNT(*), SUM(processed=1) "
-            f"FROM stock_trade WHERE stg IN ('{strategy_names[0]}','{shadow_stg}') "
+            "  SELECT stg, COUNT(*), MIN(remark), MAX(remark) "
+            f"FROM trade_signal_events WHERE stg IN ('{strategy_names[0]}','{shadow_stg}') "
             "GROUP BY stg;"
+        )
+        print(
+            "  SELECT strategy_name, gateway_name, COUNT(*) "
+            f"FROM strategy_signal_applications WHERE strategy_name IN ('{strategy_names[0]}','{shadow_stg}') "
+            "GROUP BY strategy_name, gateway_name;"
         )
 
     print("\n# (d) strategy_equity_journal")
@@ -720,32 +875,37 @@ def main() -> None:
     parser.add_argument(
         "--source-stg",
         default="",
-        help="源 MySQL stock_trade.stg，默认取 config.strategy_name",
+        help="source v2 trade_signal_events.stg; default config.strategy_name",
     )
     parser.add_argument(
         "--shadow-stg",
         default="",
-        help="shadow MySQL stock_trade.stg，默认 <source-stg>_shadow",
+        help="shadow v2 trade_signal_events.stg; default <source-stg>_shadow",
     )
     parser.add_argument(
         "--qmt-account",
         default="",
-        help="v3 必填: 券商仿真/实盘资金账号",
+        help="required for v3: broker paper/live account id",
     )
     parser.add_argument(
         "--no-cleanup",
         action="store_true",
-        help="跳过清理 sim DB、strategy_equity_journal、shadow MySQL rows",
+        help="skip cleanup for sim DB, strategy_equity_journal and shadow MySQL rows",
     )
     parser.add_argument(
         "--no-webtrader",
         action="store_true",
-        help="不启动 WebTrader RPC/HTTP 服务",
+        help="do not start WebTrader RPC/HTTP service",
     )
     parser.add_argument(
         "--no-mirror-existing-unprocessed",
         action="store_true",
-        help="v2/v3 启动时不复制源 stg 既有 processed=0 信号，只复制启动后的新增信号",
+        help="do not mirror existing source v2 events; only mirror newly inserted events",
+    )
+    parser.add_argument(
+        "--settle-through",
+        default="",
+        help="settle no-signal tail through this date, e.g. 2026-05-11",
     )
     args = parser.parse_args()
 
@@ -753,6 +913,13 @@ def main() -> None:
     if not setting_path.exists():
         raise FileNotFoundError(f"config not found: {setting_path}")
     setting = _load_json(setting_path)
+    final_settle_day = _parse_day(args.settle_through)
+    if args.settle_through:
+        print(f"[config] replay.settle_through={final_settle_day} (cli)")
+    else:
+        final_settle_day = _latest_completed_trade_day(setting)
+        if final_settle_day is not None:
+            print(f"[config] replay.settle_through={final_settle_day} (latest completed trade day)")
     journal_db = _strategy_equity_journal_db()
     source_stg = args.source_stg or str(setting.get("strategy_name") or "etf_rotation_basic")
     shadow_stg = args.shadow_stg or f"{source_stg}_shadow"
@@ -815,6 +982,7 @@ def main() -> None:
             gateways,
             strategies,
             start_webtrader=not args.no_webtrader,
+            final_settle_day=final_settle_day,
         )
         if not started:
             raise RuntimeError("没有策略成功启动")
@@ -855,7 +1023,6 @@ def main() -> None:
             sim_gateway_names=sim_gateway_names,
             shadow_stg=shadow_stg if cfg["mirror"] else None,
         )
-
 
 if __name__ == "__main__":
     main()
