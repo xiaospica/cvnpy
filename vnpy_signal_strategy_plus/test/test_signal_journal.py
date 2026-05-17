@@ -5,6 +5,8 @@ from sqlalchemy.orm import sessionmaker
 
 from vnpy_signal_strategy_plus import replay_adapter as replay_adapter_module
 from vnpy_signal_strategy_plus.replay_adapter import SignalJournalReplayAdapter
+from vnpy_signal_strategy_plus.base import EngineType
+from vnpy_signal_strategy_plus.mysql_signal_strategy import MySQLSignalStrategyPlus
 from vnpy_signal_strategy_plus.strategies import csv_replay_test_strategy as csv_replay_module
 from vnpy_signal_strategy_plus.strategies.csv_replay_test_strategy import CsvReplayTestStrategy
 from vnpy_signal_strategy_plus.strategies.redis_live_sim_test_strategy import (
@@ -251,3 +253,49 @@ def test_signal_journal_replay_marks_status_during_batch(monkeypatch):
 
     assert strategy.replay_status == "idle"
     assert adapter.controller.finalized == [date(2026, 5, 8)]
+
+
+
+def test_live_signal_cutoff_filters_same_day_old_events():
+    session = _session()
+    for idx, remark in enumerate(
+        [
+            datetime(2026, 5, 15, 9, 30),
+            datetime(2026, 5, 15, 9, 50),
+            datetime(2026, 5, 14, 14, 55),
+        ],
+        start=1,
+    ):
+        normalized = normalize_trade_signal_payload(
+            {
+                "signal_uid": f"jq:demo:cutoff:{idx}",
+                "code": "518880.SH",
+                "pct": "0.1",
+                "pct_semantics": PCT_SEMANTICS,
+                "type": "BUY_LST",
+                "price": "6.5",
+                "stg": "demo",
+                "remark": remark.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            target_stg="demo",
+        )
+        upsert_trade_signal_event(session, normalized)
+
+    class DummyMainEngine:
+        def get_all_accounts(self):
+            return []
+
+    class DummySignalEngine:
+        main_engine = DummyMainEngine()
+
+    strategy = MySQLSignalStrategyPlus.__new__(MySQLSignalStrategyPlus)
+    strategy.signal_engine = DummySignalEngine()
+    strategy.strategy_name = "demo"
+    strategy.gateway = "QMT"
+    strategy.current_dt = datetime(2026, 5, 15, 10, 0)
+    strategy.engine_type = EngineType.LIVE.value
+    strategy.live_signal_cutoff_dt = datetime(2026, 5, 15, 9, 45)
+
+    rows = strategy.query_trade_signals(session)
+
+    assert [row.remark for row in rows] == [datetime(2026, 5, 15, 9, 50)]

@@ -220,5 +220,5 @@ A 股策略通常继承自 `CtaTemplate` 或自定义策略基类。
 - `pct` 字段语义固定为 `trade_value_pct_of_total_portfolio`，表示本次交易金额占聚宽组合总资产比例；不要把它解释成目标权重、可用现金比例或当前持仓比例。
 - Redis Stream 只是传输层；模拟账户重建和审计以 MySQL v2 signal journal 为准，不以 Redis backlog 为事实源。
 - QMT_SIM 重启恢复必须依赖 `<VNPY_DATA_ROOT>/state/sim_<account>.db`，其中 `sim_meta` 保存 order/trade 计数、`last_settle_date` 和 `today_buy_json`；策略启动时应从持久化订单 reference 恢复 `_order_seq`。
-- `run_signal_dual_track_demo.py` 是 SignalStrategyPlus 近实盘启动入口；未显式传 `--settle-through` 时，应在 runner 层按本地交易日历默认结算到最近已完成交易日，不要在策略类里写全局 runtime override 或自动推断逻辑。
+- `run_signal_dual_track.py` 是 SignalStrategyPlus 近实盘启动入口；未显式传 `--settle-through` 时，应在 runner 层按本地交易日历默认结算到最近已完成交易日，不要在策略类里写全局 runtime override 或自动推断逻辑。
 - v2 历史批量回放期间，replay adapter 必须把策略变量 `replay_status` 标记为 `running`，空闲/退出后恢复 `idle`，避免通用 `sim_live_settle` journal 在回放中途采样并污染权益曲线。

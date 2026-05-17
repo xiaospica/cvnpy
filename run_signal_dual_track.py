@@ -1,30 +1,64 @@
 # -*- coding: utf-8 -*-
-"""Redis signal strategy live/sim dual-track demo.
+"""SignalStrategyPlus 聚宽信号双轨启动器。
 
-This script is the SignalStrategyPlus counterpart of ``run_dual_track_demo.py``.
-It targets ``RedisLiveSimTestStrategy`` and supports:
+本脚本是 SignalStrategyPlus 的正式近实盘启动入口，目标策略为
+``RedisLiveSimTestStrategy``，信号事实源为 MySQL v2
+``trade_signal_events`` journal。
 
-  --mode single
-      One QMT_SIM gateway + one RedisLiveSimTestStrategy instance.
+模式语义
+--------
+``--mode v1`` / ``--mode single``
+    单 QMT_SIM gateway + 单策略。用于无 miniQMT 风险地回放 MySQL 信号 journal，
+    验证本地模拟撮合、权益 journal 和 mlearnweb 展示。
 
-  --mode v2
-      FakeQmtGateway named QMT + QMT_SIM shadow.  Both use sim matching, but
-      validate the live gateway slot, gateway routing, account DB isolation and
-      WebTrader/mlearnweb display without miniQMT risk.
+``--mode v2``
+    名为 ``QMT`` 的 FakeQmtGateway + 一个 QMT_SIM shadow 策略。两条腿都使用
+    simulator 撮合，不会向券商发单；用于验证 live 命名槽位、gateway 路由、
+    账户 DB 隔离、shadow 信号镜像和前端展示。
 
-  --mode v3
-      Real QmtGateway named QMT + QMT_SIM shadow.  Requires a broker paper
-      account and a running miniQMT client.
+``--mode v3``
+    真实 ``QmtGateway``（名称固定为 ``QMT``）+ 一个 QMT_SIM shadow 策略。真实
+    source 腿只允许走实时链路，绝不回放历史 MySQL 信号。默认情况下 source 腿
+    也不会轮询/消费实时信号，因此不能向券商发单；只有显式传入
+    ``--allow-live-orders`` 后，才会启用真实 source 腿的信号轮询和下单路径。
+    shadow 腿仍可镜像并回放 source 历史信号，用于观察策略行为。
 
-RedisLiveSimTestStrategy reads the v2 MySQL ``trade_signal_events`` journal.
-For dual-track modes this script mirrors source events into a shadow ``stg`` so
-live and shadow strategies consume independent event rows with identical payload
-semantics.
+关键入参
+--------
+``--allow-live-orders``
+    仅 v3 有效。显式武装真实 QMT source 腿；不传则真实腿不消费信号、不下单。
 
-Examples:
-    F:/Program_Home/vnpy/python.exe run_signal_dual_track_demo.py --mode single
-    F:/Program_Home/vnpy/python.exe run_signal_dual_track_demo.py --mode v2
-    F:/Program_Home/vnpy/python.exe run_signal_dual_track_demo.py --mode v3 --qmt-account YOUR_PAPER_ACCOUNT
+``--live-signal-cutoff startup|today``
+    仅 v3 且 ``--allow-live-orders`` 时有效。默认 ``startup``，只消费启动后新信号，
+    避免重启后重复消费当天旧信号；``today`` 允许消费今天 00:00 后未消费信号。
+
+``--cleanup-scope default|none|shadow|all-sim``
+    默认 v3=``shadow``，只清 shadow sim 状态和 shadow checkpoint；v1/v2=``all-sim``。
+    v3 默认和 ``all-sim`` 都不会删除真实 source 策略的消费 checkpoint。
+
+``--shadow-replay historical|none``
+    是否允许 shadow QMT_SIM 腿回放历史镜像信号。默认 ``historical``，便于观察。
+
+安全默认值
+----------
+* v3 source cleanup 不删除 source 策略消费 checkpoint。
+* v3 source cutoff 默认 ``startup``，避免重启后重复消费当天旧信号。
+* v3 shadow cleanup 只触碰 shadow sim 状态、shadow 信号和 shadow checkpoint。
+* ``pct`` 语义固定为：本次交易金额 / 组合总资产。
+
+典型使用示例
+------------
+    # v1: 单 QMT_SIM 回放 harvester_micro_cap_1
+    F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v1 --source-stg harvester_micro_cap_1
+
+    # v2: FakeQMT source + QMT_SIM shadow，无真实下单风险
+    F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v2 --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow
+
+    # v3: 真实 QMT source + QMT_SIM shadow；默认只连接和观察，不消费 source 信号、不下单
+    F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v3 --qmt-account YOUR_PAPER_ACCOUNT --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow
+
+    # v3: 显式武装真实 source 腿，只消费启动后新信号并可能向 QMT 发单
+    F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v3 --qmt-account YOUR_PAPER_ACCOUNT --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow --allow-live-orders --live-signal-cutoff startup
 """
 from __future__ import annotations
 
@@ -109,6 +143,7 @@ DEFAULT_SETTING_PATH = (
     _HERE / "vnpy_signal_strategy_plus" / "test" / "redis_live_sim_setting.json"
 )
 WEBTRADER_HTTP_PORT = 8001
+MODE_ALIASES = {"single": "v1", "v1": "v1", "v2": "v2", "v3": "v3"}
 
 
 def _resolve_setting_path(template_path: Path) -> Path:
@@ -187,6 +222,31 @@ def _latest_completed_trade_day(setting: Dict[str, Any]) -> date | None:
     return None
 
 
+def _normalize_mode(mode: str) -> str:
+    """Normalize public mode aliases to the internal mode name."""
+    try:
+        return MODE_ALIASES[str(mode).strip().lower()]
+    except KeyError as exc:
+        raise ValueError("mode must be one of: v1/single, v2, v3") from exc
+
+
+def _default_cleanup_scope(mode: str) -> str:
+    """Return the conservative cleanup scope for a runner mode."""
+    return "shadow" if _normalize_mode(mode) == "v3" else "all-sim"
+
+
+def _resolve_live_signal_cutoff(mode: str, policy: str) -> Optional[datetime]:
+    """Resolve the lower bound for v3 live source signal consumption."""
+    if _normalize_mode(mode) != "v3":
+        return None
+    now = datetime.now()
+    if policy == "startup":
+        return now
+    if policy == "today":
+        return datetime.combine(now.date(), datetime_time.min)
+    raise ValueError("live signal cutoff must be startup or today")
+
+
 def _expand_config_path(value: object) -> str:
     ensure_vnpy_data_env()
     return os.path.expandvars(str(value)).strip()
@@ -248,9 +308,17 @@ def _build_config(
     source_stg: str,
     shadow_stg: str,
     qmt_account: str = "",
+    *,
+    shadow_replay: str = "historical",
 ) -> Dict[str, Any]:
     """Return gateway/strategy config for the requested mode."""
-    if mode == "single":
+    mode = _normalize_mode(mode)
+    shadow_runtime = {
+        "role": "shadow-sim",
+        "replay_enabled": shadow_replay == "historical",
+        "live_orders_enabled": True,
+    }
+    if mode == "v1":
         gateway_name = str(
             (setting.get("sim", {}) or {}).get("gateway_name")
             or (setting.get("sim", {}) or {}).get("account_id")
@@ -267,6 +335,11 @@ def _build_config(
                     "class_name": "RedisLiveSimSingle",
                     "strategy_name": source_stg,
                     "gateway_name": gateway_name,
+                    "runtime": {
+                        "role": "single-sim",
+                        "replay_enabled": True,
+                        "live_orders_enabled": True,
+                    },
                 },
             ],
         }
@@ -285,11 +358,17 @@ def _build_config(
                     "class_name": "RedisLiveSimV2Live",
                     "strategy_name": source_stg,
                     "gateway_name": "QMT",
+                    "runtime": {
+                        "role": "source-fake-live",
+                        "replay_enabled": True,
+                        "live_orders_enabled": True,
+                    },
                 },
                 {
                     "class_name": "RedisLiveSimV2Shadow",
                     "strategy_name": shadow_stg,
                     "gateway_name": shadow_gateway,
+                    "runtime": dict(shadow_runtime),
                 },
             ],
         }
@@ -309,16 +388,65 @@ def _build_config(
                     "class_name": "RedisLiveSimV3Live",
                     "strategy_name": source_stg,
                     "gateway_name": "QMT",
+                    "runtime": {
+                        "role": "source-live",
+                        "replay_enabled": False,
+                        "live_orders_enabled": False,
+                    },
                 },
                 {
                     "class_name": "RedisLiveSimV3Shadow",
                     "strategy_name": shadow_stg,
                     "gateway_name": shadow_gateway,
+                    "runtime": dict(shadow_runtime),
                 },
             ],
         }
 
     raise ValueError(f"unknown mode {mode!r}")
+
+
+def _apply_live_runtime_options(
+    strategies: List[Dict[str, Any]],
+    *,
+    mode: str,
+    allow_live_orders: bool,
+    live_signal_cutoff_dt: Optional[datetime],
+) -> None:
+    """Apply CLI safety options to the real v3 source leg."""
+    if _normalize_mode(mode) != "v3":
+        return
+    for strategy in strategies:
+        runtime = strategy.setdefault("runtime", {})
+        if runtime.get("role") != "source-live":
+            continue
+        runtime["replay_enabled"] = False
+        runtime["live_orders_enabled"] = bool(allow_live_orders)
+        runtime["live_signal_cutoff_dt"] = live_signal_cutoff_dt
+
+
+def _strategy_names_for_cleanup(
+    strategies: List[Dict[str, Any]],
+    sim_gateway_names: Iterable[str],
+    cleanup_scope: str,
+) -> List[str]:
+    """Resolve which strategies are allowed to have local state reset."""
+    if cleanup_scope == "none":
+        return []
+    if cleanup_scope == "shadow":
+        shadow_names = [
+            str(s["strategy_name"])
+            for s in strategies
+            if (s.get("runtime") or {}).get("role") == "shadow-sim"
+        ]
+        if shadow_names:
+            return shadow_names
+    sim_gateways = set(sim_gateway_names)
+    return [
+        str(s["strategy_name"])
+        for s in strategies
+        if str(s.get("gateway_name")) in sim_gateways
+    ]
 
 
 def _validate_config(gateways: List[Dict[str, Any]], strategies: List[Dict[str, Any]]) -> None:
@@ -371,21 +499,31 @@ def _make_strategy_class(
     gateway_name: str,
     setting_path: Path,
     final_settle_day: date | None = None,
+    runtime: Optional[Dict[str, Any]] = None,
 ) -> Type[Any]:
     """Create a RedisLiveSimTestStrategy subclass bound to one name/gateway."""
     from vnpy_signal_strategy_plus.strategies import redis_live_sim_test_strategy as redis_mod
 
     redis_mod.REDIS_LIVE_SIM_SETTING_PATH = setting_path
     base_class = redis_mod.RedisLiveSimTestStrategy
+    runtime = dict(runtime or {})
 
     def load_external_setting(self: Any) -> None:
         base_class.load_external_setting(self)
-        if final_settle_day is not None:
+        if "replay_enabled" in runtime:
+            self._replay_enabled = bool(runtime["replay_enabled"])
+        self.live_orders_enabled = bool(runtime.get("live_orders_enabled", True))
+        self.live_signal_cutoff_dt = runtime.get("live_signal_cutoff_dt")
+        self.runner_runtime_role = str(runtime.get("role", "sim"))
+        if final_settle_day is not None and bool(getattr(self, "_replay_enabled", False)):
             self._final_settle_day = final_settle_day
             self.write_log(f"[dual-track] replay settle_through={final_settle_day}")
         self.gateway = gateway_name
         self.write_log(
-            f"[dual-track] strategy_name={strategy_name} gateway override={gateway_name}"
+            f"[dual-track] strategy_name={strategy_name} gateway override={gateway_name} "
+            f"role={self.runner_runtime_role} replay_enabled={getattr(self, '_replay_enabled', None)} "
+            f"live_orders_enabled={self.live_orders_enabled} "
+            f"live_signal_cutoff={self.live_signal_cutoff_dt}"
         )
 
     attrs = {
@@ -397,15 +535,15 @@ def _make_strategy_class(
     return type(class_name, (base_class,), attrs)
 
 
-def _cleanup_demo_state(
+def _cleanup_runner_state(
     setting: Dict[str, Any],
-    strategy_names: Iterable[str],
+    cleanup_strategy_names: Iterable[str],
     gateway_names: Iterable[str],
     shadow_stg: Optional[str],
 ) -> None:
-    """Clean only demo-owned local state and shadow MySQL rows."""
+    """Clean only runner-owned local state and shadow MySQL rows."""
     print("=" * 60)
-    print("Step 1 · 清理 Redis 双轨 demo 状态")
+    print("Step 1 · 清理 Redis 双轨 runner 状态")
     print("=" * 60)
 
     sim_cfg = setting.get("sim", {}) or {}
@@ -424,7 +562,7 @@ def _cleanup_demo_state(
     if journal_db.exists():
         try:
             con = sqlite3.connect(str(journal_db), timeout=2)
-            names = list(strategy_names)
+            names = list(cleanup_strategy_names)
             if names:
                 placeholders = ",".join("?" * len(names))
                 deleted = con.execute(
@@ -444,7 +582,7 @@ def _cleanup_demo_state(
         if mlearnweb_db.exists():
             try:
                 con = sqlite3.connect(str(mlearnweb_db), timeout=2)
-                names = list(strategy_names)
+                names = list(cleanup_strategy_names)
                 if names:
                     placeholders = ",".join("?" * len(names))
                     deleted = con.execute(
@@ -458,7 +596,7 @@ def _cleanup_demo_state(
             except Exception as exc:
                 print(f"  ⚠️ 清 mlearnweb.db 失败: {exc}")
 
-    _delete_strategy_application_rows(setting, strategy_names)
+    _delete_strategy_application_rows(setting, cleanup_strategy_names)
 
     if shadow_stg:
         _delete_shadow_mysql_rows(setting, shadow_stg)
@@ -816,6 +954,7 @@ def _start_vnpy(
             strategy_def["gateway_name"],
             setting_path,
             final_settle_day,
+            strategy_def.get("runtime"),
         )
         signal_engine.add_strategy(cls)
         name = strategy_def["strategy_name"]
@@ -889,9 +1028,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=["single", "v2", "v3"],
+        choices=["single", "v1", "v2", "v3"],
         required=True,
-        help="single=单 QMT_SIM / v2=FakeQmt+sim shadow / v3=真 QMT+sim shadow",
+        help="v1/single=单 QMT_SIM；v2=FakeQmt+sim shadow；v3=真 QMT 实时 source + sim shadow",
     )
     parser.add_argument(
         "--config",
@@ -916,7 +1055,16 @@ def main() -> None:
     parser.add_argument(
         "--no-cleanup",
         action="store_true",
-        help="skip cleanup for sim DB, strategy_equity_journal and shadow MySQL rows",
+        help="兼容旧参数：等价于 --cleanup-scope none",
+    )
+    parser.add_argument(
+        "--cleanup-scope",
+        choices=["default", "none", "shadow", "all-sim"],
+        default="default",
+        help=(
+            "启动前清理范围。default: v3=shadow, v1/v2=all-sim；"
+            "shadow 不会删除 v3 真实 source checkpoint"
+        ),
     )
     parser.add_argument(
         "--no-webtrader",
@@ -929,12 +1077,36 @@ def main() -> None:
         help="do not mirror existing source v2 events; only mirror newly inserted events",
     )
     parser.add_argument(
+        "--shadow-replay",
+        choices=["historical", "none"],
+        default="historical",
+        help="shadow QMT_SIM 腿是否回放历史镜像信号",
+    )
+    parser.add_argument(
+        "--allow-live-orders",
+        action="store_true",
+        help=(
+            "仅 v3 有效：显式武装真实 QMT source 腿；不传则 source "
+            "不轮询/消费 MySQL 信号，也不会向券商发单"
+        ),
+    )
+    parser.add_argument(
+        "--live-signal-cutoff",
+        choices=["startup", "today"],
+        default="startup",
+        help=(
+            "仅 v3 且 --allow-live-orders 有效：真实 source 信号消费下界。"
+            "startup 只消费启动后新信号，today 允许消费今日未消费信号"
+        ),
+    )
+    parser.add_argument(
         "--settle-through",
         default="",
         help="settle no-signal tail through this date, e.g. 2026-05-11",
     )
     args = parser.parse_args()
 
+    mode = _normalize_mode(args.mode)
     setting_path = Path(args.config).resolve()
     if not setting_path.exists():
         raise FileNotFoundError(f"config not found: {setting_path}")
@@ -950,9 +1122,23 @@ def main() -> None:
     source_stg = args.source_stg or str(setting.get("strategy_name") or "etf_rotation_basic")
     shadow_stg = args.shadow_stg or f"{source_stg}_shadow"
 
-    cfg = _build_config(args.mode, setting, source_stg, shadow_stg, args.qmt_account)
+    live_signal_cutoff_dt = _resolve_live_signal_cutoff(mode, args.live_signal_cutoff)
+    cfg = _build_config(
+        mode,
+        setting,
+        source_stg,
+        shadow_stg,
+        args.qmt_account,
+        shadow_replay=args.shadow_replay,
+    )
     gateways = cfg["GATEWAYS"]
     strategies = cfg["STRATEGIES"]
+    _apply_live_runtime_options(
+        strategies,
+        mode=mode,
+        allow_live_orders=args.allow_live_orders,
+        live_signal_cutoff_dt=live_signal_cutoff_dt,
+    )
     gateway_names = [g["name"] for g in gateways]
     sim_gateway_names = [
         g["name"] for g in gateways if g["kind"] in {"sim", "fake_live"}
@@ -960,7 +1146,7 @@ def main() -> None:
     strategy_names = [s["strategy_name"] for s in strategies]
 
     print("=" * 60)
-    print(f"RedisLiveSim 双轨 demo — {args.mode.upper()}")
+    print(f"RedisLiveSim 双轨 runner — {mode.upper()}")
     print("=" * 60)
     print(f"config:     {setting_path}")
     print(f"模式:       {cfg['label']}")
@@ -969,17 +1155,38 @@ def main() -> None:
     print(f"strategy_equity_journal.db: {journal_db}")
     if cfg["mirror"]:
         print(f"MySQL mirror: {source_stg!r} -> {shadow_stg!r}")
+    cleanup_scope = "none" if args.no_cleanup else args.cleanup_scope
+    if cleanup_scope == "default":
+        cleanup_scope = _default_cleanup_scope(mode)
+    print(f"cleanup_scope: {cleanup_scope}")
+    if mode == "v3":
+        print(
+            "[safety] v3 source leg uses real QMT, replay is disabled. "
+            f"allow_live_orders={args.allow_live_orders} "
+            f"live_signal_cutoff={live_signal_cutoff_dt}"
+        )
+        if not args.allow_live_orders:
+            print("[safety] real source signal polling is disabled; no broker orders can be sent")
+    elif args.allow_live_orders:
+        print("[safety] --allow-live-orders is ignored outside v3")
     print()
 
     _validate_config(gateways, strategies)
 
-    if not args.no_cleanup:
-        _cleanup_demo_state(
+    cleanup_strategy_names = _strategy_names_for_cleanup(
+        strategies,
+        sim_gateway_names,
+        cleanup_scope,
+    )
+    if cleanup_scope != "none" and cleanup_strategy_names:
+        _cleanup_runner_state(
             setting,
-            strategy_names=strategy_names,
+            cleanup_strategy_names=cleanup_strategy_names,
             gateway_names=sim_gateway_names,
             shadow_stg=shadow_stg if cfg["mirror"] else None,
         )
+    else:
+        print(f"[cleanup] skipped scope={cleanup_scope} strategies={cleanup_strategy_names}")
 
     mirror: Optional[MySqlSignalMirror] = None
     if cfg["mirror"]:

@@ -53,6 +53,8 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
     start_date = "20250101 00:00:00"
     end_date = "20250201 00:00:00"
     gateway = ""
+    live_orders_enabled = True
+    live_signal_cutoff_dt = None
 
     def __init__(self, signal_engine):
         super().__init__(signal_engine)
@@ -206,6 +208,12 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             return []
 
         today_start = datetime.combine(self.current_dt, datetime.min.time())
+        signal_start = today_start
+        cutoff_dt = getattr(self, "live_signal_cutoff_dt", None)
+        if cutoff_dt is not None and self.engine_type in (EngineType.LIVE, EngineType.LIVE.value):
+            if getattr(cutoff_dt, "tzinfo", None) is not None:
+                cutoff_dt = cutoff_dt.astimezone(CHINA_TZ).replace(tzinfo=None)
+            signal_start = max(today_start, cutoff_dt)
         account_id, gateway_name, engine, strategy_name = self._application_scope()
         app_join = and_(
             StrategySignalApplication.signal_event_id == TradeSignalEvent.id,
@@ -220,7 +228,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             .outerjoin(StrategySignalApplication, app_join)
             .filter(
                 TradeSignalEvent.stg == self.strategy_name,
-                TradeSignalEvent.remark >= today_start,
+                TradeSignalEvent.remark >= signal_start,
                 TradeSignalEvent.remark <= self.current_dt,
                 StrategySignalApplication.id.is_(None),
             )
@@ -253,6 +261,18 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
 
     def run_polling(self):
         """Poll v2 signal events in a background thread."""
+        if (
+            self.engine_type in (EngineType.LIVE, EngineType.LIVE.value)
+            and not bool(getattr(self, "live_orders_enabled", True))
+        ):
+            self.write_log(
+                "[live-safe] live_orders_enabled=False; skip MySQL signal polling. "
+                "No signal will be consumed and no broker order can be sent."
+            )
+            while self.is_polling_avtive:
+                time.sleep(max(float(self.poll_interval or 1.0), 1.0))
+            return
+
         while self.is_polling_avtive:
             if not self.Session:
                 time.sleep(self.poll_interval)

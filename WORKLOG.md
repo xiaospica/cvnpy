@@ -80,7 +80,7 @@
 ## 2026-05-12 RedisLiveSim v2 前端收益率为 0
 
 背景：
-- 用户使用 `run_signal_dual_track_demo.py --mode v2 --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow` 联合聚宽回测写 Redis 信号。
+- 用户使用 `run_signal_dual_track.py --mode v2 --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow` 联合聚宽回测写 Redis 信号。
 - 策略实际已成交，sim DB 中有订单和成交，但 mlearnweb 前端收益率显示为 0。
 
 关键结论：
@@ -94,22 +94,22 @@
   - `harvester_micro_cap_1` 当前累计收益约 `+12.03%`，样本数 25。
   - `harvester_micro_cap_1_shadow` 当前累计收益约 `+12.03%`，样本数 25。
   - 纯回放最后交易日 `2026-05-08` 权益为 `1,105,475`，约 `+10.55%`。
-- 已修改 `run_signal_dual_track_demo.py`：启动时将 `REPLAY_HISTORY_DB` 固定到当前 sim `db_dir/replay_history.db`，避免 `.env.production` 的 `QS_DATA_ROOT` 把 WebTrader 指到错误位置。
+- 已修改 `run_signal_dual_track.py`：启动时将 `REPLAY_HISTORY_DB` 固定到当前 sim `db_dir/replay_history.db`，避免 `.env.production` 的 `QS_DATA_ROOT` 把 WebTrader 指到错误位置。
 - 已修改 `vnpy_qmt_sim/replay/controller.py`：当回放快照写入返回 False 时，将目标 DB 路径写入策略日志，便于后续定位。
 
 验证：
-- `F:/Program_Home/vnpy/python.exe -m py_compile run_signal_dual_track_demo.py vnpy_qmt_sim/replay/controller.py`
+- `F:/Program_Home/vnpy/python.exe -m py_compile run_signal_dual_track.py vnpy_qmt_sim/replay/controller.py`
 - mlearnweb DB 查询确认两个策略均有 `replay_settle=24` 行。
 - `GET http://127.0.0.1:8100/api/live-trading/strategies/local/SignalStrategyPlus/{name}/performance-summary` 返回非零累计收益。
 
 注意：
-- 当前运行中的 v2 进程不会自动加载这次脚本修改；下次重启 `run_signal_dual_track_demo.py` 后生效。
+- 当前运行中的 v2 进程不会自动加载这次脚本修改；下次重启 `run_signal_dual_track.py` 后生效。
 - 如果使用默认清理启动，会删除本次 demo 相关 sim DB / replay_history 快照，需要重新跑聚宽回测或使用 `--no-cleanup` 保留已有状态。
 
 ## 2026-05-12 聚宽回测 vs 本地 v2 复现对账
 
 背景：
-- 用户运行 bridge、`run_signal_dual_track_demo.py --mode v2 --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow`，并在聚宽上开启回测写 Redis 信号。
+- 用户运行 bridge、`run_signal_dual_track.py --mode v2 --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow`，并在聚宽上开启回测写 Redis 信号。
 - 聚宽产物目录为 `C:/Users/richard/Downloads/jqreplay_mc1`，包含 `result_1.csv`、`transaction (1).zip`、`position.zip`、`log.zip`。
 
 已产出：
@@ -152,11 +152,11 @@
 ## 2026-05-17 - Redis dual-track v2 mirror and purge fix
 
 Context:
-- User ran run_signal_dual_track_demo.py --mode v2 plus redis_to_mysql_bridge, then JoinQuant backtest.
+- User ran run_signal_dual_track.py --mode v2 plus redis_to_mysql_bridge, then JoinQuant backtest.
 - Diagnosis showed Redis stream and trade_signal_events for harvester_micro_cap_1 only reached remark=2026-05-08; no harvester_micro_cap_1_shadow rows existed.
 
 Root causes:
-- run_signal_dual_track_demo.py still mirrored shadow rows from legacy stock_trade, while the bridge now writes only trade_signal_events.
+- run_signal_dual_track.py still mirrored shadow rows from legacy stock_trade, while the bridge now writes only trade_signal_events.
 - purge_test_strategy.py only targeted one strategy/account and had a corrupted persistence-dir key, so dual-track QMT/QMT_SIM_redis_shadow state and shadow v2 rows were not cleaned reliably.
 - A no-signal tail such as 2026-05-09..2026-05-11 cannot be inferred from Redis order events; it needs explicit replay.settle_through or --settle-through.
 
@@ -166,7 +166,7 @@ Changes:
 - purge_test_strategy.py now cleans source + shadow v2 journal rows, QMT/QMT_SIM_redis_shadow sim DBs, Redis stream, and strategy_equity_journal rows after confirmation.
 
 Validation:
-- py_compile passed for run_signal_dual_track_demo.py, replay_adapter.py, redis_live_sim_test_strategy.py and purge_test_strategy.py.
+- py_compile passed for run_signal_dual_track.py, replay_adapter.py, redis_live_sim_test_strategy.py and purge_test_strategy.py.
 - Non-destructive purge parse check passed with all purge actions skipped; it resolved harvester_micro_cap_1 plus shadow and QMT/QMT_SIM_redis_shadow accounts.
 - pytest passed: tests/test_qmt_sim_persistence.py, vnpy_signal_strategy_plus/test/test_signal_journal.py, vnpy_qmt_sim/test/test_sim_replay_controller.py (18 passed).
 
@@ -180,21 +180,21 @@ Diagnosis:
 - MySQL trade_signal_events for source and shadow both had max(remark)=2026-05-08 09:35:00; applications were consumed by QMT and QMT_SIM_redis_shadow.
 - Local sim_QMT.db and sim_QMT_SIM_redis_shadow.db both had sim_meta.last_settle_date=2026-05-08.
 - mlearnweb strategy_equity_snapshots had replay_settle and sim_live_settle rows only through 2026-05-08.
-- Code bug: run_signal_dual_track_demo.py populated replay.settle_through and RedisLiveSimTestStrategy parsed _final_settle_day, but CsvReplayTestStrategy.run_polling did not pass it into SignalJournalReplayAdapter.
+- Code bug: run_signal_dual_track.py populated replay.settle_through and RedisLiveSimTestStrategy parsed _final_settle_day, but CsvReplayTestStrategy.run_polling did not pass it into SignalJournalReplayAdapter.
 
 Changes:
 - CsvReplayTestStrategy.run_polling now forwards final_settle_day=getattr(self, "_final_settle_day", None) to SignalJournalReplayAdapter.
 - Added a regression test proving run_polling forwards _final_settle_day to the adapter.
-- run_signal_dual_track_demo.py cleanup now removes strategy_signal_applications checkpoints for source + shadow strategies while keeping source trade_signal_events intact, so a clean sim rerun can replay existing source signals again.
+- run_signal_dual_track.py cleanup now removes strategy_signal_applications checkpoints for source + shadow strategies while keeping source trade_signal_events intact, so a clean sim rerun can replay existing source signals again.
 
 Validation:
 - py_compile passed for csv_replay_test_strategy.py, replay_adapter.py, redis_live_sim_test_strategy.py and test_signal_journal.py.
-- py_compile also covered run_signal_dual_track_demo.py after cleanup change.
+- py_compile also covered run_signal_dual_track.py after cleanup change.
 - pytest passed: tests/test_qmt_sim_persistence.py, vnpy_signal_strategy_plus/test/test_signal_journal.py, vnpy_qmt_sim/test/test_sim_replay_controller.py (19 passed, with known third-party deprecation warnings).
-- run_signal_dual_track_demo.py --help passed and shows --settle-through.
+- run_signal_dual_track.py --help passed and shows --settle-through.
 
 Operational note:
-- Redis/JQ sends order events only. The runner now provides the default no-signal tail boundary: if `--settle-through` is omitted, `run_signal_dual_track_demo.py` resolves the latest completed trade day from the local qlib calendar and injects it into the strategy subclass.
+- Redis/JQ sends order events only. The runner now provides the default no-signal tail boundary: if `--settle-through` is omitted, `run_signal_dual_track.py` resolves the latest completed trade day from the local qlib calendar and injects it into the strategy subclass.
 
 ## 2026-05-17 - Redis replay minimal correction after review
 
@@ -205,16 +205,38 @@ Context:
 Changes:
 - Kept `158d569 feat(signal): 引入 v2 信号 journal 与模拟账户恢复` as the committed v2 baseline.
 - Removed the strategy-level runtime override / auto latest-trade-day inference from `RedisLiveSimTestStrategy`; it now only parses explicit config boundaries.
-- `run_signal_dual_track_demo.py` now owns the default boundary decision: no CLI `--settle-through` means settle through latest completed trade day from the local qlib calendar.
+- `run_signal_dual_track.py` now owns the default boundary decision: no CLI `--settle-through` means settle through latest completed trade day from the local qlib calendar.
 - `SignalJournalReplayAdapter` marks `replay_status=running` while processing historical v2 events and restores `idle` after idle/final finalize, so the global sim-live journal skips active batch replay.
 - Added regression coverage for `_final_settle_day` forwarding and replay status transitions.
 - Added `purge_signal_journal.py` / expanded `purge_test_strategy.py` for repeatable v2 source+shadow cleanup without touching legacy `stock_trade`.
 
 Validation:
-- `F:/Program_Home/vnpy/python.exe -m py_compile run_signal_dual_track_demo.py vnpy_signal_strategy_plus/replay_adapter.py vnpy_signal_strategy_plus/strategies/csv_replay_test_strategy.py vnpy_signal_strategy_plus/strategies/redis_live_sim_test_strategy.py vnpy_signal_strategy_plus/scripts/purge_signal_journal.py vnpy_signal_strategy_plus/test/purge_test_strategy.py` passed.
+- `F:/Program_Home/vnpy/python.exe -m py_compile run_signal_dual_track.py vnpy_signal_strategy_plus/replay_adapter.py vnpy_signal_strategy_plus/strategies/csv_replay_test_strategy.py vnpy_signal_strategy_plus/strategies/redis_live_sim_test_strategy.py vnpy_signal_strategy_plus/scripts/purge_signal_journal.py vnpy_signal_strategy_plus/test/purge_test_strategy.py` passed.
 - `F:/Program_Home/vnpy/python.exe -m pytest vnpy_signal_strategy_plus/test/test_signal_journal.py -q` passed: 6 passed, with only known third-party deprecation/cache warnings.
 - `F:/Program_Home/vnpy/python.exe -m pytest vnpy_qmt_sim/test/test_sim_replay_controller.py tests/test_qmt_sim_persistence.py -q -p no:cacheprovider --basetemp ...` passed with elevated filesystem access: 15 passed, 3 third-party deprecation warnings. Non-elevated run failed before setup because pytest could not create temp directories under the sandbox.
 - `purge_signal_journal.py --dry-run --stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow` connected to MySQL with elevated network access and reported source/shadow each 112 `trade_signal_events` rows, both from 2026-01-07 09:35:00 to 2026-05-08 09:35:00, plus 111 ordered + 1 skipped application rows for each strategy. No rows were deleted.
 
 Next:
-- If the user wants a full live-path confirmation, rerun `run_signal_dual_track_demo.py --mode v2 ...` with fresh MySQL/journal/sim cleanup and compare source/shadow `replay_settle` plus absence of mid-replay `sim_live_settle` rows.
+- If the user wants a full live-path confirmation, rerun `run_signal_dual_track.py --mode v2 ...` with fresh MySQL/journal/sim cleanup and compare source/shadow `replay_settle` plus absence of mid-replay `sim_live_settle` rows.
+
+
+## 2026-05-17 - SignalStrategyPlus 双轨启动器正式化与 v3 安全边界
+
+背景/问题:
+- 原入口 `run_signal_dual_track_demo.py` 已承担近实盘启动职责，文件名和说明仍带 demo，容易让 v3 真实 QMT 场景的安全边界不清晰。
+
+本次结论:
+- 正式入口改为 `run_signal_dual_track.py`。
+- v1/single 为单 QMT_SIM 回放；v2 为 FakeQMT source + QMT_SIM shadow；v3 为真实 QMT source + QMT_SIM shadow。
+- v3 source 腿默认不回放历史、不轮询/消费 MySQL 信号、不下单；只有显式传 `--allow-live-orders` 才会武装真实下单路径。
+- v3 默认 `--live-signal-cutoff startup`，只消费启动后新信号；默认 `--cleanup-scope shadow`，不删除 source 策略消费 checkpoint。
+- 脚本头部和 `--help` 已补充以 `harvester_micro_cap_1` / `harvester_micro_cap_1_shadow` 为例的典型命令。
+
+验证:
+- `run_signal_dual_track.py --help` 可正常展示中文模式语义和典型使用示例。
+- 只读 `compile()` 校验通过：`run_signal_dual_track.py`、`mysql_signal_strategy.py`、`test_signal_dual_track_runner.py`、`test_signal_journal.py`。
+- `F:/Program_Home/vnpy/python.exe -m pytest vnpy_signal_strategy_plus/test/test_signal_dual_track_runner.py vnpy_signal_strategy_plus/test/test_signal_journal.py -q -p no:cacheprovider --basetemp F:/Quant/code/qlib_strategy_dev/.tmp_pytest_vnpy_signal` 通过：10 passed，只有第三方/utcnow deprecation warnings。
+
+风险与注意:
+- 旧命令需从 `run_signal_dual_track_demo.py` 切换为 `run_signal_dual_track.py`。
+- v3 加 `--allow-live-orders` 后会进入真实 QMT 下单路径，启动前必须确认账户、source stg 和 cutoff 策略。
