@@ -299,3 +299,24 @@ def test_live_signal_cutoff_filters_same_day_old_events():
     rows = strategy.query_trade_signals(session)
 
     assert [row.remark for row in rows] == [datetime(2026, 5, 15, 9, 50)]
+
+
+def test_bound_gateway_wins_over_global_contract_gateway():
+    class DummyContract:
+        gateway_name = "QMT"
+
+    class DummyMainEngine:
+        gateways = {}
+
+        def get_contract(self, vt_symbol):
+            return DummyContract()
+
+    class DummySignalEngine:
+        main_engine = DummyMainEngine()
+
+    strategy = MySQLSignalStrategyPlus.__new__(MySQLSignalStrategyPlus)
+    strategy.signal_engine = DummySignalEngine()
+    strategy.gateway = "QMT_SIM_redis_shadow"
+    strategy.write_log = lambda message: None
+
+    assert strategy.get_gateway_name("002188.SZSE") == "QMT_SIM_redis_shadow"

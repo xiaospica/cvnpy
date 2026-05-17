@@ -459,14 +459,15 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         return bool(value)
 
     def get_gateway_name(self, vt_symbol: str) -> str | None:
-        contract = self.signal_engine.main_engine.get_contract(vt_symbol)
         exchange_str = vt_symbol.split(".")[-1]
         gateway_name = ""
-        if contract:
-            gateway_name = contract.gateway_name
-        elif self.gateway:
+        if self.gateway:
             gateway_name = self.gateway
         else:
+            contract = self.signal_engine.main_engine.get_contract(vt_symbol)
+            if contract:
+                gateway_name = contract.gateway_name
+        if not gateway_name:
             for gw in self.signal_engine.main_engine.gateways.values():
                 if Exchange(exchange_str) in gw.exchanges:
                     gateway_name = gw.gateway_name
