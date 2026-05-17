@@ -1,5 +1,20 @@
 # WORKLOG
 
+## 2026-05-17 - Signal dual-track shadow stg runner isolation
+
+结论:
+- 本地 v2 与云端 v3 同时使用 `harvester_micro_cap_1_shadow` 时，会共享同一批 MySQL shadow 镜像信号和 shadow application checkpoint；云端重建/回放会污染本地 shadow 策略观测结果。
+- 短期最小修复采用 mirror stg 隔离，不改 source stg 语义，不改 JoinQuant 原始信号表。
+
+已修改:
+- `run_signal_dual_track.py` 新增 `--runner-id` / `SIGNAL_RUNNER_ID` / config `runner_id`，v2/v3 默认 shadow stg 改为 `<source_stg>_shadow_<runner_id>`。
+- v2/v3 拒绝旧共享名 `<source_stg>_shadow`，除非显式传 `--allow-shared-shadow-stg` 做一次性隔离测试。
+- 更新 `signal_dual_track.example.json`、`.env.example`、AGENTS 与重测文档，记录多部署 runner 必须隔离 shadow stg。
+
+验证:
+- `F:/Program_Home/vnpy/python.exe -m py_compile run_signal_dual_track.py` passed。
+- `F:/Program_Home/vnpy/python.exe -m pytest vnpy_signal_strategy_plus/test/test_signal_dual_track_runner.py -q -p no:cacheprovider --basetemp .tmp_pytest_runner_id` -> 11 passed, 1 third-party warning。
+
 ## 2026-05-16 — run_ml_headless 清库后 replay 结果不一致
 
 结论:

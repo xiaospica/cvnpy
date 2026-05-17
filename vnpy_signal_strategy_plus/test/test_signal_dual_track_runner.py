@@ -33,6 +33,61 @@ def test_load_json_reports_path_and_context(tmp_path):
     assert "stream_key" in message
 
 
+def test_runner_id_is_sanitized_for_shadow_stg():
+    assert runner._sanitize_runner_id("Tencent-QMT 01") == "tencent_qmt_01"
+
+
+def test_runner_id_resolves_from_cli_env_and_config(monkeypatch):
+    monkeypatch.setenv(runner.SIGNAL_RUNNER_ID_ENV, "env-runner")
+
+    assert runner._resolve_runner_id("cli-runner", {"runner_id": "config-runner"}) == "cli_runner"
+    assert runner._resolve_runner_id("", {"runner_id": "config-runner"}) == "env_runner"
+
+    monkeypatch.delenv(runner.SIGNAL_RUNNER_ID_ENV, raising=False)
+    assert runner._resolve_runner_id("", {"dual_track": {"runner_id": "config-runner"}}) == "config_runner"
+
+
+def test_shadow_stg_defaults_to_runner_scoped_name():
+    assert (
+        runner._resolve_shadow_stg("v2", "source_stg", "", "local_pc")
+        == "source_stg_shadow_local_pc"
+    )
+
+
+def test_shadow_stg_requires_runner_id_for_mirror_modes():
+    try:
+        runner._resolve_shadow_stg("v3", "source_stg", "", "")
+    except ValueError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - the test must fail if shared defaults are accepted.
+        raise AssertionError("missing runner_id was accepted")
+
+    assert "--runner-id" in message
+    assert runner.SIGNAL_RUNNER_ID_ENV in message
+
+
+def test_legacy_shared_shadow_stg_is_refused_without_escape_hatch():
+    try:
+        runner._resolve_shadow_stg("v2", "source_stg", "source_stg_shadow", "local_pc")
+    except ValueError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - the test must fail if shared defaults are accepted.
+        raise AssertionError("shared shadow stg was accepted")
+
+    assert "Refuse shared shadow stg" in message
+
+    assert (
+        runner._resolve_shadow_stg(
+            "v2",
+            "source_stg",
+            "source_stg_shadow",
+            "local_pc",
+            allow_shared_shadow_stg=True,
+        )
+        == "source_stg_shadow"
+    )
+
+
 def test_v3_source_is_live_only_and_not_armed_by_default():
     cfg = runner._build_config(
         "v3",

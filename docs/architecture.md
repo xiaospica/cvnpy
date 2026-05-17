@@ -353,6 +353,8 @@ QMT_SIM 的账户重建依赖 `<VNPY_DATA_ROOT>/state/sim_<account>.db`。除账
 
 策略订单归因继续使用 `OrderRequest.reference={strategy_name}:{seq}`。策略启动时会从 QMT_SIM 持久化订单中扫描最大 seq，恢复 `_order_seq`，避免 vnpy 重启后 reference 从 1 重新开始导致成交归因串号。
 
+双轨 runner 的 shadow 镜像信号必须按部署隔离。`run_signal_dual_track.py` 在 v2/v3 中默认把 shadow stg 解析为 `<source_stg>_shadow_<runner_id>`，其中 `runner_id` 来自 `--runner-id`、`SIGNAL_RUNNER_ID` 或配置文件 `runner_id`。旧的 `<source_stg>_shadow` 是共享命名，多台机器同时运行时会互相消费/清理同一批镜像信号，因此默认拒绝；只有一次性隔离测试可以显式传 `--allow-shared-shadow-stg`。
+
 边界规则：
 
 - `redis_to_mysql_bridge.py` 不再写 `stock_trade`。

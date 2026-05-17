@@ -1,5 +1,6 @@
 {
     "_doc": "SignalStrategyPlus dual-track runtime config template. Copy this file to <VNPY_DATA_ROOT>/config/signal_dual_track.json or set SIGNAL_DUAL_TRACK_CONFIG to an absolute path.",
+    "runner_id": "",
     "strategy_class": "RedisLiveSimTestStrategy",
     "strategy_name": "harvester_micro_cap_1",
     "initial_capital": 1000000.0,

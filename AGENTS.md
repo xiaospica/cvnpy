@@ -222,4 +222,5 @@ A 股策略通常继承自 `CtaTemplate` 或自定义策略基类。
 - QMT_SIM 重启恢复必须依赖 `<VNPY_DATA_ROOT>/state/sim_<account>.db`，其中 `sim_meta` 保存 order/trade 计数、`last_settle_date` 和 `today_buy_json`；策略启动时应从持久化订单 reference 恢复 `_order_seq`。
 - `run_signal_dual_track.py` 是 SignalStrategyPlus 近实盘启动入口；未显式传 `--settle-through` 时，应在 runner 层按本地交易日历默认结算到最近已完成交易日，不要在策略类里写全局 runtime override 或自动推断逻辑。
 - `run_signal_dual_track.py` 的运行配置只能来自 `SIGNAL_DUAL_TRACK_CONFIG` 或 `<VNPY_DATA_ROOT>/config/signal_dual_track.json`；禁止正式启动入口默认读取 `vnpy_signal_strategy_plus/test/*.json` 这类历史测试配置。
+- `run_signal_dual_track.py` 的 v2/v3 shadow 镜像信号必须按 runner/deployment 隔离；默认 shadow stg 为 `<source_stg>_shadow_<runner_id>`，`runner_id` 来自 `--runner-id`、`SIGNAL_RUNNER_ID` 或配置文件 `runner_id`。禁止多台机器共享旧的 `<source_stg>_shadow`，除非明确传 `--allow-shared-shadow-stg` 做一次性隔离测试。
 - v2 历史批量回放期间，replay adapter 必须把策略变量 `replay_status` 标记为 `running`，空闲/退出后恢复 `idle`，避免通用 `sim_live_settle` journal 在回放中途采样并污染权益曲线。

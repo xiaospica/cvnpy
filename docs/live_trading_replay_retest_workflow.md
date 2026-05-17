@@ -59,18 +59,18 @@ flowchart LR
 
 步骤：
 
-1. 在 mlearnweb 实盘交易页面删除 `harvester_micro_cap_1` / `harvester_micro_cap_1_shadow` 策略卡片。
+1. 在 mlearnweb 实盘交易页面删除 `harvester_micro_cap_1` / `harvester_micro_cap_1_shadow_<runner_id>` 策略卡片。
 
 2. 清理 vnpy 侧聚宽链路测试状态：
 
 ```powershell
-F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.purge_test_strategy --config %VNPY_DATA_ROOT%/config/signal_dual_track.json
+F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.purge_test_strategy --config %VNPY_DATA_ROOT%/config/signal_dual_track.json --shadow-stg harvester_micro_cap_1_shadow_local_pc
 ```
 
 3. 启动 vnpy QMT_SIM、策略和 WebTrader。若需要 mlearnweb 前端直接看到卡片，使用生产端口：
 
 ```powershell
-F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v2 --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow
+F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v2 --source-stg harvester_micro_cap_1 --runner-id local_pc
 ```
 
 4. 另开终端启动 Redis 到 MySQL bridge：
@@ -84,7 +84,7 @@ F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.scripts.redis_to_my
 6. 聚宽回测结束，并等待 vnpy 侧最后一个交易日结算完成后，采集验收快照：
 
 ```powershell
-F:/Program_Home/vnpy/python.exe -m vnpy_qmt_sim.replay.acceptance capture --label jq_harvester_micro_cap_1 --strategies harvester_micro_cap_1,harvester_micro_cap_1_shadow
+F:/Program_Home/vnpy/python.exe -m vnpy_qmt_sim.replay.acceptance capture --label jq_harvester_micro_cap_1 --strategies harvester_micro_cap_1,harvester_micro_cap_1_shadow_local_pc
 ```
 
 ## CSV 链路重测
@@ -166,7 +166,7 @@ F:/Program_Home/vnpy/python.exe -m vnpy_qmt_sim.replay.acceptance capture --labe
 如果需要比较重构前后的结果，先在修改前采集 baseline：
 
 ```powershell
-F:/Program_Home/vnpy/python.exe -m vnpy_qmt_sim.replay.acceptance capture --label pre_refactor --strategies harvester_micro_cap_1,harvester_micro_cap_1_shadow,csi300_lgb_headless,csi300_lgb_headless_2
+F:/Program_Home/vnpy/python.exe -m vnpy_qmt_sim.replay.acceptance capture --label pre_refactor --strategies harvester_micro_cap_1,harvester_micro_cap_1_shadow_local_pc,csi300_lgb_headless,csi300_lgb_headless_2
 ```
 
 修改后运行三策略并比较：

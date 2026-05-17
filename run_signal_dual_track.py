@@ -56,13 +56,13 @@
     F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v1 --source-stg harvester_micro_cap_1
 
     # v2: FakeQMT source + QMT_SIM shadow，无真实下单风险
-    F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v2 --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow
+    F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v2 --source-stg harvester_micro_cap_1 --runner-id local_pc
 
     # v3: 真实 QMT source + QMT_SIM shadow；默认只连接和观察，不消费 source 信号、不下单
-    F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v3 --qmt-account YOUR_PAPER_ACCOUNT --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow
+    F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v3 --qmt-account YOUR_PAPER_ACCOUNT --source-stg harvester_micro_cap_1 --runner-id tencent_qmt_01
 
     # v3: 显式武装真实 source 腿，只消费启动后新信号并可能向 QMT 发单
-    F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v3 --qmt-account YOUR_PAPER_ACCOUNT --source-stg harvester_micro_cap_1 --shadow-stg harvester_micro_cap_1_shadow --allow-live-orders --live-signal-cutoff startup
+    F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v3 --qmt-account YOUR_PAPER_ACCOUNT --source-stg harvester_micro_cap_1 --runner-id tencent_qmt_01 --allow-live-orders --live-signal-cutoff startup
 """
 from __future__ import annotations
 
@@ -70,6 +70,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -145,9 +146,12 @@ ensure_vnpy_data_env()
 
 
 SIGNAL_DUAL_TRACK_CONFIG_ENV = "SIGNAL_DUAL_TRACK_CONFIG"
+SIGNAL_RUNNER_ID_ENV = "SIGNAL_RUNNER_ID"
 DEFAULT_SETTING_FILENAME = "signal_dual_track.json"
 WEBTRADER_HTTP_PORT = 8001
 MODE_ALIASES = {"single": "v1", "v1": "v1", "v2": "v2", "v3": "v3"}
+MAX_STG_NAME_LEN = 64
+RUNNER_ID_INVALID_CHARS = re.compile(r"[^A-Za-z0-9_]+")
 
 
 def _default_setting_path() -> Path:
@@ -261,6 +265,85 @@ def _normalize_mode(mode: str) -> str:
 def _default_cleanup_scope(mode: str) -> str:
     """Return the conservative cleanup scope for a runner mode."""
     return "shadow" if _normalize_mode(mode) == "v3" else "all-sim"
+
+
+def _sanitize_runner_id(value: object) -> str:
+    """Return a stable stg suffix from CLI/env/config input."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = RUNNER_ID_INVALID_CHARS.sub("_", text).strip("_").lower()
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text
+
+
+def _resolve_runner_id(cli_value: str, setting: Dict[str, Any]) -> str:
+    """Resolve the deployment-local runner id used to isolate shadow stg."""
+    dual_track_cfg = setting.get("dual_track", {}) or {}
+    for raw in (
+        cli_value,
+        os.getenv(SIGNAL_RUNNER_ID_ENV, ""),
+        setting.get("runner_id", ""),
+        dual_track_cfg.get("runner_id", ""),
+    ):
+        runner_id = _sanitize_runner_id(raw)
+        if runner_id:
+            return runner_id
+    return ""
+
+
+def _validate_stg_name(value: str, *, field: str) -> str:
+    """Keep generated strategy/signal names inside the MySQL varchar budget."""
+    name = str(value or "").strip()
+    if not name:
+        raise ValueError(f"{field} is required")
+    if len(name) > MAX_STG_NAME_LEN:
+        raise ValueError(
+            f"{field} is too long: {len(name)} > {MAX_STG_NAME_LEN}: {name!r}"
+        )
+    return name
+
+
+def _resolve_shadow_stg(
+    mode: str,
+    source_stg: str,
+    requested_shadow_stg: str,
+    runner_id: str,
+    *,
+    allow_shared_shadow_stg: bool = False,
+) -> str:
+    """Resolve a mirror stg that cannot be shared accidentally by two runners."""
+    source_stg = _validate_stg_name(source_stg, field="source_stg")
+    shared_shadow_stg = f"{source_stg}_shadow"
+    mode = _normalize_mode(mode)
+
+    if mode == "v1":
+        return _validate_stg_name(
+            requested_shadow_stg or shared_shadow_stg,
+            field="shadow_stg",
+        )
+
+    if requested_shadow_stg:
+        shadow_stg = _validate_stg_name(requested_shadow_stg, field="shadow_stg")
+        if shadow_stg == shared_shadow_stg and not allow_shared_shadow_stg:
+            raise ValueError(
+                f"Refuse shared shadow stg {shadow_stg!r}. Use --runner-id so the "
+                f"default becomes {source_stg}_shadow_<runner_id>, pass a unique "
+                "--shadow-stg, or use --allow-shared-shadow-stg only for an isolated "
+                "one-off test."
+            )
+        return shadow_stg
+
+    if not runner_id:
+        raise ValueError(
+            f"--runner-id (or {SIGNAL_RUNNER_ID_ENV}/config runner_id) is required "
+            f"for mode {mode} so the shadow mirror stg is isolated per runner."
+        )
+    return _validate_stg_name(
+        f"{source_stg}_shadow_{runner_id}",
+        field="shadow_stg",
+    )
 
 
 def _resolve_live_signal_cutoff(mode: str, policy: str) -> Optional[datetime]:
@@ -1088,7 +1171,26 @@ def main() -> None:
     parser.add_argument(
         "--shadow-stg",
         default="",
-        help="shadow v2 trade_signal_events.stg; default <source-stg>_shadow",
+        help=(
+            "shadow v2 trade_signal_events.stg; default "
+            "<source-stg>_shadow_<runner-id> in v2/v3"
+        ),
+    )
+    parser.add_argument(
+        "--runner-id",
+        default="",
+        help=(
+            "unique runner/deployment id for mirror shadow stg isolation; "
+            f"can also be set by {SIGNAL_RUNNER_ID_ENV} or config runner_id"
+        ),
+    )
+    parser.add_argument(
+        "--allow-shared-shadow-stg",
+        action="store_true",
+        help=(
+            "allow the legacy shared <source-stg>_shadow name; only use for "
+            "isolated one-off tests"
+        ),
     )
     parser.add_argument(
         "--qmt-account",
@@ -1170,7 +1272,15 @@ def main() -> None:
     source_stg = args.source_stg or str(setting.get("strategy_name") or "").strip()
     if not source_stg:
         raise ValueError("strategy_name is required in config unless --source-stg is provided")
-    shadow_stg = args.shadow_stg or f"{source_stg}_shadow"
+    source_stg = _validate_stg_name(source_stg, field="source_stg")
+    runner_id = _resolve_runner_id(args.runner_id, setting)
+    shadow_stg = _resolve_shadow_stg(
+        mode,
+        source_stg,
+        args.shadow_stg,
+        runner_id,
+        allow_shared_shadow_stg=args.allow_shared_shadow_stg,
+    )
 
     live_signal_cutoff_dt = _resolve_live_signal_cutoff(mode, args.live_signal_cutoff)
     cfg = _build_config(
@@ -1200,6 +1310,7 @@ def main() -> None:
     print("=" * 60)
     print(f"config:     {setting_path}")
     print(f"模式:       {cfg['label']}")
+    print(f"runner_id:  {runner_id or '-'}")
     print(f"GATEWAYS:   {gateway_names}")
     print(f"STRATEGIES: {strategy_names}")
     print(f"strategy_equity_journal.db: {journal_db}")

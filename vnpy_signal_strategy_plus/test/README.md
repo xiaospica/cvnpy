@@ -42,7 +42,7 @@
 | CSV 回归链路 | `CsvReplayTestStrategy` | `etf_intra_test` | `test_setting.json` / `test_setting.local.json` | 用本地 `transaction.csv` / `position.csv` 快速复现历史回归结果 |
 | 聚宽近实盘模拟链路 | `RedisLiveSimTestStrategy` | `harvester_micro_cap_1` | `<VNPY_DATA_ROOT>/config/signal_dual_track.json` | 聚宽回测写 Redis，bridge 写 MySQL，vnpy 通过 QMT_SIM/FakeQMT 模拟成交，mlearnweb 观察结果 |
 
-近实盘模拟链路不读取 `position.csv`，不做持仓引导，QMT_SIM 应从 `模拟资金=1000000` 纯现金开始。正式双轨启动入口为 `run_signal_dual_track.py`，配置默认读取 `<VNPY_DATA_ROOT>/config/signal_dual_track.json`，不再默认读取本目录下的历史 test JSON。
+近实盘模拟链路不读取 `position.csv`，不做持仓引导，QMT_SIM 应从 `模拟资金=1000000` 纯现金开始。正式双轨启动入口为 `run_signal_dual_track.py`，配置默认读取 `<VNPY_DATA_ROOT>/config/signal_dual_track.json`，不再默认读取本目录下的历史 test JSON。v2/v3 默认 shadow stg 为 `<source_stg>_shadow_<runner_id>`；`runner_id` 必须按部署机器/runner 唯一，避免本地和云端共享同一 shadow 信号表名。
 
 ## 3. 配置
 
