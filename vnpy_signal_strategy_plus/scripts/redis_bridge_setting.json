@@ -1,5 +1,5 @@
 {
-    "_doc": "Redis Stream -> MySQL stock_trade 中转配置。生产环境请勿提交真实密码到 git；建议复制为 redis_bridge_setting.local.json 并加入 .gitignore。",
+    "_doc": "Redis Stream -> MySQL trade_signal_events 中转配置。生产环境请勿提交真实密码到 git；建议复制为 redis_bridge_setting.local.json 并加入 .gitignore。",
     "redis": {
         "host": "106.54.63.204",
         "port": 6888,

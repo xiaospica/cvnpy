@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Any
@@ -8,7 +8,13 @@ from vnpy.trader.utility import round_to
 from vnpy_signal_strategy_plus.utils import convert_code_to_vnpy_type
 
 from vnpy_signal_strategy_plus.base import CHINA_TZ, EngineType
-from vnpy_signal_strategy_plus.mysql_signal_strategy import MySQLSignalStrategyPlus, Stock
+from vnpy_signal_strategy_plus.mysql_signal_strategy import MySQLSignalStrategyPlus
+from vnpy_signal_strategy_plus.signal_journal import (
+    PCT_SEMANTICS,
+    TradeSignalEvent,
+    normalize_trade_signal_payload,
+    upsert_trade_signal_event,
+)
 from vnpy_signal_strategy_plus.template import SignalTemplatePlus
 
 
@@ -282,7 +288,7 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
 
             session = self.Session()
             try:
-                objs: list[Stock] = []
+                objs: list[TradeSignalEvent] = []
                 labels: list[str] = []
                 remark_base = self.get_test_remark_base()
                 remark_step = timedelta(milliseconds=20)
@@ -293,25 +299,36 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
                     db_type = str(s["type"])
                     if len(db_type) > 32:
                         db_type = db_type[:32]
-                    obj = Stock(
-                        code=s["code"],
-                        pct=float(s["pct"]),
-                        type=db_type,
-                        price=float(s.get("price", 0) or 0),
-                        stg=self.strategy_name,
-                        remark=remark,
-                        processed=False,
+                    label = str(s.get("label") or "")
+                    source_signal_id = f"{run_id}:{i}:{label}"
+                    payload = {
+                        "source": "live_test",
+                        "source_signal_id": source_signal_id,
+                        "signal_uid": f"live-test:{self.strategy_name}:{source_signal_id}",
+                        "code": s["code"],
+                        "pct": float(s["pct"]),
+                        "pct_semantics": PCT_SEMANTICS,
+                        "type": db_type,
+                        "price": float(s.get("price", 0) or 0),
+                        "stg": self.strategy_name,
+                        "remark": remark.strftime("%Y-%m-%d %H:%M:%S"),
+                        "empty": 0,
+                    }
+                    normalized = normalize_trade_signal_payload(
+                        payload,
+                        target_stg=self.strategy_name,
+                        source="live_test",
                     )
-                    session.add(obj)
+                    obj, _created = upsert_trade_signal_event(session, normalized)
                     objs.append(obj)
-                    labels.append(str(s.get("label") or ""))
+                    labels.append(label)
 
                 session.commit()
 
                 self.write_log(f"[LIVE_TEST] 写入测试信号成功 run_id={run_id} suite={suite} count={len(objs)}")
                 for obj, label in zip(objs, labels):
                     self.write_log(
-                        f"[LIVE_TEST] signal_id={obj.id} code={obj.code} pct={obj.pct} type={obj.type} price={obj.price} label={label}"
+                        f"[LIVE_TEST] signal_id={obj.id} uid={obj.signal_uid} code={obj.code} pct={obj.pct} type={obj.signal_type} price={obj.price} label={label}"
                     )
             except Exception as e:
                 session.rollback()
@@ -385,7 +402,7 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
 
         return super().get_order_price(vt_symbol, direction, fallback_price)
 
-    def process_signal(self, signal: Stock):
+    def process_signal(self, signal: TradeSignalEvent):
         self._current_test_signal_type = str(signal.type or "")
         self.live_test_order_tag = self._extract_case_tag(self._current_test_signal_type)
 
@@ -426,6 +443,7 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
                 volume=100.0,
                 order_type=order_type,
             )
+            self._last_signal_orderids = list(vt_orderids or [])
             if vt_orderids:
                 self.write_log(f"[LIVE_TEST] force_sell_no_position 已下发卖单: {vt_orderids}")
             else:
@@ -457,6 +475,7 @@ class LiveOrderTestStrategyPlus(MySQLSignalStrategyPlus):
                 volume=1.0,
                 order_type=order_type,
             )
+            self._last_signal_orderids = list(vt_orderids or [])
             if vt_orderids:
                 self.write_log(f"[LIVE_TEST] invalid_volume 已下发买单(绕过本地数量校验): {vt_orderids}")
             else:

@@ -1,4 +1,4 @@
-"""Replay adapters for MySQL-backed signal strategies."""
+﻿"""Replay adapters for v2 MySQL signal-journal strategies."""
 
 from __future__ import annotations
 
@@ -10,21 +10,15 @@ from typing import Any, Callable
 from vnpy_qmt_sim.replay import SimReplayController
 
 from .base import APP_NAME
-from .mysql_signal_strategy import Stock
+from .signal_journal import StrategySignalApplication, TradeSignalEvent
 from .utils import convert_code_to_vnpy_type
 
 
 TradeDayPredicate = Callable[[date], bool]
 
 
-class StockTradeSignalReplayAdapter:
-    """Drive a real ``MySQLSignalStrategyPlus`` from historical ``stock_trade`` rows.
-
-    The adapter keeps business knowledge in ``vnpy_signal_strategy_plus``:
-    querying ``stock_trade``, preserving raw signal fields, and invoking
-    ``strategy.process_signal``. Simulator day advancement is delegated to
-    ``SimReplayController``.
-    """
+class SignalJournalReplayAdapter:
+    """Drive a real MySQLSignalStrategyPlus from historical v2 signal events."""
 
     def __init__(
         self,
@@ -51,10 +45,10 @@ class StockTradeSignalReplayAdapter:
         self._last_signal_ts = time.time()
 
     def run_polling_loop(self) -> None:
-        """Poll ``stock_trade`` and replay signals in remark order."""
+        """Poll trade_signal_events and replay signals in remark order."""
         self.controller.start_dynamic()
         self.strategy.write_log(
-            f"[replay] stock_trade adapter started strategy={self.strategy_name} "
+            f"[replay] signal journal adapter started strategy={self.strategy_name} "
             f"gateway={self.gateway_name}"
         )
 
@@ -67,16 +61,7 @@ class StockTradeSignalReplayAdapter:
                 session = None
                 try:
                     session = self.strategy.Session()
-                    signals = (
-                        session.query(Stock)
-                        .filter(
-                            Stock.stg == self.strategy_name,
-                            Stock.processed == False,  # noqa: E712
-                        )
-                        .order_by(Stock.remark.asc(), Stock.id.asc())
-                        .limit(self.batch_limit)
-                        .all()
-                    )
+                    signals = self._query_unconsumed(session)
 
                     if not signals:
                         self._finalize_after_idle()
@@ -95,7 +80,7 @@ class StockTradeSignalReplayAdapter:
 
                 except Exception as exc:
                     self.strategy.write_log(
-                        f"[replay] stock_trade polling failed: {exc}\n"
+                        f"[replay] signal journal polling failed: {exc}\n"
                         f"{traceback.format_exc()}"
                     )
                     if session is not None:
@@ -108,6 +93,27 @@ class StockTradeSignalReplayAdapter:
         finally:
             self.controller.finalize(self._last_signal_day)
 
+    def _query_unconsumed(self, session: Any) -> list[TradeSignalEvent]:
+        account_id, gateway_name, engine, strategy_name = self.strategy._application_scope()
+        app_join = (
+            (StrategySignalApplication.signal_event_id == TradeSignalEvent.id)
+            & (StrategySignalApplication.account_id == account_id)
+            & (StrategySignalApplication.gateway_name == gateway_name)
+            & (StrategySignalApplication.engine == engine)
+            & (StrategySignalApplication.strategy_name == strategy_name)
+        )
+        return (
+            session.query(TradeSignalEvent)
+            .outerjoin(StrategySignalApplication, app_join)
+            .filter(
+                TradeSignalEvent.stg == self.strategy_name,
+                StrategySignalApplication.id.is_(None),
+            )
+            .order_by(TradeSignalEvent.remark.asc(), TradeSignalEvent.id.asc())
+            .limit(self.batch_limit)
+            .all()
+        )
+
     def _finalize_after_idle(self) -> None:
         if self._last_signal_day is None:
             return
@@ -116,13 +122,15 @@ class StockTradeSignalReplayAdapter:
         self.controller.finalize(self._last_signal_day)
         self._last_signal_day = None
 
-    def _process_one_signal(self, session: Any, signal: Stock) -> None:
+    def _process_one_signal(self, session: Any, signal: TradeSignalEvent) -> None:
         signal_day = self._signal_day(signal)
         self.controller.on_external_signal_day(signal_day)
         self._refresh_signal_symbol(signal, signal_day)
         self.controller.set_replay_now(signal.remark)
         self.strategy.current_dt = signal.remark
 
+        self.strategy._last_signal_orderids = []
+        error_msg = None
         try:
             processed = self.strategy.process_signal(signal)
         except Exception as exc:
@@ -131,15 +139,22 @@ class StockTradeSignalReplayAdapter:
                 f"{traceback.format_exc()}"
             )
             processed = False
+            error_msg = f"{type(exc).__name__}: {exc}"
 
         if processed:
             try:
-                signal.processed = True
+                status = "ordered" if self.strategy._last_signal_orderids else "skipped"
+                self.strategy.mark_signal_consumed(
+                    session,
+                    signal,
+                    status=status,
+                    error_msg=error_msg,
+                )
                 session.commit()
             except Exception as exc:
                 session.rollback()
                 self.strategy.write_log(
-                    f"[replay] commit processed=True failed id={signal.id}: {exc}"
+                    f"[replay] commit signal application failed id={signal.id}: {exc}"
                 )
         else:
             session.rollback()
@@ -149,7 +164,7 @@ class StockTradeSignalReplayAdapter:
         self.controller.mark_signal_day(signal_day)
         time.sleep(0.01)
 
-    def _refresh_signal_symbol(self, signal: Stock, signal_day: date) -> None:
+    def _refresh_signal_symbol(self, signal: TradeSignalEvent, signal_day: date) -> None:
         try:
             vt_symbol = convert_code_to_vnpy_type(signal.code)
             self.controller.refresh_symbols([vt_symbol], signal_day)
@@ -159,7 +174,7 @@ class StockTradeSignalReplayAdapter:
             )
 
     @staticmethod
-    def _signal_day(signal: Stock) -> date:
+    def _signal_day(signal: TradeSignalEvent) -> date:
         remark = signal.remark
         if isinstance(remark, datetime):
             return remark.date()

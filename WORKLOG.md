@@ -123,3 +123,28 @@
 - 最终权益聚宽 `1,112,025.37`，本地 `1,120,332.97`，本地高 `8,307.60`。
 - 最终持仓标的集合完全一致 15/15，但 7 个标的股数不一致，总绝对股数差 1,300 股。
 - 根因判断为执行/撮合口径差异：聚宽记录实际成交价/股数，本地 QMT_SIM 基于本地行情、资金和整手约束重新撮合。
+
+## 2026-05-17 — SignalStrategyPlus v2 信号 journal 与 QMT_SIM 重启恢复
+
+已确认：
+- 不再兼容旧 `stock_trade` 信号消费链路；其它历史表不作为本链路事实源。
+- `pct` 固定为 `trade_value_pct_of_total_portfolio`，必须显式写入 payload/table。
+- Redis 是传输层，MySQL `trade_signal_events` + `strategy_signal_applications` 是信号重建和审计事实源。
+
+已修改：
+- 新增 `vnpy_signal_strategy_plus/signal_journal.py`，定义 `trade_signal_events`、`strategy_signal_applications`、payload normalization、幂等 upsert 和 checkpoint helper。
+- `jq_redis_trade.py` 生成稳定 `signal_uid`、`source_signal_id`、`pct_semantics`、`amt`，并仅使用 Redis Stream。
+- `redis_to_mysql_bridge.py` 只写 v2 signal journal，不再写 `stock_trade`。
+- `MySQLSignalStrategyPlus` 改为查询 v2 未消费信号，并按策略 scope 写消费 checkpoint。
+- 回放 adapter、CSV replay、live order test、E2E cleanup/wait、purge 脚本切到 v2 表。
+- QMT_SIM `sim_meta` 保存 `order_count`、`trade_count`、`last_settle_date`、`today_buy_json`；gateway 启动恢复这些元数据。
+- `SignalTemplatePlus` 与 `vnpy_ml_strategy` 模板支持从 QMT_SIM 持久化订单 reference 恢复最大 seq。
+
+验证：
+- `F:/Program_Home/vnpy/python.exe -m pytest tests/test_qmt_sim_persistence.py vnpy_signal_strategy_plus/test/test_signal_journal.py -q`：16 passed，10 个第三方/utcnow deprecation warning。
+- `F:/Program_Home/vnpy/python.exe -m py_compile ...` 覆盖本轮修改 Python 文件：通过。
+
+风险/待办：
+- 当前尚未跑全量 webtrader HTTP e2e 和真实 Redis/MySQL bridge 联调。
+- `vnpy_signal_strategy_plus/test/redis_live_sim_setting.json`、`mysql_signal_setting.json`、`.env.example` 等已有本地改动未纳入本轮判断，需要提交时单独审查。
+- 文档/README 中仍可能有旧 `stock_trade` 文案残留，P3 继续清理。

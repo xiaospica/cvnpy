@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
-"""聚宽 Redis 信号 -> MySQL -> vnpy -> 模拟柜台的近实盘链路测试策略。
+﻿# -*- coding: utf-8 -*-
+"""聚宽 Redis 信号 -> v2 MySQL signal journal -> vnpy -> 模拟柜台的近实盘链路测试策略。
 
 这个策略刻意不读取 ``position.csv``，也不做 CSV 持仓引导。它用于验证
-聚宽回测实时写入 Redis 后，本地 bridge、MySQL 信号表、vnpy 策略下单、
+聚宽回测实时写入 Redis 后，本地 bridge、MySQL v2 信号表、vnpy 策略下单、
 QMT_SIM 撮合和 WebTrader/mlearnweb 展示这条链路。
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ class RedisLiveSimTestStrategy(CsvReplayTestStrategy):
     """Redis 信号近实盘模拟链路策略。
 
     配置语义：
-    - ``replay.mode = "sim_replay"``：按 ``stock_trade.remark`` 的历史时间推进
+    - ``replay.mode = "sim_replay"``：按 ``trade_signal_events.remark`` 的历史时间推进
       QMT_SIM，适合聚宽回测写历史信号后的本地模拟成交。
     - ``replay.mode = "live"``：退回父类实时轮询，只消费当前交易日信号，便于
       后续切换真实网关时复用策略入口。

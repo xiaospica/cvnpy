@@ -1,5 +1,5 @@
 {
-    "_doc": "vnpy_signal_strategy_plus 端到端回归测试配置。strategy_name 必须三处一致：(1) Redis stream_key，(2) bridge target_stg / mysql stock_trade.stg，(3) vnpy 中加载的策略实例 strategy_name。",
+    "_doc": "vnpy_signal_strategy_plus 端到端回归测试配置。strategy_name 必须三处一致：(1) Redis stream_key，(2) bridge target_stg / mysql trade_signal_events.stg，(3) vnpy 中加载的策略实例 strategy_name。",
 
     "strategy_name": "etf_intra_test",
     "strategy_class": "CsvReplayTestStrategy",
@@ -72,7 +72,7 @@
     },
 
     "wait": {
-        "_doc": "回放后等待 bridge+strategy 消化的最长秒数；轮询 stock_trade.processed 比例 ≥99% 提前结束。",
+        "_doc": "回放后等待 bridge+strategy 消化的最长秒数；轮询 strategy_signal_applications checkpoint 比例 ≥99% 提前结束。",
         "max_seconds": 120,
         "poll_interval": 2
     }

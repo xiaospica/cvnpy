@@ -305,3 +305,50 @@ def test_lockfile_writes_current_pid(tmp_path: Path) -> None:
     p.close()
     content = (tmp_path / "sim_Z.lock").read_text(encoding="utf-8").strip()
     assert content == str(os.getpid())
+
+def test_restore_recovers_runtime_counters_settle_and_today_buy(tmp_path: Path) -> None:
+    counter, p = _make_counter(tmp_path, "ACC_RUNTIME", 1_000_000.0)
+    _buy(counter, "000001.SZSE", 200, 11.0)
+
+    p.close()
+    p2 = QmtSimPersistence(account_id="ACC_RUNTIME", root=tmp_path)
+    state_before_settle = p2.restore(gateway_name="QMT_SIM")
+    assert state_before_settle.order_count >= 1
+    assert state_before_settle.trade_count >= 1
+    assert state_before_settle.today_buy
+    p2.close()
+
+    counter2, p3 = _make_counter(tmp_path, "ACC_RUNTIME", 1_000_000.0)
+    state = p3.restore(gateway_name="QMT_SIM")
+    counter2.order_count = state.order_count
+    counter2.trade_count = state.trade_count
+    counter2.last_settle_date = state.last_settle_date
+    counter2._today_buy = state.today_buy
+    counter2.settle_end_of_day(date(2026, 5, 15))
+    p3.close()
+
+    p4 = QmtSimPersistence(account_id="ACC_RUNTIME", root=tmp_path)
+    state_after_settle = p4.restore(gateway_name="QMT_SIM")
+    assert state_after_settle.last_settle_date == date(2026, 5, 15)
+    assert state_after_settle.today_buy == {}
+    p4.close()
+
+
+def test_max_reference_sequence_handles_resubmit_suffix_and_case_tags(tmp_path: Path) -> None:
+    counter, p = _make_counter(tmp_path, "ACC_REF", 1_000_000.0)
+    sym, ex = "000001.SZSE".split(".")
+    for ref in ["demo:1", "demo:7R", "demo:9|case=no_fill", "other:99"]:
+        counter.send_order(OrderRequest(
+            symbol=sym,
+            exchange=Exchange(ex),
+            direction=Direction.LONG,
+            type=OrderType.LIMIT,
+            offset=Offset.OPEN,
+            price=11.0,
+            volume=100,
+            reference=ref,
+        ))
+
+    assert p.max_reference_sequence("demo") == 9
+    assert p.max_reference_sequence("other") == 99
+    assert p.max_reference_sequence("missing") == 0

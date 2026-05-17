@@ -311,3 +311,51 @@ A 股实盘对速度有要求。`QmtGateway` 的交易模块 (`TD`) 采用了 `x
 - 在 `connect` 时，`MD` 模块会自动遍历 QMT 内置的板块字典（如 "上证A股", "创业板", "沪市ETF" 等）。
 - 批量调用 `get_instrument_detail`，提取涨跌停价格 (`UpStopPrice`, `DownStopPrice`) 并缓存。
 - 自动将所有符合条件的标的实例化为 `ContractData` 推送给 `OmsEngine`，策略无需手动配置合约乘数和最小变动价位。
+
+### 1.0.3 SignalStrategyPlus v2 信号事实源与模拟账户重建
+
+SignalStrategyPlus 不再以 `stock_trade` 作为运行时信号契约。旧表的全局 `processed` 只适合单消费者临时脚本；在多策略、双轨 shadow、重启重放和模拟账户恢复场景下，它无法表达“哪个账户/网关/策略已经消费了哪条信号”。
+
+新的信号链路如下：
+
+```mermaid
+flowchart LR
+    JQ["JoinQuant jq_redis_trade.py"] --> RS["Redis Stream"]
+    CSV["CSV replay / live test"] --> RS
+    RS --> BR["redis_to_mysql_bridge"]
+    BR --> EVT[("trade_signal_events")]
+    EVT --> STRAT["MySQLSignalStrategyPlus"]
+    STRAT --> APP[("strategy_signal_applications")]
+    STRAT --> GW["QMT / QMT_SIM"]
+```
+
+核心表：
+
+| 表 | 角色 | 关键不变量 |
+|---|---|---|
+| `trade_signal_events` | append-only 信号事实 | `signal_uid` 唯一；`pct_semantics=trade_value_pct_of_total_portfolio`；保留 raw payload |
+| `strategy_signal_applications` | 每策略消费 checkpoint | 唯一键包含 `account_id + gateway_name + engine + strategy_name + signal_event_id` |
+
+字段语义：
+
+- `pct` 只表示“本次交易金额 / 组合总资产”，不是目标权重，也不是可用现金比例或持仓比例。
+- `empty=1` 表示卖出后聚宽侧该标的已清仓，vnpy 策略可将其解释为清掉当前可卖持仓。
+- `signal_uid` 由生产端显式提供；若没有，bridge 会使用 source id、Redis id 或 payload hash 兜底。
+- Redis 是传输层，不是事实源；重建时以 MySQL v2 journal 为准。
+
+QMT_SIM 的账户重建依赖 `<VNPY_DATA_ROOT>/state/sim_<account>.db`。除账户、持仓、订单、成交外，`sim_meta` 还保存：
+
+| key | 用途 |
+|---|---|
+| `order_count` / `trade_count` | 防止重启后本地订单号/成交号复用 |
+| `last_settle_date` | 防止重复日终结算或跨日漏结算 |
+| `today_buy_json` | 恢复 A 股 T+1 当日买入冻结与当日买入 mark-to-market 口径 |
+
+策略订单归因继续使用 `OrderRequest.reference={strategy_name}:{seq}`。策略启动时会从 QMT_SIM 持久化订单中扫描最大 seq，恢复 `_order_seq`，避免 vnpy 重启后 reference 从 1 重新开始导致成交归因串号。
+
+边界规则：
+
+- `redis_to_mysql_bridge.py` 不再写 `stock_trade`。
+- `MySQLSignalStrategyPlus` 不再读取 `stock_trade.processed`。
+- 新增生产者或测试注入脚本必须写 v2 payload，并声明 `pct_semantics`。
+- 新模拟账户重建应从 v2 signal journal 回放，不应从 Redis backlog 或旧 `stock_trade` 反推。

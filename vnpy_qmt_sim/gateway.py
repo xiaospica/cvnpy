@@ -129,6 +129,11 @@ class QmtSimGateway(BaseGateway):
             self.write_log(f"持久化恢复失败: {exc}")
             return
 
+        self.td.counter.order_count = max(self.td.counter.order_count, int(state.order_count or 0))
+        self.td.counter.trade_count = max(self.td.counter.trade_count, int(state.trade_count or 0))
+        self.td.counter.last_settle_date = state.last_settle_date
+        self.td.counter._today_buy = dict(state.today_buy or {})
+
         if state.capital > 0:
             self.td.counter.capital = state.capital
             self.td.counter.frozen = 0.0
@@ -137,9 +142,13 @@ class QmtSimGateway(BaseGateway):
                 self.td.counter.positions[pos_key] = pos
                 self.td.counter._emit_position(pos)
             self.td.counter.push_account()
+
+        if state.capital > 0 or state.order_count or state.trade_count or state.last_settle_date:
             self.write_log(
-                f"持久化恢复: capital={state.capital:.2f} positions={len(state.positions)} "
-                f"cancelled_orders={len(state.cancelled_active_orders)}"
+                f"Persistence restored: capital={state.capital:.2f} positions={len(state.positions)} "
+                f"cancelled_orders={len(state.cancelled_active_orders)} "
+                f"order_count={self.td.counter.order_count} trade_count={self.td.counter.trade_count} "
+                f"last_settle_date={state.last_settle_date} today_buy={len(state.today_buy or {})}"
             )
 
     def _build_bar_source(self, setting: dict) -> None:

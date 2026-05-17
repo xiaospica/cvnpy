@@ -1,25 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Redis Stream -> MySQL stock_trade 中转进程。
+"""Redis Stream -> MySQL v2 signal journal bridge.
 
-监听一个或多个 Redis Stream（每个 stream 对应一个生产端策略），把收到的下单
-信号写入 MySQL `stock_trade` 表，供 vnpy_signal_strategy_plus 中基于
-MySQL 轮询的策略消费。
-
-架构要点：
-- 每个订阅一个守护线程，独立 xreadgroup 阻塞拉取，互不影响。
-- 写库时序：INSERT -> commit -> xack。MySQL 写失败则不 ack，消息留在
-  Redis Consumer Group 的 PEL，下次重启或下次消费由 Consumer 端补偿。
-- 字段透传：Redis JSON 的 code 直接写入 MySQL，由策略层
-  ``convert_code_to_vnpy_type`` 负责剥后缀（"518880.SH"/"518880"/
-  "518880.SSE" 都能正确转成 ``518880.SSE``）。
-- ``stg`` 字段：优先写入 payload 里的 ``stg``，缺省时才使用配置中的
-  ``target_stg``。
-- ``empty`` 字段：写入 ``stock_trade.empty``，策略侧用于 SELL 清仓。
-- ``amt`` / ``raw_payload`` 字段：Redis 已知字段写入独立列，同时把完整
-  payload 写入 ``raw_payload``，用于审计和差异定位。
-
-Stock ORM 必须与 ``vnpy_signal_strategy_plus.mysql_signal_strategy.Stock``
-保持字段一致。任何 schema 变更需同步两处。
+The canonical JoinQuant signal path is now:
+JoinQuant -> Redis Stream -> trade_signal_events -> strategy_signal_applications.
+The legacy MySQL signal table is intentionally not written by this process.
 """
 from __future__ import annotations
 
@@ -35,43 +19,20 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import redis
-from sqlalchemy import (Boolean, Column, DateTime, Float, Integer, String, Text,
-                        create_engine)
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from vnpy_signal_strategy_plus.signal_journal import (
+    SignalJournalBase,
+    normalize_trade_signal_payload,
+    upsert_trade_signal_event,
+)
 
 
 def resolve_setting_path(template_path: Path) -> Path:
-    """优先 ``.local.json`` 副本（含真实密码、加 .gitignore），fallback 到模板。"""
+    """Prefer a sibling .local.json file, falling back to the template."""
     local = template_path.with_name(template_path.stem + ".local.json")
     return local if local.exists() else template_path
-
-Base = declarative_base()
-
-
-class Stock(Base):
-    """与 mysql_signal_strategy.Stock 字段一致的 ORM 镜像。
-
-    单独定义而非 import，避免 bridge 进程拉起整套 vnpy 依赖
-    （mysql_signal_strategy 顶部 import vnpy_ctp 等）。schema 变更必须
-    两处同步修改。
-    """
-
-    __tablename__ = "stock_trade"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    code = Column(String(32), nullable=False)
-    pct = Column(Float, nullable=False)
-    type = Column(String(32), nullable=False)
-    price = Column(Float, nullable=False)
-    stg = Column(String(32), nullable=False)
-    remark = Column(DateTime, nullable=False)
-    processed = Column(Boolean, default=False)
-    empty = Column(Boolean, default=False)
-    amt = Column(Float, nullable=True)
-    raw_payload = Column(Text, nullable=True)
-
-
-# ---------------- 配置 ----------------
 
 
 @dataclass
@@ -123,11 +84,8 @@ class BridgeConfig:
         )
 
 
-# ---------------- MySQL 写入 ----------------
-
-
 class MySQLWriter:
-    """封装 SQLAlchemy 会话；每次写入独立 session 短事务。"""
+    """Short-transaction writer for the v2 signal journal."""
 
     def __init__(self, cfg: MySQLCfg):
         url = (
@@ -136,84 +94,61 @@ class MySQLWriter:
         )
         self.engine = create_engine(url, pool_pre_ping=True, pool_recycle=3600)
         self.Session = sessionmaker(bind=self.engine)
+        SignalJournalBase.metadata.create_all(self.engine)
 
     def insert_signal(
         self,
         payload: dict,
         target_stg: str,
         logger: logging.Logger,
+        *,
+        stream_key: str = "",
+        redis_id: str = "",
     ) -> bool:
-        """写一条信号到 stock_trade。失败返回 False（外层不应 xack）。
+        """Write one Redis payload into trade_signal_events.
 
-        :param payload: 已 utf-8 解码的 dict，所有 value 是 str（Redis Stream 字段语义）。
-        :param target_stg: 配置里的 target_stg，作为 payload['stg'] 缺省值。
+        Redis is acked only after this method commits successfully.  Existing
+        signal_uid rows are treated as success so a PEL retry is idempotent.
         """
         try:
-            code = str(payload["code"])
-            pct = float(payload.get("pct", 0) or 0)
-            type_ = str(payload["type"])
-            price = float(payload.get("price", 0) or 0)
-            stg = str(payload.get("stg") or target_stg)
-            remark_str = str(payload["remark"])
-            remark_dt = datetime.strptime(remark_str, "%Y-%m-%d %H:%M:%S")
-            empty = str(payload.get("empty", "0")).strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "y",
-            }
-            amt_raw = payload.get("amt")
-            amt = float(amt_raw) if amt_raw not in (None, "") else None
-            raw_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        except KeyError as exc:
-            logger.error(f"[mysql] payload 缺字段 {exc}: {payload}")
-            return False
-        except ValueError as exc:
-            logger.error(f"[mysql] payload 字段解析失败 {exc}: {payload}")
+            normalized = normalize_trade_signal_payload(
+                payload,
+                target_stg=target_stg,
+                stream_key=stream_key,
+                redis_id=redis_id,
+            )
+        except (KeyError, ValueError) as exc:
+            logger.error(f"[mysql] payload parse failed {exc}: {payload}")
             return False
 
         session = self.Session()
         try:
-            row = Stock(
-                code=code,
-                pct=pct,
-                type=type_,
-                price=price,
-                stg=stg,
-                remark=remark_dt,
-                processed=False,
-                empty=empty,
-                amt=amt,
-                raw_payload=raw_payload,
-            )
-            session.add(row)
+            row, created = upsert_trade_signal_event(session, normalized)
             session.commit()
             logger.info(
-                f"[mysql] insert ok id={row.id} stg={stg} "
-                f"code={code} type={type_} pct={pct} price={price} "
-                f"empty={int(empty)} amt={amt} remark={remark_str}"
+                f"[mysql] signal_event {'insert' if created else 'exists'} "
+                f"id={row.id} uid={row.signal_uid} stg={row.stg} code={row.code} "
+                f"type={row.signal_type} pct={row.pct} price={row.price} "
+                f"empty={int(bool(row.empty))} amt={row.amt} redis_id={redis_id}"
             )
             return True
         except Exception as exc:
             session.rollback()
-            logger.error(f"[mysql] insert 失败: {exc}; payload={payload}")
+            logger.error(f"[mysql] signal_event write failed: {exc}; payload={payload}")
             return False
         finally:
             session.close()
 
 
-# ---------------- Redis 消费 ----------------
-
-
 class StreamConsumer(threading.Thread):
-    """单个 Redis Stream 的消费线程。"""
+    """Consumer thread for one Redis Stream."""
 
     def __init__(
         self,
         sub: Subscription,
         redis_client: redis.Redis,
         cfg: RedisCfg,
-        on_message: Callable[[Subscription, dict], bool],
+        on_message: Callable[[Subscription, dict, str], bool],
         logger: logging.Logger,
         stop_event: threading.Event,
     ):
@@ -226,7 +161,7 @@ class StreamConsumer(threading.Thread):
         self.stop_event = stop_event
 
     def _ensure_group(self) -> None:
-        """幂等创建 consumer group；stream 不存在时 mkstream=True 自动建。"""
+        """Idempotently create the consumer group."""
         try:
             self.redis.xgroup_create(
                 name=self.sub.stream_key,
@@ -240,7 +175,7 @@ class StreamConsumer(threading.Thread):
         except redis.ResponseError as exc:
             if "BUSYGROUP" in str(exc):
                 self.logger.info(
-                    f"[{self.sub.stream_key}] group {self.cfg.consumer_group} 已存在"
+                    f"[{self.sub.stream_key}] group {self.cfg.consumer_group} exists"
                 )
             else:
                 raise
@@ -259,7 +194,7 @@ class StreamConsumer(threading.Thread):
             self._ensure_group()
         except Exception as exc:
             self.logger.exception(
-                f"[{self.sub.stream_key}] 创建消费组失败，线程退出: {exc}"
+                f"[{self.sub.stream_key}] create consumer group failed, exit: {exc}"
             )
             return
 
@@ -279,31 +214,31 @@ class StreamConsumer(threading.Thread):
                 )
             except redis.ConnectionError as exc:
                 self.logger.error(
-                    f"[{self.sub.stream_key}] redis 连接异常 {exc}; 3s 后重试"
+                    f"[{self.sub.stream_key}] redis connection error {exc}; retry in 3s"
                 )
                 self.stop_event.wait(3)
                 continue
             except redis.ResponseError as exc:
                 if "NOGROUP" in str(exc):
                     self.logger.warning(
-                        f"[{self.sub.stream_key}] consumer group 丢失，尝试重建: {exc}"
+                        f"[{self.sub.stream_key}] consumer group missing, recreating: {exc}"
                     )
                     try:
                         self._ensure_group()
                     except Exception as ensure_exc:
                         self.logger.exception(
-                            f"[{self.sub.stream_key}] 重建 consumer group 失败: {ensure_exc}"
+                            f"[{self.sub.stream_key}] recreate consumer group failed: {ensure_exc}"
                         )
                     self.stop_event.wait(3)
                     continue
                 self.logger.exception(
-                    f"[{self.sub.stream_key}] xreadgroup 异常 {exc}; 3s 后重试"
+                    f"[{self.sub.stream_key}] xreadgroup error {exc}; retry in 3s"
                 )
                 self.stop_event.wait(3)
                 continue
             except Exception as exc:
                 self.logger.exception(
-                    f"[{self.sub.stream_key}] xreadgroup 异常 {exc}; 3s 后重试"
+                    f"[{self.sub.stream_key}] xreadgroup error {exc}; retry in 3s"
                 )
                 self.stop_event.wait(3)
                 continue
@@ -314,17 +249,17 @@ class StreamConsumer(threading.Thread):
             for _stream, items in resp:
                 for msg_id, raw in items:
                     msg_id_s = (
-                        msg_id.decode("utf-8") if isinstance(msg_id, bytes) else msg_id
+                        msg_id.decode("utf-8") if isinstance(msg_id, bytes) else str(msg_id)
                     )
                     payload = self._decode(raw)
                     self.logger.info(
                         f"[{self.sub.stream_key}] recv id={msg_id_s} payload={payload}"
                     )
                     try:
-                        ok = self.on_message(self.sub, payload)
+                        ok = self.on_message(self.sub, payload, msg_id_s)
                     except Exception as exc:
                         self.logger.exception(
-                            f"[{self.sub.stream_key}] handler 异常 id={msg_id_s} {exc}"
+                            f"[{self.sub.stream_key}] handler error id={msg_id_s} {exc}"
                         )
                         ok = False
 
@@ -337,17 +272,14 @@ class StreamConsumer(threading.Thread):
                             )
                         except Exception as exc:
                             self.logger.error(
-                                f"[{self.sub.stream_key}] xack 失败 id={msg_id_s} {exc}"
+                                f"[{self.sub.stream_key}] xack failed id={msg_id_s} {exc}"
                             )
                     else:
                         self.logger.warning(
-                            f"[{self.sub.stream_key}] 不 ack id={msg_id_s}（留 PEL 等待重试）"
+                            f"[{self.sub.stream_key}] not ack id={msg_id_s}; leave in PEL"
                         )
 
         self.logger.info(f"[{self.sub.stream_key}] consumer stopped")
-
-
-# ---------------- 进程编排 ----------------
 
 
 class BridgeProcess:
@@ -364,7 +296,7 @@ class BridgeProcess:
         )
         if dry_run:
             self.writer: Optional[MySQLWriter] = None
-            self.logger.warning("[bridge] DRY-RUN：不写 MySQL，仅打印收到的信号")
+            self.logger.warning("[bridge] DRY-RUN: do not write MySQL")
         else:
             self.writer = MySQLWriter(cfg.mysql)
         self.stop_event = threading.Event()
@@ -377,7 +309,6 @@ class BridgeProcess:
 
         logger = logging.getLogger("redis_to_mysql_bridge")
         logger.setLevel(getattr(logging, self.cfg.log_level.upper(), logging.INFO))
-        # 防止重复 handler
         if logger.handlers:
             return logger
 
@@ -393,13 +324,21 @@ class BridgeProcess:
         logger.addHandler(sh)
         return logger
 
-    def _on_message(self, sub: Subscription, payload: dict) -> bool:
+    def _on_message(self, sub: Subscription, payload: dict, redis_id: str) -> bool:
         if self.dry_run:
             self.logger.info(
-                f"[dry-run] would write: stg={sub.target_stg} payload={payload}"
+                f"[dry-run] would write stg={sub.target_stg} redis_id={redis_id} payload={payload}"
             )
             return True
-        return self.writer.insert_signal(payload, sub.target_stg, self.logger)
+        if self.writer is None:
+            return False
+        return self.writer.insert_signal(
+            payload,
+            sub.target_stg,
+            self.logger,
+            stream_key=sub.stream_key,
+            redis_id=redis_id,
+        )
 
     def _ping_redis(self) -> None:
         try:
@@ -408,7 +347,7 @@ class BridgeProcess:
                 f"[bridge] redis ping ok @ {self.cfg.redis.host}:{self.cfg.redis.port} db={self.cfg.redis.db}"
             )
         except Exception as exc:
-            self.logger.error(f"[bridge] redis ping 失败: {exc}")
+            self.logger.error(f"[bridge] redis ping failed: {exc}")
             raise
 
     def run(self) -> None:
@@ -453,7 +392,6 @@ class BridgeProcess:
             try:
                 signal_mod.signal(sig, _handler)
             except (ValueError, OSError):
-                # Windows 上 SIGTERM 在非主线程时不支持；忽略
                 pass
 
     def stop(self) -> None:
@@ -462,12 +400,9 @@ class BridgeProcess:
             self.stop_event.set()
 
 
-# ---------------- 入口 ----------------
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Redis Stream -> MySQL stock_trade 中转进程"
+        description="Redis Stream -> MySQL trade_signal_events bridge"
     )
     parser.add_argument(
         "--config",
@@ -476,12 +411,12 @@ def main() -> None:
                 Path(__file__).resolve().parent / "redis_bridge_setting.json"
             )
         ),
-        help="redis_bridge_setting.json 路径（默认优先 .local.json 副本）",
+        help="redis_bridge_setting.json path; .local.json is preferred when present",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="不写 MySQL，只 log 收到的信号（用于排错/抓包）",
+        help="Do not write MySQL; log received signals only",
     )
     args = parser.parse_args()
 

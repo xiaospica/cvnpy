@@ -96,20 +96,35 @@ class SignalTemplatePlus(ABC):
         return class_parameters
 
     def get_order_reference(self) -> str:
-        """生成订单 reference - 与 vnpy_ml_strategy.MlTemplate 完全对齐，
-        格式 ``{strategy_name}:{seq}``（重挂时尾部追加 ``R``）。
+        """Generate order reference aligned with MlTemplate.
 
-        关键：mlearnweb 后端 ``list_strategy_trades`` 用
-        ``prefix = f"{strategy_name}:"`` 做 ``startswith`` 过滤把成交归到策略
-        卡片。早期版本用 ``{APP_NAME}_{strategy_name}``（无冒号无序号）会被
-        过滤掉，导致前端 5173 的 TradesCard 永远显示空。
-
-        AutoResubmitMixin 可读 ``self._is_resubmitting`` 判断当前是否处于
-        重挂语境，与 MlTemplate 行为一致。
+        The format is ``{strategy_name}:{seq}``, with ``R`` appended during
+        resubmit. mlearnweb filters trades by the ``{strategy_name}:`` prefix,
+        so this must not fall back to ``{APP_NAME}_{strategy_name}`` style
+        references.
         """
         self._order_seq += 1
         suffix = "R" if getattr(self, "_is_resubmitting", False) else ""
         return f"{self.strategy_name}:{self._order_seq}{suffix}"
+
+    def restore_order_sequence_from_gateway(self) -> None:
+        """Restore order reference sequence from QMT_SIM persistence if available."""
+        gateway_name = str(getattr(self, "gateway", "") or "")
+        if not gateway_name:
+            return
+        try:
+            gateway = self.signal_engine.main_engine.get_gateway(gateway_name)
+            counter = getattr(getattr(gateway, "td", None), "counter", None)
+            persistence = getattr(counter, "_persistence", None)
+            if persistence is None or not hasattr(persistence, "max_reference_sequence"):
+                return
+            max_seq = int(persistence.max_reference_sequence(self.strategy_name) or 0)
+        except Exception as exc:
+            self.write_log(f"restore reference sequence failed: {exc}")
+            return
+        if max_seq > self._order_seq:
+            self._order_seq = max_seq
+            self.write_log(f"restored reference sequence to {self._order_seq}")
 
     @abstractmethod
     def on_init(self) -> None:

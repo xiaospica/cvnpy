@@ -110,3 +110,33 @@
 - 真实柜台 `broker_live_close` 写入时间改为 env `VNPY_BROKER_LIVE_EOD_JOURNAL_TIME`，默认 `16:00`。
 - 多策略共享真实账户时，QMT 网关持久化 `OrderRequest.reference` 到 broker order id 的映射，并将成交写入 `strategy_trade_journal`；`StrategyEquityJournalService` 使用每策略初始资金和成交流水归因 `broker_live_close.strategy_value`，同时保留真实账户总权益到 `account_equity`，缺失条件时显式回退账户级权益。
 - 当前仍需实盘环境长期观察：券商持仓市值字段口径、手续费/税费字段缺失、策略初始资金配置变更后的历史口径。
+
+## 补充计划：JoinQuant 信号 v2 journal 与模拟账户可重建（2026-05-17）
+
+### 背景/问题
+
+- `stock_trade` 的 `processed` 是全局状态，不区分账户、网关、策略实例和消费方；多个策略共享同表时，重启、重放或双轨模拟都容易互相污染。
+- 聚宽侧 `pct` 的真实语义是“本次交易金额 / 组合总资产”，不是目标权重；旧表没有显式语义字段，后续维护容易误解。
+- QMT_SIM 虽已持久化账户、持仓、订单和成交，但 `order_count`、`trade_count`、`last_settle_date`、当日买入跟踪和 reference seq 恢复不足，vnpy 重启后存在 ID 复用、T+1 状态缺口和 reference 串号风险。
+
+### 决策
+
+- 不再支持旧 MySQL 信号消费链路：`stock_trade` 不作为 SignalStrategyPlus 的运行时契约。
+- 新事实表为 `trade_signal_events`，消费 checkpoint 为 `strategy_signal_applications`。
+- JoinQuant/CSV/测试注入都必须携带或生成稳定 `signal_uid`，并显式写入 `pct_semantics=trade_value_pct_of_total_portfolio`。
+- Redis 继续只作为传输层；MySQL v2 signal journal 是重建与审计事实源。
+- QMT_SIM 的 sim DB 继续作为模拟账户事实源，新增 `sim_meta` 保存运行时元数据。
+
+### 优先级
+
+- P0：v2 信号表、bridge、策略消费、JQ payload、QMT_SIM runtime metadata、reference seq 恢复。
+- P1：基于 v2 信号源做新模拟账户快速重建，健康 sim DB 只做补结算和 catch-up。
+- P2：状态 doctor、人工注入、EOD 快照加速。
+- P3：更新所有旧 `stock_trade` 文档/脚本残留，补全 HTTP e2e。
+
+### 验收标准
+
+- Redis bridge 只写 `trade_signal_events`，不写 `stock_trade`。
+- `MySQLSignalStrategyPlus` 只消费 v2 signal journal，并按账户/网关/引擎/策略写 checkpoint。
+- QMT_SIM 重启后恢复订单/成交计数、上次结算日、当日买入跟踪，并能从历史 reference 恢复最大序号。
+- 核心单测通过：signal journal、QMT_SIM persistence。

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """把交易记录 CSV 注入 Redis Stream，用于端到端回归测试。
 
 用法::
@@ -12,7 +12,7 @@
 关键转换：
 
 - 标的：``黄金ETF(518880.XSHG)`` -> ``518880.SH``（XSHG=SH，XSHE=SZ）。
-  bridge 写入 stock_trade 时直接透传，策略层
+  bridge 写入 trade_signal_events 时直接透传，策略层
   ``convert_code_to_vnpy_type`` 会再剥后缀转 ``518880.SSE``。
 - 数量：``35400股`` / ``-35400股`` -> 取绝对值后的整数（正负号已由"交易类型"
   字段表达）。
@@ -21,6 +21,7 @@
   ⚠️ 测试时模拟柜台账户初始资金必须设置为同一个 ``initial_capital``，
   否则按 pct 算回的股数对不上。
 - 时间：``日期`` + ``委托时间`` -> ``YYYY-MM-DD HH:MM:SS``，写入 ``remark`` 字段。
+- `pct_semantics` 固定为 ``trade_value_pct_of_total_portfolio``。
 
 发送节奏：按时间戳排序后**瞬时全部 xadd**（依赖 bridge+strategy 的 50ms
 轮询自然消化），不做 sleep。
@@ -28,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -71,6 +73,8 @@ JQ_TO_REDIS_EXCHANGE = {
     "XSHG": "SH",
     "XSHE": "SZ",
 }
+
+PCT_SEMANTICS = "trade_value_pct_of_total_portfolio"
 
 DIRECTION_MAP = {
     "买": "BUY_LST",
@@ -258,14 +262,34 @@ def load_signals(cfg: ReplayConfig, logger: logging.Logger) -> list[dict]:
             if pct > 1.0:
                 pct = 1.0  # clip; 仍写入便于复现策略侧拒单分支
 
+        seq = len(payloads) + 1
+        source_signal_id = f"csv:{cfg.strategy_name}:{sort_date} {order_time}:{seq}"
+        uid_raw = "|".join([
+            cfg.strategy_name,
+            source_signal_id,
+            instrument,
+            DIRECTION_MAP[side_cn],
+            str(qty),
+            f"{price:.4f}",
+            f"{pct:.6f}",
+        ])
+        signal_uid = "csv:{}:{}".format(
+            cfg.strategy_name,
+            hashlib.sha1(uid_raw.encode("utf-8")).hexdigest()[:24],
+        )
         payload = {
+            "source": "csv_replay",
+            "source_signal_id": source_signal_id,
+            "signal_uid": signal_uid,
             "code": instrument,
             "pct": f"{pct:.6f}",
+            "pct_semantics": PCT_SEMANTICS,
             "type": DIRECTION_MAP[side_cn],
             "price": f"{price:.4f}",
             "stg": cfg.strategy_name,
             "remark": remark,
             "amt": str(qty),
+            "empty": "0",
         }
         # 用原始日期+时间作为排序键（rebase 后所有 remark 都以今天日期开头，
         # 直接按 remark 排序会丢失跨日时序）。
@@ -307,7 +331,7 @@ def replay(
     sent = 0
     for p in payloads:
         try:
-            rds.xadd(cfg.stream_key, p, maxlen=10000, approximate=True)
+            rds.xadd(cfg.stream_key, p, maxlen=100000, approximate=True)
             sent += 1
         except Exception as exc:
             logger.error(f"[redis] xadd 失败 {exc}; payload={p}")

@@ -214,13 +214,32 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
     # -----------------------------------------------------------------
 
     def get_order_reference(self) -> str:
-        """生成订单 reference — 用于 mixin 重挂时打标,以及成交归因.
+        """Generate order reference used by resubmit attribution.
 
-        AutoResubmitMixin 可读取 self._is_resubmitting 判断当前是否在重挂语境.
+        AutoResubmitMixin reads self._is_resubmitting to append the R suffix.
         """
         self._order_seq += 1
         suffix = "R" if getattr(self, "_is_resubmitting", False) else ""
         return f"{self.strategy_name}:{self._order_seq}{suffix}"
+
+    def restore_order_sequence_from_gateway(self) -> None:
+        """Restore order reference sequence from QMT_SIM persistence if available."""
+        gateway_name = str(getattr(self, "gateway", "") or "")
+        if not gateway_name:
+            return
+        try:
+            gateway = self._main_engine().get_gateway(gateway_name)
+            counter = getattr(getattr(gateway, "td", None), "counter", None)
+            persistence = getattr(counter, "_persistence", None)
+            if persistence is None or not hasattr(persistence, "max_reference_sequence"):
+                return
+            max_seq = int(persistence.max_reference_sequence(self.strategy_name) or 0)
+        except Exception as exc:
+            self.write_log(f"restore reference sequence failed: {exc}")
+            return
+        if max_seq > self._order_seq:
+            self._order_seq = max_seq
+            self.write_log(f"restored reference sequence to {self._order_seq}")
 
     def send_order(
         self,
@@ -1135,6 +1154,7 @@ class MLStrategyTemplate(AutoResubmitMixin, ABC):
 
     def on_start(self) -> None:
         self.trading = True
+        self.restore_order_sequence_from_gateway()
         self.write_log("on_start")
         # Phase 4：仅 sim 模式策略启动后台线程跑回放（不阻塞 on_start 返回）
         try:

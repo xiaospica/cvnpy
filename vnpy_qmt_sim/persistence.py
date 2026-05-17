@@ -8,13 +8,15 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import threading
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -103,6 +105,14 @@ CREATE TABLE IF NOT EXISTS sim_accounts (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sim_meta (
+    account_id TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, key)
+);
+
 CREATE TABLE IF NOT EXISTS sim_positions (
     account_id TEXT NOT NULL,
     vt_symbol  TEXT NOT NULL,
@@ -160,6 +170,10 @@ class RestoredState:
     frozen: float
     positions: list[PositionData]
     cancelled_active_orders: list[str]
+    order_count: int = 0
+    trade_count: int = 0
+    last_settle_date: Optional[date] = None
+    today_buy: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 class QmtSimPersistence:
@@ -315,6 +329,129 @@ class QmtSimPersistence:
                 ),
             )
 
+    # ---- runtime metadata ----
+
+    def set_meta(self, key: str, value: Any) -> None:
+        """Persist account-scoped runtime metadata as JSON."""
+        if isinstance(value, date):
+            stored = value.isoformat()
+        elif isinstance(value, str):
+            stored = value
+        else:
+            stored = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO sim_meta(account_id, key, value, updated_at)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(account_id, key) DO UPDATE SET
+                       value=excluded.value,
+                       updated_at=excluded.updated_at""",
+                (self.account_id, key, stored, _now()),
+            )
+
+    def get_meta(self, key: str) -> Optional[str]:
+        """Return account-scoped runtime metadata, if present."""
+        row = self._conn.execute(
+            "SELECT value FROM sim_meta WHERE account_id=? AND key=?",
+            (self.account_id, key),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row[0]) if row[0] is not None else None
+
+    def save_runtime_state(
+        self,
+        *,
+        order_count: int | None = None,
+        trade_count: int | None = None,
+        last_settle_date: date | None = None,
+        today_buy: dict[str, dict[str, float]] | None = None,
+    ) -> None:
+        """Persist volatile simulator counters needed for deterministic restart."""
+        if order_count is not None:
+            self.set_meta("order_count", int(order_count))
+        if trade_count is not None:
+            self.set_meta("trade_count", int(trade_count))
+        if last_settle_date is not None:
+            self.set_meta("last_settle_date", last_settle_date)
+        if today_buy is not None:
+            self.set_meta("today_buy_json", today_buy)
+
+    def _max_int_column(self, table: str, column: str) -> int:
+        max_value = 0
+        try:
+            rows = self._conn.execute(
+                f"SELECT {column} FROM {table} WHERE account_id=?",
+                (self.account_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            return 0
+        for (raw,) in rows:
+            try:
+                max_value = max(max_value, int(str(raw)))
+            except (TypeError, ValueError):
+                continue
+        return max_value
+
+    def _load_int_meta(self, key: str, fallback: int) -> int:
+        raw = self.get_meta(key)
+        if raw in (None, ""):
+            return fallback
+        try:
+            return max(int(raw), fallback)
+        except ValueError:
+            return fallback
+
+    def _load_last_settle_date(self) -> Optional[date]:
+        raw = self.get_meta("last_settle_date")
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _load_today_buy(self) -> dict[str, dict[str, float]]:
+        raw = self.get_meta("today_buy_json")
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        out: dict[str, dict[str, float]] = {}
+        for key, value in data.items():
+            if not isinstance(value, dict):
+                continue
+            out[str(key)] = {
+                "volume": float(value.get("volume", 0) or 0),
+                "cost": float(value.get("cost", 0) or 0),
+            }
+        return out
+
+    def max_reference_sequence(self, strategy_name: str) -> int:
+        """Return max sequence in references like ``{strategy_name}:12`` or ``12R``."""
+        if not strategy_name:
+            return 0
+        pattern = re.compile(rf"^{re.escape(strategy_name)}:(\d+)(?:R)?(?:\||$)")
+        max_seq = 0
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT reference FROM sim_orders WHERE account_id=? AND reference LIKE ?",
+                (self.account_id, f"{strategy_name}:%"),
+            ).fetchall()
+        for (reference,) in rows:
+            match = pattern.match(str(reference or ""))
+            if not match:
+                continue
+            try:
+                max_seq = max(max_seq, int(match.group(1)))
+            except ValueError:
+                continue
+        return max_seq
+
     # ---- restore ----
 
     def restore(self, gateway_name: str) -> RestoredState:
@@ -324,12 +461,32 @@ class QmtSimPersistence:
         账户的 frozen 字段同理重置为 0。
         """
         with self._lock:
+            order_count = self._load_int_meta(
+                "order_count",
+                self._max_int_column("sim_orders", "orderid"),
+            )
+            trade_count = self._load_int_meta(
+                "trade_count",
+                self._max_int_column("sim_trades", "tradeid"),
+            )
+            last_settle_date = self._load_last_settle_date()
+            today_buy = self._load_today_buy()
+
             row = self._conn.execute(
                 "SELECT capital, frozen FROM sim_accounts WHERE account_id=?",
                 (self.account_id,),
             ).fetchone()
             if row is None:
-                return RestoredState(capital=0.0, frozen=0.0, positions=[], cancelled_active_orders=[])
+                return RestoredState(
+                    capital=0.0,
+                    frozen=0.0,
+                    positions=[],
+                    cancelled_active_orders=[],
+                    order_count=order_count,
+                    trade_count=trade_count,
+                    last_settle_date=last_settle_date,
+                    today_buy=today_buy,
+                )
 
             capital = float(row[0])
             # frozen 重置为 0：活跃订单都将被 cancel
@@ -388,6 +545,10 @@ class QmtSimPersistence:
                 frozen=frozen,
                 positions=positions,
                 cancelled_active_orders=cancelled_orderids,
+                order_count=order_count,
+                trade_count=trade_count,
+                last_settle_date=last_settle_date,
+                today_buy=today_buy,
             )
 
 

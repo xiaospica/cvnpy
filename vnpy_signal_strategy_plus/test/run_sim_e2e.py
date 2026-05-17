@@ -17,7 +17,7 @@
 启动后：
 
 - sim 网关已 connect（账户=test_setting.sim.account_id，初始资金=connect_setting.模拟资金）
-- 策略已 init+start（轮询 mysql stock_trade）
+- 策略已 init+start（轮询 mysql trade_signal_events）
 - HTTP API: http://127.0.0.1:8001/docs（账号 vnpy/vnpy 见 ``.vntrader/web_trader_setting.json``）
 - WS: ws://127.0.0.1:8001/api/v1/ws
 

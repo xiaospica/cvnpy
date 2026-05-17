@@ -86,6 +86,14 @@ class SimulationCounter:
     def attach_persistence(self, persistence: "QmtSimPersistence") -> None:
         self._persistence = persistence
 
+    def _persist_runtime_state(self, **kwargs: Any) -> None:
+        if self._persistence is None:
+            return
+        try:
+            self._persistence.save_runtime_state(**kwargs)
+        except Exception as exc:
+            self.gateway.write_log(f"Persist simulator runtime state failed: {exc}")
+
     def _persist_account(self, account: AccountData) -> None:
         if self._persistence is None:
             return
@@ -128,10 +136,12 @@ class SimulationCounter:
     def _emit_order(self, order: OrderData) -> None:
         self.gateway.on_order(order)
         self._persist_order(order)
+        self._persist_runtime_state(order_count=self.order_count)
 
     def _emit_trade(self, trade: TradeData) -> None:
         self.gateway.on_trade(trade)
         self._persist_trade(trade)
+        self._persist_runtime_state(trade_count=self.trade_count)
 
     def _emit_position(self, pos: PositionData) -> None:
         self.gateway.on_position(pos)
@@ -684,6 +694,10 @@ class SimulationCounter:
         self._today_buy.clear()
 
         self.last_settle_date = settle_date
+        self._persist_runtime_state(
+            last_settle_date=self.last_settle_date,
+            today_buy=self._today_buy,
+        )
         try:
             self.gateway.write_log(f"日终结算完成: {settle_date}")
         except Exception:
@@ -771,6 +785,7 @@ class SimulationCounter:
             tb = self._today_buy.setdefault(pos_long_id, {"volume": 0.0, "cost": 0.0})
             tb["volume"] += float(trade.volume)
             tb["cost"] += float(trade.price) * float(trade.volume)
+            self._persist_runtime_state(today_buy=self._today_buy)
         else:
             # 卖出：扣减总持仓 + 昨仓 + 持仓冻结。
             pos.volume -= trade.volume

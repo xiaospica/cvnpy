@@ -208,3 +208,11 @@ A 股策略通常继承自 `CtaTemplate` 或自定义策略基类。
 - 涉及真实交易、实盘账户、凭证、生产路径的内容必须明确安全边界，不提交真实密钥。
 - 文档与代码变更要同步：新增关键功能、配置项、部署步骤、测试脚本或数据契约时，必须同时更新对应文档。
 - 文档不追求堆字数，追求可恢复上下文、可验证、可操作、可维护。
+
+## SignalStrategyPlus v2 信号链路长期规则（2026-05-17）
+
+- `stock_trade` 不再作为 `vnpy_signal_strategy_plus` 的运行时信号契约；不要为新策略、新测试或新脚本继续读取/写入 `stock_trade.processed`。
+- JoinQuant/CSV/测试注入信号必须进入 `trade_signal_events`，并以 `strategy_signal_applications` 记录每个 `(account_id, gateway_name, engine, strategy_name, signal_event_id)` 的消费状态。
+- `pct` 字段语义固定为 `trade_value_pct_of_total_portfolio`，表示本次交易金额占聚宽组合总资产比例；不要把它解释成目标权重、可用现金比例或当前持仓比例。
+- Redis Stream 只是传输层；模拟账户重建和审计以 MySQL v2 signal journal 为准，不以 Redis backlog 为事实源。
+- QMT_SIM 重启恢复必须依赖 `<VNPY_DATA_ROOT>/state/sim_<account>.db`，其中 `sim_meta` 保存 order/trade 计数、`last_settle_date` 和 `today_buy_json`；策略启动时应从持久化订单 reference 恢复 `_order_seq`。

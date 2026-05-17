@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """端到端回归测试编排器。
 
 **前置条件（用户在编排器启动前完成）：**
@@ -21,12 +21,12 @@
 
 1. 前置检查（mysql/redis 连通性、sim db 文件路径存在）。
 2. 清理旧状态：
-   - DELETE FROM stock_trade WHERE stg='etf_rotation_basic' （可选）
+   - DELETE trade_signal_events / strategy_signal_applications WHERE stg='etf_rotation_basic' （可选）
    - XTRIM <stream> MAXLEN 0
 3. 启动 bridge subprocess（``redis_to_mysql_bridge``，从 test_setting.json
    生成临时 bridge 配置）。
-4. 调用 ``csv_to_redis_replay`` 注入信号到 Redis。
-5. 等待消化：轮询 ``stock_trade.processed=True`` 比例，达到阈值或超时
+4. 调用 ``csv_to_redis_replay`` 注入 v2 信号到 Redis。
+5. 等待消化：轮询 ``strategy_signal_applications`` 消费比例，达到阈值或超时
    即停止等待。
 6. 停止 bridge 子进程。
 7. 调用 ``reconcile_trades.reconcile()`` 输出报告 + 退出码。
@@ -178,13 +178,22 @@ def cleanup(cfg: E2EConfig, logger: logging.Logger) -> None:
     if cfg.mysql_purge:
         engine = create_engine(cfg.mysql_url, pool_pre_ping=True)
         with engine.begin() as conn:
-            res = conn.execute(
-                text("DELETE FROM stock_trade WHERE stg = :stg"),
+            app_res = conn.execute(
+                text(
+                    "DELETE FROM strategy_signal_applications "
+                    "WHERE signal_event_id IN ("
+                    "  SELECT id FROM trade_signal_events WHERE stg = :stg"
+                    ")"
+                ),
+                {"stg": cfg.strategy_name},
+            )
+            event_res = conn.execute(
+                text("DELETE FROM trade_signal_events WHERE stg = :stg"),
                 {"stg": cfg.strategy_name},
             )
             logger.info(
-                f"[cleanup] mysql DELETE FROM stock_trade stg='{cfg.strategy_name}'"
-                f" -> {res.rowcount} 行"
+                f"[cleanup] mysql DELETE trade_signal_events stg='{cfg.strategy_name}'"
+                f" -> events={event_res.rowcount} applications={app_res.rowcount}"
             )
         engine.dispose()
 
@@ -331,7 +340,7 @@ def inject_signals(cfg: E2EConfig, logger: logging.Logger) -> int:
 
 
 def wait_for_consumption(cfg: E2EConfig, expected_count: int, logger: logging.Logger) -> None:
-    """轮询 stock_trade.processed 比例，超时或达 99% 即返回。"""
+    """Poll strategy_signal_applications until all v2 events are consumed."""
     engine = create_engine(cfg.mysql_url, pool_pre_ping=True)
     deadline = time.time() + cfg.wait_max_seconds
     last_pending = -1
@@ -340,9 +349,12 @@ def wait_for_consumption(cfg: E2EConfig, expected_count: int, logger: logging.Lo
             row = conn.execute(
                 text(
                     "SELECT "
-                    "  SUM(CASE WHEN processed=1 THEN 1 ELSE 0 END) AS done, "
-                    "  COUNT(*) AS total "
-                    "FROM stock_trade WHERE stg=:stg"
+                    "  COUNT(e.id) AS total, "
+                    "  SUM(CASE WHEN a.id IS NULL THEN 0 ELSE 1 END) AS done "
+                    "FROM trade_signal_events e "
+                    "LEFT JOIN strategy_signal_applications a "
+                    "  ON a.signal_event_id = e.id AND a.strategy_name = :stg "
+                    "WHERE e.stg = :stg"
                 ),
                 {"stg": cfg.strategy_name},
             ).fetchone()
@@ -351,7 +363,7 @@ def wait_for_consumption(cfg: E2EConfig, expected_count: int, logger: logging.Lo
         pending = total - done
         if pending != last_pending:
             logger.info(
-                f"[wait] mysql 进度 {done}/{total} (注入={expected_count}, pending={pending})"
+                f"[wait] mysql v2 进度 {done}/{total} (注入={expected_count}, pending={pending})"
             )
             last_pending = pending
         if total >= expected_count and pending == 0:

@@ -1,5 +1,5 @@
 {
-    "_doc": "近实盘链路测试配置：聚宽 -> Redis stream(etf_rotation_basic) -> redis_to_mysql_bridge -> MySQL stock_trade -> RedisLiveSimTestStrategy -> QMT_SIM。该配置不允许使用 position.csv 持仓引导，模拟柜台应从 1000000 纯现金开始。",
+    "_doc": "近实盘链路测试配置：聚宽 -> Redis stream(etf_rotation_basic) -> redis_to_mysql_bridge -> MySQL trade_signal_events -> RedisLiveSimTestStrategy -> QMT_SIM。该配置不允许使用 position.csv 持仓引导，模拟柜台应从 1000000 纯现金开始。",
 
     "strategy_class": "RedisLiveSimTestStrategy",
     "strategy_name": "etf_rotation_basic",
@@ -21,7 +21,7 @@
     },
 
     "replay": {
-        "_doc": "sim_replay 会按 stock_trade.remark 的历史时间顺序推进模拟柜台，适合聚宽回测写历史交易日信号；live 会退回实时当天轮询，便于未来切换实盘网关。",
+        "_doc": "sim_replay 会按 trade_signal_events.remark 的历史时间顺序推进模拟柜台，适合聚宽回测写历史交易日信号；live 会退回实时当天轮询，便于未来切换实盘网关。",
         "mode": "sim_replay",
         "consume_historical_remarks": true,
         "idle_settle_seconds": 30

@@ -7,7 +7,7 @@
 
 清理项目：
 
-1. **MySQL ``stock_trade``**：``DELETE WHERE stg='etf_rotation_basic'``。
+1. **MySQL ``trade_signal_events``**：``DELETE WHERE stg='etf_rotation_basic'``。
 2. **Redis Stream**：``XTRIM <stream> MAXLEN 0`` 清掉积压消息。
 3. **sim 网关持久化**：删除 ``<VNPY_DATA_ROOT>/state/sim_QMT_SIM.{db,db-shm,db-wal,lock}``
    （仅当未被进程占用时；若占用先杀进程）。
@@ -65,11 +65,23 @@ def purge_mysql(setting: dict) -> None:
     url = f"mysql+pymysql://{m['user']}:{m['password']}@{m['host']}:{m['port']}/{m['db']}"
     engine = create_engine(url, pool_pre_ping=True)
     with engine.begin() as conn:
-        res = conn.execute(
-            text("DELETE FROM stock_trade WHERE stg=:stg"),
+        app_res = conn.execute(
+            text(
+                "DELETE FROM strategy_signal_applications "
+                "WHERE signal_event_id IN ("
+                "  SELECT id FROM trade_signal_events WHERE stg=:stg"
+                ")"
+            ),
             {"stg": stg},
         )
-        print(f"[mysql] DELETE FROM stock_trade WHERE stg='{stg}' -> {res.rowcount} 行")
+        event_res = conn.execute(
+            text("DELETE FROM trade_signal_events WHERE stg=:stg"),
+            {"stg": stg},
+        )
+        print(
+            f"[mysql] DELETE v2 signals stg='{stg}' -> "
+            f"events={event_res.rowcount} applications={app_res.rowcount}"
+        )
     engine.dispose()
 
 

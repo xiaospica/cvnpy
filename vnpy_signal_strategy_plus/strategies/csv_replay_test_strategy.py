@@ -1,13 +1,13 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """端到端回归测试用的 MySQL 信号策略 + 回放控制器。
 
 与生产策略（如 ``MultiStrategySignalStrategyPlus``）的差异：
 
 1. ``strategy_name = "etf_intra_test"``：与 Redis stream key、bridge
-   target_stg、MySQL ``stock_trade.stg`` 三处必须保持一致。
+   target_stg、MySQL ``trade_signal_events.stg`` 三处必须保持一致。
 2. ``load_external_setting()`` 从 ``test/test_setting.json`` 读 mysql 段，
    不动生产 ``mysql_signal_setting.json``。
-3. ``run_polling()`` **重写为回放控制器**：按 ``stock_trade.remark`` 升序
+3. ``run_polling()`` **重写为回放控制器**：按 ``trade_signal_events.remark`` 升序
    遍历未处理信号，跨日触发 sim 网关 ``settle_end_of_day``，让 T+1 SELL
    能在第 N 日卖出第 N-1 日及之前买入的"昨仓"，资金循环回流，避免
    "全 BUY 占满资金 + 全 SELL 拒"的退化模式。
@@ -43,11 +43,8 @@ from vnpy.trader.object import PositionData
 
 from vnpy_common.data_paths import data_path, ensure_vnpy_data_env
 from vnpy_signal_strategy_plus.base import APP_NAME
-from vnpy_signal_strategy_plus.mysql_signal_strategy import (
-    MySQLSignalStrategyPlus,
-    Stock,
-)
-from vnpy_signal_strategy_plus.replay_adapter import StockTradeSignalReplayAdapter
+from vnpy_signal_strategy_plus.mysql_signal_strategy import MySQLSignalStrategyPlus
+from vnpy_signal_strategy_plus.replay_adapter import SignalJournalReplayAdapter
 from vnpy_signal_strategy_plus.utils import convert_code_to_vnpy_type
 from vnpy_ml_strategy.utils.trade_calendar import StaleCalendarError, make_calendar
 
@@ -110,7 +107,7 @@ class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
             return
 
         self.poll_interval = 0.05
-        # 实盘模式：strategy 收到 stock_trade 中 processed=False 的当天信号即下单。
+        # 实盘模式：strategy 收到 trade_signal_events 中未被本策略消费的当天信号即下单。
         # 注意 mysql_signal_strategy.run_polling 会把"当天"判定为
         # ``self.current_dt = datetime.now(CHINA_TZ)`` 起点，所以测试时
         # 注入的信号 remark 时间需落在今天（编排器会做时间 rebase）。
@@ -506,7 +503,7 @@ class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
             self.write_log(f"[replay] day {day} 权益快照写入失败: {type(exc).__name__}: {exc}")
 
     def run_polling(self) -> None:
-        """使用通用回放控制器消费 ``stock_trade`` 历史信号。"""
+        """使用通用回放控制器消费 ``trade_signal_events`` 历史信号。"""
         if not self._replay_enabled:
             self.write_log(
                 "[replay] rebase_remark_to_today=true，回退到父类 run_polling（实时模式）"
@@ -520,7 +517,7 @@ class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
             )
             return super().run_polling()
 
-        adapter = StockTradeSignalReplayAdapter(
+        adapter = SignalJournalReplayAdapter(
             self,
             gateway=sim_gw,
             is_trade_day=self._is_replay_trade_day,

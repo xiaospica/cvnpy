@@ -6,7 +6,7 @@
 ## 1. 链路图
 
 ```
-[csv_to_redis_replay] ─xadd─→ Redis Stream ─xreadgroup─→ [bridge] ─INSERT─→ MySQL stock_trade
+[csv_to_redis_replay] ─xadd─→ Redis Stream ─xreadgroup─→ [bridge] ─INSERT─→ MySQL trade_signal_events
                                                                                     │
                                                                                     ↓ poll 50ms
 [run_sim_e2e]  EventEngine + MainEngine ←─send_order─ [CsvReplayTestStrategy]  process_signal
@@ -73,7 +73,7 @@
 
   "mysql": {
     "host": "...", "password": "REPLACE_ME",
-    "purge_before_replay": true           // 清 stock_trade WHERE stg=etf_intra_test
+    "purge_before_replay": true           // 清 trade_signal_events WHERE stg=etf_intra_test
   },
 
   "sim": {
@@ -213,10 +213,10 @@ F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.run_e2e_test `
 执行步骤：
 
 1. 前置检查（mysql / redis / sim db）
-2. 清理：`DELETE FROM stock_trade WHERE stg=<strategy_name>`、`XTRIM <stream> MAXLEN 0`
+2. 清理：`DELETE FROM trade_signal_events WHERE stg=<strategy_name>`、`XTRIM <stream> MAXLEN 0`
 3. 启动 bridge subprocess（stdout 重定向到独立日志，避免 PIPE 阻塞）
 4. `csv_to_redis_replay.replay()` 注入信号到 Redis Stream
-5. 轮询等待 `stock_trade.processed=1` 比例（默认最多 120 秒）
+5. 轮询等待 `strategy_signal_applications checkpoint=1` 比例（默认最多 120 秒）
 6. 停止 bridge subprocess
 7. `reconcile_trades.reconcile()` 输出三份 CSV 报告
 
@@ -287,7 +287,7 @@ F:/Program_Home/vnpy/python.exe -m vnpy_signal_strategy_plus.test.purge_test_str
   --config vnpy_signal_strategy_plus/test/redis_live_sim_setting.local.json
 ```
 
-会清：mysql `stock_trade` 中 `stg=<strategy_name>` 的行 + redis stream + sim db 文件
+会清：mysql `trade_signal_events` 中 `stg=<strategy_name>` 的行 + redis stream + sim db 文件
 + 扫描端口占用给警告（不主动杀进程）。
 
 ### 6.4 编排器子选项
@@ -430,13 +430,13 @@ bridge 写 mysql 速度慢（远程单条 commit ~300ms），169 笔信号大概
 
 近实盘 Redis/JQ 链路和 CSV 链路现在统一通过
 `vnpy_qmt_sim.replay.SimReplayController` 推进模拟柜台日期；
-`vnpy_signal_strategy_plus.replay_adapter.StockTradeSignalReplayAdapter`
-负责从 MySQL `stock_trade` 拉取信号并调用真实策略的 `process_signal()`。
+`vnpy_signal_strategy_plus.replay_adapter.SignalJournalReplayAdapter`
+负责从 MySQL `trade_signal_events` 拉取信号并调用真实策略的 `process_signal()`。
 
 职责边界：
 
 - QMT_SIM 日期推进、`_replay_now`、auto-settle、行情刷新、日终结算、权益快照由 `vnpy_qmt_sim.replay` 负责。
-- Redis/JQ/CSV 信号只要最终进入 `stock_trade`，就由 signal adapter 消费。
+- Redis/JQ/CSV 信号只要最终进入 `trade_signal_events`，就由 signal adapter 消费。
 - `empty`、`amt`、`raw_payload` 等字段保留在 ORM 对象中，策略侧可原样读取。
 
 重构前验收 baseline 已保存到：
