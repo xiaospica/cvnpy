@@ -26,15 +26,15 @@ Recommended layout:
 Minimal config:
 
 ```ini
-VNPY_DATA_ROOT=D:/vnpy_data
+VNPY_DATA_ROOT=C:/path/to/vnpy_data
 ```
 
 Migration is dry-run by default and never deletes legacy files:
 
 ```powershell
 cd F:\Quant\vnpy\vnpy_strategy_dev
-.\deploy\migrate_data_root.ps1 -DataRoot D:\vnpy_data
-.\deploy\migrate_data_root.ps1 -DataRoot D:\vnpy_data -Execute
+.\deploy\migrate_data_root.ps1 -DataRoot C:\path\to\vnpy_data
+.\deploy\migrate_data_root.ps1 -DataRoot C:\path\to\vnpy_data -Execute
 ```
 
 The migration report is written under `<VNPY_DATA_ROOT>/backups/`.
@@ -43,7 +43,7 @@ After services run correctly from the new root, clean old files manually.
 Backup:
 
 ```powershell
-.\deploy\daily_backup.ps1 -VnpyDataRoot D:\vnpy_data
+.\deploy\daily_backup.ps1 -VnpyDataRoot C:\path\to\vnpy_data
 ```
 
 `daily_backup.ps1` backs up `replay_history.db`, `event_journal.db`, `sim_*.db`,

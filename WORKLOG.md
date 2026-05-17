@@ -240,3 +240,18 @@ Next:
 风险与注意:
 - 旧命令需从 `run_signal_dual_track_demo.py` 切换为 `run_signal_dual_track.py`。
 - v3 加 `--allow-live-orders` 后会进入真实 QMT 下单路径，启动前必须确认账户、source stg 和 cutoff 策略。
+
+## 2026-05-17 - VNPY_DATA_ROOT 去除硬编码回退
+
+背景/问题:
+- 服务器日志显示运行时静默回落到 `D:/vnpy_data`，导致 QMT_SIM 持久化初始化失败、merged 行情未命中并退化为合成 tick。
+- 用户明确要求路径不对必须直接报错，不允许继续使用硬编码默认目录。
+
+本次结论:
+- `vnpy_common.data_paths.vnpy_data_root()` 不再提供任何硬编码数据根目录回退。
+- `VNPY_DATA_ROOT` 缺失、为空、指向不存在目录或非目录时直接抛错。
+- 配置模板和部署 helper 不再把 `D:/vnpy_data` 作为默认入口；部署必须显式填写数据根目录。
+
+待验证:
+- 需要在服务器设置真实存在的 `VNPY_DATA_ROOT` 后重新启动 `run_signal_dual_track.py` 或 `run_ml_headless.py`。
+- 若服务器目录尚未创建，先创建 `<VNPY_DATA_ROOT>` 及其 `state/`、`snapshots/merged/` 等子目录，或执行显式 `-DataRoot` 的迁移脚本。

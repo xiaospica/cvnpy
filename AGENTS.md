@@ -60,7 +60,7 @@ A 股策略通常继承自 `CtaTemplate` 或自定义策略基类。
 
 ### 3.4 数据根目录与持久化边界
 
-- 默认部署只配置 `VNPY_DATA_ROOT`，运行态默认路径都从该 root 派生：`state/`、`ml_output/`、`snapshots/`、`models/`、`logs/`、`backups/`。
+- 默认部署只配置 `VNPY_DATA_ROOT`，运行态默认路径都从该 root 派生：`state/`、`ml_output/`、`snapshots/`、`models/`、`logs/`、`backups/`。`VNPY_DATA_ROOT` 必须显式配置且目录必须存在；禁止运行时代码静默回退到硬编码数据目录。
 - ML 日更事实链路固定为 `DailyIngestPipeline -> snapshots/merged + snapshots/filtered + stock_data/by_stock + qlib_data_bin`。任何成功执行到 dump 阶段的 `ingest_today(T)` 都会原子替换 `<VNPY_DATA_ROOT>/qlib_data_bin`，并更新 `calendars/day.txt`，因此 `run_ml_headless.py`、`smoke_full_pipeline.py`、运维手动触发和 20:00 cron 都必须视为会修改当前 qlib provider 的入口。
 - `qlib_data_bin` 禁止倒退发布：目标日 `T` 不得早于当前 `calendars/day.txt` 末尾，也不得早于 `<VNPY_DATA_ROOT>/snapshots/merged/daily_merged_*.parquet` 中的最新日期。若已有 2026-05-15 快照，不允许再把 provider 发布成 2026-05-13。
 - `ML_INGEST_ALLOW_QLIB_ROLLBACK=1` 只能作为人工确认后的应急回滚逃生开关；不要写入 `.env`、`.env.production`、Windows 服务、计划任务或长期启动脚本。使用时必须记录原因、目标日期和恢复动作，用完立即 unset。正常 smoke/headless/e2e 绝不能依赖该变量。

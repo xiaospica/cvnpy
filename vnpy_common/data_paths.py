@@ -2,7 +2,9 @@
 
 The normal deployment surface is a single environment variable:
 ``VNPY_DATA_ROOT``. Other path variables are treated as advanced explicit
-overrides only; defaults are always derived from the root.
+overrides only; defaults are always derived from the root. Runtime code must
+fail fast when the root is missing or invalid; there is deliberately no
+hard-coded data-root fallback.
 """
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_VNPY_DATA_ROOT = Path("D:/vnpy_data")
+VNPY_DATA_ROOT_ENV = "VNPY_DATA_ROOT"
 LEGACY_PATH_ENV_VARS = {
     "QS_DATA_ROOT",
     "ML_OUTPUT_ROOT",
@@ -24,13 +26,27 @@ LEGACY_PATH_ENV_VARS = {
 
 
 def vnpy_data_root() -> Path:
-    return Path(os.getenv("VNPY_DATA_ROOT") or DEFAULT_VNPY_DATA_ROOT).expanduser()
+    raw = os.getenv(VNPY_DATA_ROOT_ENV, "").strip().strip('"').strip("'")
+    if not raw:
+        raise RuntimeError(
+            "VNPY_DATA_ROOT 未设置。请在 .env/.env.production 或服务环境中显式配置 "
+            "VNPY_DATA_ROOT；运行时不再提供默认数据目录。"
+        )
+    root = Path(os.path.expandvars(raw)).expanduser()
+    if not root.exists():
+        raise FileNotFoundError(
+            f"VNPY_DATA_ROOT 指向的目录不存在: {root}. "
+            "请先创建/迁移数据目录，或修正 VNPY_DATA_ROOT。"
+        )
+    if not root.is_dir():
+        raise NotADirectoryError(f"VNPY_DATA_ROOT 不是目录: {root}")
+    return root
 
 
 def ensure_vnpy_data_env() -> Path:
     """Ensure ${VNPY_DATA_ROOT} expands in yaml/config templates."""
     root = vnpy_data_root()
-    os.environ.setdefault("VNPY_DATA_ROOT", str(root))
+    os.environ[VNPY_DATA_ROOT_ENV] = str(root)
     return root
 
 

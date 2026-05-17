@@ -28,7 +28,9 @@ $ErrorActionPreference = "Stop"
 
 if (-not $VnpyRoot) { $VnpyRoot = Split-Path -Parent $PSScriptRoot }
 if (-not $DataRoot) { $DataRoot = $env:VNPY_DATA_ROOT }
-if (-not $DataRoot) { $DataRoot = "D:\vnpy_data" }
+if (-not $DataRoot) {
+    throw "DataRoot 未指定且 VNPY_DATA_ROOT 未设置；请显式传 -DataRoot 或设置 VNPY_DATA_ROOT。"
+}
 if (-not $PythonExe) {
     if (Test-Path "F:\Program_Home\vnpy\python.exe") { $PythonExe = "F:\Program_Home\vnpy\python.exe" }
     else { $PythonExe = "python" }
@@ -89,7 +91,6 @@ con.close()
 }
 
 $candidates = [System.Collections.ArrayList]::new()
-Add-Candidate $candidates "legacy_state_dir" "D:\vnpy_data\state" $stateRoot "directory_merge"
 Add-Candidate $candidates "repo_trading_state" (Join-Path $VnpyRoot "vnpy_qmt_sim\.trading_state") $stateRoot "directory_merge"
 Add-Candidate $candidates "legacy_ml_output" "D:\ml_output" (Join-Path $DataRoot "ml_output") "directory"
 Add-Candidate $candidates "repo_ml_output" (Join-Path $VnpyRoot "ml_output") (Join-Path $DataRoot "ml_output") "directory"

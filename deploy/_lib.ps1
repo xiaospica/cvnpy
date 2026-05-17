@@ -13,7 +13,7 @@
 #   1. 显式 -ParamName <值> (调用方 explicit)
 #   2. .env.production 字段 (KEY=VALUE 行解析)
 #   3. 自动检测 (Python: py launcher / 注册表 / 常见位置)
-#   4. 安全默认值 (D:\vnpy_data 及其 logs/backups/ml_output/models 子目录)
+#   4. 数据根目录必须来自 VNPY_DATA_ROOT；不提供硬编码默认值
 
 
 function Read-TextFileCompat {
@@ -185,7 +185,10 @@ function Get-DeployContext {
         if ($detected) { $infPy = $detected }
     }
 
-    $vnpyDataRoot = _Get 'VNPY_DATA_ROOT' 'D:\vnpy_data'
+    $vnpyDataRoot = $envVars['VNPY_DATA_ROOT']
+    if (-not $vnpyDataRoot) {
+        throw "VNPY_DATA_ROOT 未配置；请在 .env.production 中显式设置数据根目录。"
+    }
 
     return @{
         RepoRoot         = $RepoRoot
