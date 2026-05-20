@@ -579,6 +579,7 @@ def main() -> int:
     SETTINGS["datafeed.password"] = token
 
     from vnpy_ml_strategy import MLStrategyApp, APP_NAME as ML_APP
+    from vnpy_qmt_sim import QmtSimGateway
     from vnpy_tushare_pro import TushareProApp
     from vnpy_tushare_pro.engine import (
         APP_NAME as TUSHARE_APP,
@@ -593,6 +594,11 @@ def main() -> int:
     main_engine.add_app(TushareProApp)
     main_engine.add_app(MLStrategyApp)
     main_engine.add_app(WebTraderApp)
+    qmt_sim_gateway = main_engine.add_gateway(QmtSimGateway, gateway_name="QMT_SIM")
+    main_engine.connect(dict(qmt_sim_gateway.default_setting), "QMT_SIM")
+    if "QMT_SIM" not in main_engine.get_all_gateway_names():
+        raise RuntimeError("QMT_SIM gateway was not registered before strategy startup")
+    _log("QMT_SIM gateway registered and connected")
 
     tushare_engine = main_engine.get_engine(TUSHARE_APP)
     tushare_engine.init_engine()

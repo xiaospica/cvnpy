@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -27,6 +28,39 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - python-dotenv is part of deploy deps.
+    load_dotenv = None
+
+_DOTENV_ENCODINGS = ("utf-8-sig", "utf-8", "gbk", "mbcs")
+
+
+def _load_dotenv_compat(path: Path, *, override: bool = False) -> bool:
+    """Load repo dotenv files before resolving VNPY_DATA_ROOT."""
+    if load_dotenv is None or not path.exists():
+        return False
+
+    last_error: Exception | None = None
+    for encoding in _DOTENV_ENCODINGS:
+        try:
+            return bool(load_dotenv(path, override=override, encoding=encoding))
+        except (LookupError, UnicodeDecodeError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    return False
+
+
+if load_dotenv is not None:
+    dotenv_file = os.getenv("DOTENV_FILE")
+    if dotenv_file and (REPO_ROOT / dotenv_file).exists():
+        _load_dotenv_compat(REPO_ROOT / dotenv_file, override=False)
+    elif (REPO_ROOT / ".env.production").exists():
+        _load_dotenv_compat(REPO_ROOT / ".env.production", override=False)
+    elif (REPO_ROOT / ".env").exists():
+        _load_dotenv_compat(REPO_ROOT / ".env", override=False)
 
 from vnpy_common.data_paths import (  # noqa: E402
     ml_output_root,
