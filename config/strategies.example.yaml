@@ -28,7 +28,8 @@ gateway_base_settings:
     报单上报延迟毫秒: 0
     卖出持仓不足拒单: "是"
     行情源: merged_parquet
-    merged_parquet_merged_root: "${VNPY_DATA_ROOT}/snapshots/merged"
+    merged_parquet_merged_root: "${VNPY_DATA_ROOT}/snapshots/merged_stock_fund"
+    merged_parquet_fallback_roots: "${VNPY_DATA_ROOT}/snapshots/merged"
     # today_open: 撮合用当日**原始** (未复权) open, 对齐"次日 09:30 开盘成交"
     merged_parquet_reference_kind: today_open
     merged_parquet_fallback_days: 10

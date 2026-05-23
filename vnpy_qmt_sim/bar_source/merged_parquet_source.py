@@ -55,8 +55,10 @@ class MergedParquetBarSource(SimBarSource):
         fallback_days: int = 10,
         stale_warn_hours: int = 48,
         cache_max: int = 3,
+        fallback_roots: str | list[str] | tuple[str, ...] = "",
     ) -> None:
         self.merged_root = Path(merged_root) if merged_root else merged_snapshots_dir()
+        self.merged_roots = self._build_roots(self.merged_root, fallback_roots)
         self.reference_kind = reference_kind
         self.fallback_days = int(fallback_days)
         self.stale_warn_hours = float(stale_warn_hours)
@@ -64,7 +66,40 @@ class MergedParquetBarSource(SimBarSource):
         self._cache_max = int(cache_max)
         self._stale_warned_for: set[str] = set()
 
+    @staticmethod
+    def _build_roots(
+        merged_root: Path,
+        fallback_roots: str | list[str] | tuple[str, ...],
+    ) -> list[Path]:
+        roots = [merged_root]
+        if isinstance(fallback_roots, str):
+            raw_items = [
+                item.strip()
+                for item in fallback_roots.replace(",", ";").split(";")
+                if item.strip()
+            ]
+        else:
+            raw_items = [str(item).strip() for item in fallback_roots if str(item).strip()]
+        roots.extend(Path(item) for item in raw_items)
+
+        result: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            key = str(root)
+            if key in seen:
+                continue
+            result.append(root)
+            seen.add(key)
+        return result
+
     def _resolve_file(self, as_of_date: date) -> Optional[Path]:
+        for root in self.merged_roots:
+            picked = self._resolve_file_from_root(root, as_of_date)
+            if picked is not None:
+                return picked
+        return None
+
+    def _resolve_file_from_root(self, merged_root: Path, as_of_date: date) -> Optional[Path]:
         """选包含 as_of_date 数据的 snapshot。
 
         重要：每个 daily_merged_YYYYMMDD.parquet 文件不是单日数据，
@@ -82,19 +117,19 @@ class MergedParquetBarSource(SimBarSource):
         优先级 2 是关键修复：用户机器 disk 上只有 4 月份 snapshot，但回放窗口从 1 月起；
         旧实现按"as_of_date - offset"向前找永远落空 → "bar_source 未命中"全屏刷。
         """
-        if not self.merged_root.exists():
-            logger.debug("merged_root %s 不存在", self.merged_root)
+        if not merged_root.exists():
+            logger.debug("merged_root %s 不存在", merged_root)
             return None
 
         # 1. 精确匹配（实盘 hot path，避免无谓扫目录）
-        exact = self.merged_root / f"daily_merged_{as_of_date:%Y%m%d}.parquet"
+        exact = merged_root / f"daily_merged_{as_of_date:%Y%m%d}.parquet"
         if exact.exists():
             logger.debug("[bar_source] %s exact-match → %s", as_of_date, exact.name)
             return exact
 
         # 扫目录，构造 (file_date, path) 列表
         snapshots: list[Tuple[date, Path]] = []
-        for entry in self.merged_root.iterdir():
+        for entry in merged_root.iterdir():
             if not entry.is_file():
                 continue
             name = entry.name
@@ -110,7 +145,7 @@ class MergedParquetBarSource(SimBarSource):
             snapshots.append((d, entry))
 
         if not snapshots:
-            logger.warning("[bar_source] %s 目录无任何 daily_merged_*.parquet", self.merged_root)
+            logger.warning("[bar_source] %s 目录无任何 daily_merged_*.parquet", merged_root)
             return None
 
         snapshots.sort()
@@ -143,7 +178,7 @@ class MergedParquetBarSource(SimBarSource):
         return None
 
     def _load(self, path: Path) -> pd.DataFrame:
-        key = path.name
+        key = str(path.resolve())
         mtime = path.stat().st_mtime
         cached = self._cache.get(key)
         if cached is not None and cached[0] == mtime:
@@ -159,12 +194,13 @@ class MergedParquetBarSource(SimBarSource):
 
     def _check_freshness(self, path: Path, mtime: float) -> None:
         age_h = (time.time() - mtime) / 3600.0
-        if age_h > self.stale_warn_hours and path.name not in self._stale_warned_for:
+        warn_key = str(path.resolve())
+        if age_h > self.stale_warn_hours and warn_key not in self._stale_warned_for:
             logger.warning(
                 "merged parquet %s 已 %.1fh 未更新，确认 TushareProApp 20:00 任务是否运行",
                 path.name, age_h,
             )
-            self._stale_warned_for.add(path.name)
+            self._stale_warned_for.add(warn_key)
 
     def get_quote(self, vt_symbol: str, as_of_date: date) -> Optional[BarQuote]:
         try:

@@ -114,6 +114,21 @@ ensure_vnpy_data_env()
 # qlib_strategy_dev 仓库.
 
 
+def _expand_env_vars_in_config(value):
+    r"""Recursively expand env placeholders after YAML parsing.
+
+    Expanding before parsing turns Windows paths like ``D:\vnpy_data`` into
+    YAML double-quoted escape sequences (``\v``), which corrupts the path.
+    """
+    if isinstance(value, dict):
+        return {k: _expand_env_vars_in_config(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_vars_in_config(v) for v in value]
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    return value
+
+
 def _load_yaml_config(yaml_path: Path) -> dict:
     """加载 yaml 配置, ${VAR} 占位符按 .env / 系统 env 展开.
 
@@ -130,8 +145,7 @@ def _load_yaml_config(yaml_path: Path) -> dict:
             f"拷贝 config/strategies.example.yaml 到此路径并按部署填实际值."
         )
     text = yaml_path.read_text(encoding="utf-8")
-    text = os.path.expandvars(text)
-    return yaml.safe_load(text)
+    return _expand_env_vars_in_config(yaml.safe_load(text))
 
 
 # 加载 yaml: 路径默认 config/strategies.production.yaml

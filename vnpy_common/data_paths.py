@@ -95,6 +95,14 @@ def merged_snapshots_dir() -> Path:
     return snapshots_dir() / "merged"
 
 
+def merged_fund_snapshots_dir() -> Path:
+    return snapshots_dir() / "merged_fund"
+
+
+def merged_stock_fund_snapshots_dir() -> Path:
+    return snapshots_dir() / "merged_stock_fund"
+
+
 def filtered_snapshots_dir() -> Path:
     return snapshots_dir() / "filtered"
 

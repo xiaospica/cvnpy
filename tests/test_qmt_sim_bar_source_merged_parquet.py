@@ -187,6 +187,48 @@ def test_replay_rejects_too_stale_past_snapshot(tmp_path: Path) -> None:
     assert f is None
 
 
+def test_fallback_root_used_when_combined_snapshot_missing(tmp_path: Path) -> None:
+    primary = tmp_path / "merged_stock_fund"
+    fallback = tmp_path / "merged"
+    primary.mkdir()
+    fallback.mkdir()
+    _make_snapshot(fallback, "20260422", [
+        _row("000001.SZ", "2026-04-22", close=10.98, pre_close=11.08),
+    ])
+
+    src = MergedParquetBarSource(
+        merged_root=str(primary),
+        fallback_roots=str(fallback),
+        reference_kind="today_open",
+    )
+
+    q = src.get_quote("000001.SZSE", date(2026, 4, 22))
+    assert q is not None
+    assert q.last_price == pytest.approx(10.98)
+
+
+def test_etf_quote_uses_snapshot_price_limits(tmp_path: Path) -> None:
+    _make_snapshot(tmp_path, "20260422", [
+        _row(
+            "159915.SZ",
+            "2026-04-22",
+            close=1.08,
+            pre_close=1.00,
+            open=1.05,
+            up_limit=1.20,
+            down_limit=0.80,
+            name="ChiNext ETF",
+        ),
+    ])
+    src = MergedParquetBarSource(merged_root=str(tmp_path), reference_kind="today_open")
+
+    q = src.get_quote("159915.SZSE", date(2026, 4, 22))
+    assert q is not None
+    assert q.last_price == pytest.approx(1.05)
+    assert q.limit_up == pytest.approx(1.20)
+    assert q.limit_down == pytest.approx(0.80)
+
+
 def test_stale_warning_emitted_once(tmp_path: Path, caplog) -> None:
     p = _make_snapshot(tmp_path, "20260422", [
         _row("000001.SZ", "2026-04-22", close=10.0),

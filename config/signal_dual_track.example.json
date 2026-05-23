@@ -45,7 +45,8 @@
         "connect_setting": {
             "模拟资金": 1000000.0,
             "行情源": "merged_parquet",
-            "merged_parquet_merged_root": "%VNPY_DATA_ROOT%/snapshots/merged",
+            "merged_parquet_merged_root": "%VNPY_DATA_ROOT%/snapshots/merged_stock_fund",
+            "merged_parquet_fallback_roots": "%VNPY_DATA_ROOT%/snapshots/merged",
             "merged_parquet_reference_kind": "today_open",
             "merged_parquet_fallback_days": 10,
             "启用持久化": "是",

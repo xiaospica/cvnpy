@@ -14,7 +14,11 @@ from vnpy.trader.object import (
 from vnpy.trader.constant import Exchange, Status
 
 from .bar_source import build_bar_source
-from vnpy_common.data_paths import merged_snapshots_dir, sim_state_dir
+from vnpy_common.data_paths import (
+    merged_snapshots_dir,
+    merged_stock_fund_snapshots_dir,
+    sim_state_dir,
+)
 from .md import QmtSimMd
 from .td import QmtSimTd
 
@@ -37,7 +41,8 @@ class QmtSimGateway(BaseGateway):
         "报单上报延迟毫秒": 0,
         "卖出持仓不足拒单": "是",
         "行情源": "merged_parquet",
-        "merged_parquet_merged_root": str(merged_snapshots_dir()),
+        "merged_parquet_merged_root": str(merged_stock_fund_snapshots_dir()),
+        "merged_parquet_fallback_roots": str(merged_snapshots_dir()),
         # today_open: 撮合参考价 = 当日**原始**(未复权) open，对齐"次日 09:30 开盘成交"语义
         # prev_close: 老语义，仅在 source 没有当日数据时退化使用
         # 详见 plan 文档"决策 1"（原始价撮合 + 决策 2 的 pct_chg mark-to-market）
