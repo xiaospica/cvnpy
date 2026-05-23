@@ -19,6 +19,7 @@ x64
 build
 dist
 *.local
+.pytest_cache/
 .pytest_tmp/
 .pytest_tmp_qmt_sim/
 
