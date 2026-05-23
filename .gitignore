@@ -19,6 +19,7 @@ x64
 build
 dist
 *.local
+.pytest_tmp/
 .pytest_tmp_qmt_sim/
 
 # VeighNa
@@ -29,6 +30,7 @@ config/myapp.ini
 config/*.ini
 !config/*.ini.example
 !config/myapp.ini.example
+config/signal_dual_track.json
 
 # Visual Studio intermediate files
 *.exp
@@ -95,3 +97,4 @@ vnpy_signal_strategy_plus/test/test_setting.local.json
 vnpy_signal_strategy_plus/test/redis_live_sim_setting.local.json
 vnpy_signal_strategy_plus/scripts/redis_bridge_setting.local.json
 artifacts
+.codex_smoke_logs
