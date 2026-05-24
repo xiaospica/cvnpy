@@ -121,6 +121,26 @@ def test_v3_source_is_live_only_and_not_armed_by_default():
     assert shadow["runtime"]["replay_enabled"] is True
 
 
+def test_v2_runner_id_scopes_source_checkpoint_without_renaming_source():
+    cfg = runner._build_config(
+        "v2",
+        {"initial_capital": 1_000_000, "sim": {}},
+        "source_stg",
+        "source_stg_shadow_local",
+        runner_id="local",
+    )
+
+    source = cfg["STRATEGIES"][0]
+    shadow = cfg["STRATEGIES"][1]
+
+    assert source["strategy_name"] == "source_stg"
+    assert source["runtime"]["signal_source_stg"] == "source_stg"
+    assert source["runtime"]["application_scope_suffix"] == "local"
+    assert shadow["strategy_name"] == "source_stg_shadow_local"
+    assert shadow["runtime"]["signal_source_stg"] == "source_stg_shadow_local"
+    assert shadow["runtime"]["application_scope_suffix"] == "local"
+
+
 def test_v3_cleanup_scope_keeps_source_checkpoint():
     cfg = runner._build_config(
         "v3",

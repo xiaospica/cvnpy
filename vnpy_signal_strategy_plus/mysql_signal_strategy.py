@@ -10,6 +10,7 @@ import json
 import time
 import traceback
 from datetime import datetime, timedelta
+from hashlib import sha1
 from pathlib import Path
 from threading import Thread
 
@@ -187,14 +188,31 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
     def _application_gateway_name(self) -> str:
         return str(self.gateway or "AUTO")
 
+    def _signal_source_stg(self) -> str:
+        """Return the shared source stg used to read trade signal events."""
+        return str(getattr(self, "signal_source_stg", "") or self.strategy_name)
+
+    def _scope_account_id(self, account_id: str) -> str:
+        """Return a runner-scoped application account id when configured."""
+        suffix = str(getattr(self, "signal_application_scope_suffix", "") or "").strip()
+        if not suffix:
+            return account_id
+
+        scoped = f"{account_id}@{suffix}"
+        if len(scoped) <= 64:
+            return scoped
+
+        digest = sha1(scoped.encode("utf-8")).hexdigest()[:12]
+        return f"{scoped[:51]}:{digest}"
+
     def _application_account_id(self, gateway_name: str) -> str:
         try:
             for account in self.signal_engine.main_engine.get_all_accounts():
                 if account.gateway_name == gateway_name:
-                    return str(account.accountid)
+                    return self._scope_account_id(str(account.accountid))
         except Exception:
             pass
-        return gateway_name
+        return self._scope_account_id(gateway_name)
 
     def _application_scope(self) -> tuple[str, str, str, str]:
         gateway_name = self._application_gateway_name()
@@ -230,7 +248,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             session.query(TradeSignalEvent)
             .outerjoin(StrategySignalApplication, app_join)
             .filter(
-                TradeSignalEvent.stg == self.strategy_name,
+                TradeSignalEvent.stg == self._signal_source_stg(),
                 TradeSignalEvent.remark >= signal_start,
                 TradeSignalEvent.remark <= self.current_dt,
                 StrategySignalApplication.id.is_(None),

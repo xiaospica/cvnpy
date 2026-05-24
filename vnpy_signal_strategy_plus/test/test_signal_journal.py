@@ -301,6 +301,60 @@ def test_live_signal_cutoff_filters_same_day_old_events():
     assert [row.remark for row in rows] == [datetime(2026, 5, 15, 9, 50)]
 
 
+def test_runner_scope_suffix_isolates_shared_source_consumption():
+    session = _session()
+    normalized = normalize_trade_signal_payload(
+        {
+            "signal_uid": "jq:shared:1",
+            "code": "518880.SH",
+            "pct": "0.1",
+            "pct_semantics": PCT_SEMANTICS,
+            "type": "BUY_LST",
+            "price": "6.5",
+            "stg": "shared_source",
+            "remark": "2026-05-15 09:30:00",
+        },
+        target_stg="shared_source",
+    )
+    event, _ = upsert_trade_signal_event(session, normalized)
+
+    class DummyAccount:
+        gateway_name = "QMT"
+        accountid = "QMT"
+
+    class DummyMainEngine:
+        def get_all_accounts(self):
+            return [DummyAccount()]
+
+    class DummySignalEngine:
+        main_engine = DummyMainEngine()
+
+    def make_strategy(scope_suffix: str):
+        strategy = MySQLSignalStrategyPlus.__new__(MySQLSignalStrategyPlus)
+        strategy.signal_engine = DummySignalEngine()
+        strategy.strategy_name = "visible_strategy"
+        strategy.signal_source_stg = "shared_source"
+        strategy.signal_application_scope_suffix = scope_suffix
+        strategy.gateway = "QMT"
+        strategy.current_dt = datetime(2026, 5, 15, 10, 0)
+        strategy.engine_type = EngineType.LIVE.value
+        strategy.live_signal_cutoff_dt = None
+        strategy._last_signal_orderids = []
+        return strategy
+
+    local = make_strategy("local")
+    cloud = make_strategy("tencent_cloud")
+
+    assert local._application_scope()[0] == "QMT@local"
+    assert cloud._application_scope()[0] == "QMT@tencent_cloud"
+    assert [row.id for row in local.query_trade_signals(session)] == [event.id]
+    local.mark_signal_consumed(session, event, status="skipped")
+    session.commit()
+
+    assert local.query_trade_signals(session) == []
+    assert [row.id for row in cloud.query_trade_signals(session)] == [event.id]
+
+
 def test_bound_gateway_wins_over_global_contract_gateway():
     class DummyContract:
         gateway_name = "QMT"

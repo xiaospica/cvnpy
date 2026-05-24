@@ -112,7 +112,7 @@ class SignalJournalReplayAdapter:
             session.query(TradeSignalEvent)
             .outerjoin(StrategySignalApplication, app_join)
             .filter(
-                TradeSignalEvent.stg == self.strategy_name,
+                TradeSignalEvent.stg == self.strategy._signal_source_stg(),
                 StrategySignalApplication.id.is_(None),
             )
             .order_by(TradeSignalEvent.remark.asc(), TradeSignalEvent.id.asc())

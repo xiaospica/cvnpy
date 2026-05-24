@@ -505,14 +505,21 @@ def _build_config(
     shadow_stg: str,
     qmt_account: str = "",
     *,
+    runner_id: str = "",
     shadow_replay: str = "historical",
 ) -> Dict[str, Any]:
     """Return gateway/strategy config for the requested mode."""
     mode = _normalize_mode(mode)
+    source_runtime = {
+        "signal_source_stg": source_stg,
+        "application_scope_suffix": runner_id,
+    }
     shadow_runtime = {
         "role": "shadow-sim",
         "replay_enabled": shadow_replay == "historical",
         "live_orders_enabled": True,
+        "signal_source_stg": shadow_stg,
+        "application_scope_suffix": runner_id,
     }
     if mode == "v1":
         gateway_name = str(
@@ -532,6 +539,7 @@ def _build_config(
                     "strategy_name": source_stg,
                     "gateway_name": gateway_name,
                     "runtime": {
+                        **source_runtime,
                         "role": "single-sim",
                         "replay_enabled": True,
                         "live_orders_enabled": True,
@@ -555,6 +563,7 @@ def _build_config(
                     "strategy_name": source_stg,
                     "gateway_name": "QMT",
                     "runtime": {
+                        **source_runtime,
                         "role": "source-fake-live",
                         "replay_enabled": True,
                         "live_orders_enabled": True,
@@ -585,6 +594,7 @@ def _build_config(
                     "strategy_name": source_stg,
                     "gateway_name": "QMT",
                     "runtime": {
+                        **source_runtime,
                         "role": "source-live",
                         "replay_enabled": False,
                         "live_orders_enabled": False,
@@ -723,12 +733,18 @@ def _make_strategy_class(
         self.live_orders_enabled = bool(runtime.get("live_orders_enabled", True))
         self.live_signal_cutoff_dt = runtime.get("live_signal_cutoff_dt")
         self.runner_runtime_role = str(runtime.get("role", "sim"))
+        self.signal_source_stg = str(runtime.get("signal_source_stg") or strategy_name)
+        self.signal_application_scope_suffix = str(
+            runtime.get("application_scope_suffix") or ""
+        )
         if final_settle_day is not None and bool(getattr(self, "_replay_enabled", False)):
             self._final_settle_day = final_settle_day
             self.write_log(f"[dual-track] replay settle_through={final_settle_day}")
         self.gateway = gateway_name
         self.write_log(
             f"[dual-track] strategy_name={strategy_name} gateway override={gateway_name} "
+            f"signal_source_stg={self.signal_source_stg} "
+            f"application_scope_suffix={self.signal_application_scope_suffix or '-'} "
             f"role={self.runner_runtime_role} replay_enabled={getattr(self, '_replay_enabled', None)} "
             f"live_orders_enabled={self.live_orders_enabled} "
             f"live_signal_cutoff={self.live_signal_cutoff_dt}"
@@ -748,6 +764,7 @@ def _cleanup_runner_state(
     cleanup_strategy_names: Iterable[str],
     gateway_names: Iterable[str],
     shadow_stg: Optional[str],
+    application_scope_suffix: str = "",
 ) -> None:
     """Clean only runner-owned local state and shadow MySQL rows."""
     print("=" * 60)
@@ -804,7 +821,11 @@ def _cleanup_runner_state(
             except Exception as exc:
                 print(f"  ⚠️ 清 mlearnweb.db 失败: {exc}")
 
-    _delete_strategy_application_rows(setting, cleanup_strategy_names)
+    _delete_strategy_application_rows(
+        setting,
+        cleanup_strategy_names,
+        application_scope_suffix=application_scope_suffix,
+    )
 
     if shadow_stg:
         _delete_shadow_mysql_rows(setting, shadow_stg)
@@ -940,6 +961,8 @@ def _delete_shadow_mysql_rows(setting: Dict[str, Any], shadow_stg: str) -> None:
 def _delete_strategy_application_rows(
     setting: Dict[str, Any],
     strategy_names: Iterable[str],
+    *,
+    application_scope_suffix: str = "",
 ) -> None:
     """Delete v2 consumption checkpoints while keeping source signal events."""
     names = [str(name) for name in strategy_names if str(name)]
@@ -949,19 +972,23 @@ def _delete_strategy_application_rows(
         from sqlalchemy import bindparam, text
 
         engine = _mysql_engine(setting["mysql"])
-        stmt = (
-            text(
-                "DELETE FROM strategy_signal_applications "
-                "WHERE strategy_name IN :names"
-            )
-            .bindparams(bindparam("names", expanding=True))
+        sql = (
+            "DELETE FROM strategy_signal_applications "
+            "WHERE strategy_name IN :names"
         )
+        params: Dict[str, Any] = {"names": names}
+        scope_suffix = str(application_scope_suffix or "").strip()
+        if scope_suffix:
+            sql += " AND account_id LIKE :account_suffix"
+            params["account_suffix"] = f"%@{scope_suffix}"
+        stmt = text(sql).bindparams(bindparam("names", expanding=True))
         with engine.begin() as conn:
-            deleted = conn.execute(stmt, {"names": names}).rowcount
+            deleted = conn.execute(stmt, params).rowcount
         engine.dispose()
+        suffix_note = f" account_suffix=@{scope_suffix}" if scope_suffix else ""
         print(
             f"  deleted MySQL v2 application checkpoints "
-            f"strategies={names}: {deleted}"
+            f"strategies={names}{suffix_note}: {deleted}"
         )
     except TimeoutError:
         raise
@@ -1498,6 +1525,7 @@ def main() -> None:
         source_stg,
         shadow_stg,
         args.qmt_account,
+        runner_id=runner_id,
         shadow_replay=args.shadow_replay,
     )
     gateways = cfg["GATEWAYS"]
@@ -1559,6 +1587,7 @@ def main() -> None:
             cleanup_strategy_names=cleanup_strategy_names,
             gateway_names=sim_gateway_names,
             shadow_stg=shadow_stg if cfg["mirror"] else None,
+            application_scope_suffix=runner_id,
         )
     else:
         print(f"[cleanup] skipped scope={cleanup_scope} strategies={cleanup_strategy_names}")
