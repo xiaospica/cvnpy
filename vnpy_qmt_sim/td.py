@@ -19,6 +19,49 @@ from vnpy.trader.constant import (
 if TYPE_CHECKING:
     from .persistence import QmtSimPersistence
 
+
+def _normalize_vt_symbol(raw: Any) -> str:
+    """Normalize configured security codes to vn.py ``symbol.exchange`` form."""
+    text = str(raw or "").strip().upper()
+    if not text:
+        return ""
+
+    text = text.replace(".XSHG", ".SSE").replace(".SH", ".SSE")
+    text = text.replace(".XSHE", ".SZSE").replace(".SZ", ".SZSE")
+    if "." in text:
+        symbol, exchange = text.split(".", 1)
+        return f"{symbol}.{exchange}"
+
+    symbol = text
+    if not symbol.isdigit() or len(symbol) != 6:
+        return text
+    exchange = "SSE" if symbol.startswith(("5", "6")) else "SZSE"
+    return f"{symbol}.{exchange}"
+
+
+def _iter_config_symbols(value: Any) -> List[str]:
+    """Flatten list/dict/string whitelist config values into symbol strings."""
+    if value in (None, ""):
+        return []
+    if isinstance(value, dict):
+        items: List[str] = []
+        for key, nested in value.items():
+            if str(key).startswith("_") or str(key).lower() in {"doc", "note", "notes"}:
+                continue
+            items.extend(_iter_config_symbols(nested))
+        return items
+    if isinstance(value, (list, tuple, set)):
+        items: List[str] = []
+        for item in value:
+            items.extend(_iter_config_symbols(item))
+        return items
+    return [
+        part.strip()
+        for part in str(value).replace(";", ",").replace("\n", ",").split(",")
+        if part.strip()
+    ]
+
+
 class SimulationCounter:
     """模拟柜台"""
 
@@ -71,6 +114,7 @@ class SimulationCounter:
         self.fill_delay_ms: int = 0
         self.reporting_delay_ms: int = 0
         self.reject_short_if_no_position: bool = True
+        self.t0_symbols: set[str] = set()
         self.order_tasks: Dict[str, Dict[str, Any]] = {}
 
         # T+1 卖单的持仓冻结追踪：orderid -> (pos_key, frozen_amount)。
@@ -85,6 +129,24 @@ class SimulationCounter:
 
     def attach_persistence(self, persistence: "QmtSimPersistence") -> None:
         self._persistence = persistence
+
+    def set_t0_symbol_whitelist(self, value: Any) -> None:
+        """Configure temporary T+0 sellability whitelist.
+
+        This is intentionally whitelist-based. Some ETFs/funds are T+0
+        eligible, but ordinary A-share ETFs remain T+1; do not infer T+0 from
+        ETF code prefixes alone. The list should later be replaced by product
+        metadata from a reliable instrument master.
+        """
+        self.t0_symbols = {
+            symbol
+            for symbol in (_normalize_vt_symbol(item) for item in _iter_config_symbols(value))
+            if symbol
+        }
+
+    def is_t0_symbol(self, vt_symbol: str) -> bool:
+        """Return whether a configured symbol can sell same-day buys."""
+        return _normalize_vt_symbol(vt_symbol) in self.t0_symbols
 
     def _persist_runtime_state(self, **kwargs: Any) -> None:
         if self._persistence is None:
@@ -410,13 +472,26 @@ class SimulationCounter:
         if order.direction == Direction.SHORT and self.reject_short_if_no_position:
             pos_key = f"{order.symbol}.{order.exchange.value}.{Direction.LONG.value}"
             pos = self.positions.get(pos_key)
-            # A 股 T+1：可卖持仓 = 昨仓 - 已冻结。今仓不可卖。
+            # A-share stocks and most domestic equity ETFs are T+1. A small,
+            # explicitly configured whitelist is allowed to use T+0 sellability
+            # for replay parity with products such as cross-border, bond,
+            # commodity, and money-market ETFs/funds. Keep this as config, not
+            # as a broad ETF-prefix rule.
             yd_volume = float(pos.yd_volume) if pos else 0.0
             frozen_volume = float(pos.frozen) if pos else 0.0
-            available_yd = max(yd_volume - frozen_volume, 0.0)
-            if float(order.volume) > available_yd:
+            total_volume = float(pos.volume) if pos else 0.0
+            if self.is_t0_symbol(order.vt_symbol):
+                available_volume = max(total_volume - frozen_volume, 0.0)
+                rule_label = "T+0 whitelist"
+            else:
+                available_volume = max(yd_volume - frozen_volume, 0.0)
+                rule_label = "T+1"
+            if float(order.volume) > available_volume:
                 order.status = Status.REJECTED
-                msg = f"可用持仓不足(T+1): yd={yd_volume} frozen={frozen_volume} volume={order.volume}"
+                msg = (
+                    f"可用持仓不足({rule_label}): volume={total_volume} "
+                    f"yd={yd_volume} frozen={frozen_volume} order_volume={order.volume}"
+                )
                 self._set_order_status_msg(order, msg)
                 self._set_order_extra(order, {"status_msg": msg, "qmt_status": "ORDER_JUNK"})
                 self.order_reject_reason[orderid] = "insufficient_position"
@@ -850,6 +925,12 @@ class QmtSimTd:
         self.counter.capital = setting.get("模拟资金", 10000000.0)
         self.counter.partial_rate = setting.get("部分成交率", 0.0)
         self.counter.reject_rate = setting.get("拒单率", 0.0)
+        self.counter.set_t0_symbol_whitelist(
+            setting.get("T0标的白名单")
+            or setting.get("T+0标的白名单")
+            or setting.get("t0_symbol_whitelist")
+            or setting.get("t0_symbols")
+        )
 
         account = AccountData(
             accountid=acc_id,

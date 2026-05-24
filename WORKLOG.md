@@ -277,3 +277,49 @@ Next:
 - 排查确认：普通单测未默认加载该文件；实际风险在 `run_signal_dual_track.py` 的 `--config` 默认值仍指向该 test JSON，`RedisLiveSimTestStrategy` 作为历史测试策略类也保留了 test 配置兜底。
 - 已修改 `run_signal_dual_track.py`：默认配置改为 `SIGNAL_DUAL_TRACK_CONFIG` 或 `<VNPY_DATA_ROOT>/config/signal_dual_track.json`，缺失时直接报错；不再隐式读取 `vnpy_signal_strategy_plus/test/*.json`。
 - 新增 `config/signal_dual_track.example.json`，默认策略名为 `harvester_micro_cap_1`，作为复制到数据根目录 config 下的模板。
+
+## 2026-05-24 - Signal pct sizing fixes for dual-track replay
+
+Context:
+- User confirmed that replay prices must continue to come from the simulator/market-data path, not from `signal.price`.
+- The remaining rejected orders were near-full `588080` buys whose calculated frozen cash exceeded available cash by only a few currency units, plus tiny `SELL pct` signals rounded down to zero.
+
+Changes:
+- Kept `vnpy_qmt_sim` as final validation only; no simulator auto-resizing was added.
+- Added common pct-to-volume handling in `MySQLSignalStrategyPlus`:
+  - clamp near-full buy volume to the largest cash-affordable board-lot quantity using available cash and gateway fee estimation;
+  - keep non-full buy pct unchanged;
+  - round tiny non-empty sell pct to one board lot when at least one board lot is available.
+- Buy/sell sizing logs now print the effective normalized pct instead of the raw over-1 pct.
+
+Validation:
+- `py_compile vnpy_signal_strategy_plus/mysql_signal_strategy.py` passed.
+- Targeted pytest passed: new pct sizing tests, T+0 whitelist tests, and MySQL timeout tests.
+- Full `tests/test_sell_then_buy_and_resubmit.py` still has one pre-existing unrelated failure in `test_resubmit_send_order_clears_live_test_case_tag`.
+- Smoke ran `F:/Program_Home/vnpy/python.exe -u run_signal_dual_track.py --mode v2 --source-stg harvester_micro_cap_1` with `VNPY_DATA_ROOT=D:\vnpy_data`; both sim DBs produced 130 orders, 130 trades, and all orders fully traded.
+
+Result:
+- The two problematic `588080` full-buy signals were capped by 100 shares and no longer rejected.
+- The two tiny `588080 SELL pct=0.0001` signals were emitted as 100-share sells.
+- Source and shadow replay equity matched through 2026-05-22.
+
+## 2026-05-24 - mlearnweb equity curve flat after rerun
+
+Context:
+- User reran `run_signal_dual_track.py --mode v2 --source-stg harvester_micro_cap_1`; the frontend showed zero return for both strategies.
+
+Findings:
+- vnpy fact source was correct: `D:\vnpy_data\state\strategy_equity_journal.db` had 89 `replay_settle` rows and one `sim_live_settle` row for each strategy.
+- Both simulator DBs had 130 orders and 130 trades, all fully traded.
+- mlearnweb display cache only had `account_equity` heartbeat rows for today and no `replay_settle` rows, so the detail API returned `sample_count=1` and warned `equity curve has only one valid point`.
+- Direct webtrader check returned 404 for `/api/v1/strategy/equity-journal`; OpenAPI also lacked that route although the RPC method and route tests existed.
+
+Fix:
+- Restored `GET /api/v1/strategy/equity-journal` in `vnpy_webtrader.routes_strategy`, forwarding to `get_strategy_equity_journal`.
+
+Validation:
+- `py_compile vnpy_webtrader/routes_strategy.py` passed.
+- `pytest vnpy_webtrader/test/test_strategy_equity_journal_http.py -q` passed.
+
+Operational note:
+- The currently running webtrader process has already imported the old route table; restart `run_signal_dual_track.py` / webtrader for the new HTTP route to become visible, then mlearnweb's sync loop can materialize `replay_settle` rows.

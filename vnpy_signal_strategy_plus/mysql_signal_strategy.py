@@ -39,7 +39,8 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
     parameters = [
         "db_host", "db_port", "db_user",
         "db_password", "db_name", "poll_interval",
-        "engine_type", "start_date", "end_date", "gateway"
+        "engine_type", "start_date", "end_date", "gateway",
+        "pct_overflow_tolerance",
     ]
     variables = ["last_signal_id"]
 
@@ -55,6 +56,8 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
     gateway = ""
     live_orders_enabled = True
     live_signal_cutoff_dt = None
+    pct_overflow_tolerance = 0.001
+    board_lot_size = 100
 
     def __init__(self, signal_engine):
         super().__init__(signal_engine)
@@ -358,7 +361,15 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
             if "close" in signal_type:
                 offset = Offset.CLOSE
 
-        pct = float(signal.pct)
+        raw_pct = float(signal.pct)
+        pct = self.normalize_signal_pct(raw_pct)
+        if pct is None:
+            self.write_log(f"百分比异常: {raw_pct}")
+            return True
+        if pct != raw_pct:
+            self.write_log(
+                f"百分比轻微超过 1，按满仓处理: raw_pct={raw_pct}, effective_pct={pct}"
+            )
         fallback_price = float(signal.price or 0)
         empty_signal = self.is_empty_signal(signal)
 
@@ -379,16 +390,27 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
                 return True
 
             target_value = total_capital * pct
-            vol_int = int(target_value / calc_price)
-            vol_int = (vol_int // 100) * 100
+            raw_volume = target_value / calc_price
+            vol_int = self.round_to_board_lot(raw_volume)
 
-            if vol_int <= 0 and not (direction == Direction.SHORT and empty_signal):
+            if vol_int <= 0 and direction == Direction.LONG:
                 self.write_log(f"下单数量为0 (计算后: {vol_int})，忽略信号: {pct}")
                 return True
 
             if direction == Direction.LONG:
+                vol_int = self.cap_full_buy_volume_by_cash(
+                    gateway_name=gateway_name,
+                    price=calc_price,
+                    requested_volume=vol_int,
+                    pct=pct,
+                )
+                if vol_int <= 0:
+                    self.write_log(
+                        f"buy volume capped to 0 by available cash: {vt_symbol} pct={pct} price={calc_price}"
+                    )
+                    return True
                 self.write_log(
-                    f"交易金额比例计算(买入): 权益{total_capital} * 比例{signal.pct} / 价格{calc_price} = 数量{vol_int}"
+                    f"交易金额比例计算(买入): 权益{total_capital} * 比例{pct} / 价格{calc_price} = 数量{vol_int}"
                 )
             else:
                 vt_positionid = f"{gateway_name}.{vt_symbol}.{Direction.LONG.value}"
@@ -409,10 +431,13 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
                     )
                     return True
 
-                if empty_signal:
-                    vol_int = available
-                elif vol_int > available:
-                    vol_int = available
+                vol_int = self.adjust_sell_volume_by_available_position(
+                    vt_symbol=vt_symbol,
+                    raw_volume=raw_volume,
+                    rounded_volume=vol_int,
+                    available=available,
+                    empty_signal=empty_signal,
+                )
 
                 if vol_int <= 0:
                     self.write_log(
@@ -421,7 +446,7 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
                     return True
 
                 self.write_log(
-                    f"交易金额比例计算(卖出): 权益{total_capital} * 比例{signal.pct} / 价格{calc_price}; "
+                    f"交易金额比例计算(卖出): 权益{total_capital} * 比例{pct} / 价格{calc_price}; "
                     f"修正到可卖数量{vol_int}"
                 )
         else:
@@ -457,6 +482,148 @@ class MySQLSignalStrategyPlus(AutoResubmitMixinPlus, SignalTemplatePlus):
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "y"}
         return bool(value)
+
+    def normalize_signal_pct(self, pct: float) -> float | None:
+        """Clamp tiny over-100% JQ full-allocation drifts, reject real outliers."""
+        if pct <= 1.0:
+            return pct
+        tolerance = float(getattr(self, "pct_overflow_tolerance", 0.001) or 0.0)
+        if pct <= 1.0 + tolerance:
+            return 1.0
+        return None
+
+    def round_to_board_lot(self, volume: float) -> int:
+        """Round an A-share target quantity down to board lots."""
+        lot_size = int(getattr(self, "board_lot_size", 100) or 100)
+        if lot_size <= 0:
+            lot_size = 100
+        return int(volume // lot_size) * lot_size
+
+    def is_near_full_buy_pct(self, pct: float) -> bool:
+        """Return whether pct means a full or near-full buy intent."""
+        tolerance = float(getattr(self, "pct_overflow_tolerance", 0.001) or 0.0)
+        return pct >= max(0.0, 1.0 - tolerance)
+
+    def get_gateway_counter(self, gateway_name: str):
+        """Return a simulator-like counter when the gateway exposes one."""
+        try:
+            gateway = self.signal_engine.main_engine.get_gateway(gateway_name)
+        except Exception:
+            return None
+        return getattr(getattr(gateway, "td", None), "counter", None)
+
+    def get_account_available_cash(self, gateway_name: str) -> float:
+        """Return synchronously available cash for pct-to-volume sizing."""
+        counter = self.get_gateway_counter(gateway_name)
+        if counter is not None and hasattr(counter, "capital"):
+            try:
+                return max(float(counter.capital) - float(getattr(counter, "frozen", 0.0) or 0.0), 0.0)
+            except Exception:
+                pass
+
+        for account in self.signal_engine.main_engine.get_all_accounts():
+            if account.gateway_name == gateway_name:
+                available = getattr(account, "available", None)
+                if available is None:
+                    available = float(account.balance) - float(getattr(account, "frozen", 0.0) or 0.0)
+                return max(float(available), 0.0)
+        return 0.0
+
+    def estimate_buy_frozen_cash(self, gateway_name: str, price: float, volume: int) -> float:
+        """Estimate cash frozen by a buy order using gateway fees when possible."""
+        if price <= 0 or volume <= 0:
+            return 0.0
+        amount = float(price) * int(volume)
+        counter = self.get_gateway_counter(gateway_name)
+        if counter is not None and hasattr(counter, "calculate_fee"):
+            try:
+                fee = float(counter.calculate_fee(amount, Direction.LONG))
+                return amount + fee
+            except Exception:
+                pass
+
+        # Keep the fallback aligned with QMT_SIM. Broker/gateway validation still
+        # remains the final authority; this only avoids near-full pct sizing being
+        # rejected by a few currency units.
+        commission = max(amount * 0.0001, 5.0)
+        transfer_fee = amount * 0.00001
+        return amount + commission + transfer_fee
+
+    def max_affordable_buy_volume(self, gateway_name: str, price: float, requested_volume: int) -> int:
+        """Find the largest board-lot buy quantity affordable by available cash."""
+        requested_volume = self.round_to_board_lot(requested_volume)
+        if price <= 0 or requested_volume <= 0:
+            return 0
+
+        available_cash = self.get_account_available_cash(gateway_name)
+        if available_cash <= 0:
+            return 0
+
+        lot_size = int(getattr(self, "board_lot_size", 100) or 100)
+        high = requested_volume // lot_size
+        low = 0
+        while low < high:
+            mid = (low + high + 1) // 2
+            volume = mid * lot_size
+            if self.estimate_buy_frozen_cash(gateway_name, price, volume) <= available_cash:
+                low = mid
+            else:
+                high = mid - 1
+        return low * lot_size
+
+    def cap_full_buy_volume_by_cash(
+        self,
+        *,
+        gateway_name: str,
+        price: float,
+        requested_volume: int,
+        pct: float,
+    ) -> int:
+        """Cap near-full pct buys to the cash-affordable board-lot quantity."""
+        requested_volume = self.round_to_board_lot(requested_volume)
+        if not self.is_near_full_buy_pct(pct):
+            return requested_volume
+
+        capped_volume = self.max_affordable_buy_volume(gateway_name, price, requested_volume)
+        if 0 < capped_volume < requested_volume:
+            need_cash = self.estimate_buy_frozen_cash(gateway_name, price, requested_volume)
+            capped_cash = self.estimate_buy_frozen_cash(gateway_name, price, capped_volume)
+            available_cash = self.get_account_available_cash(gateway_name)
+            self.write_log(
+                "near-full buy volume capped by cash: "
+                f"requested={requested_volume}, capped={capped_volume}, "
+                f"available_cash={available_cash:.2f}, "
+                f"requested_cash={need_cash:.2f}, capped_cash={capped_cash:.2f}"
+            )
+        return capped_volume
+
+    def adjust_sell_volume_by_available_position(
+        self,
+        *,
+        vt_symbol: str,
+        raw_volume: float,
+        rounded_volume: int,
+        available: int,
+        empty_signal: bool,
+    ) -> int:
+        """Apply sell-side pct sizing rules after reading current position."""
+        if empty_signal:
+            return available
+
+        if (
+            rounded_volume <= 0
+            and 0 < raw_volume < self.board_lot_size
+            and available >= self.board_lot_size
+        ):
+            self.write_log(
+                f"tiny sell pct rounded to one board lot: {vt_symbol} "
+                f"raw_volume={raw_volume:.4f} available={available}"
+            )
+            return self.board_lot_size
+
+        if rounded_volume > available:
+            return available
+        return rounded_volume
 
     def get_gateway_name(self, vt_symbol: str) -> str | None:
         exchange_str = vt_symbol.split(".")[-1]

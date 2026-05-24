@@ -70,6 +70,7 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import re
 import signal
 import sqlite3
@@ -152,6 +153,9 @@ WEBTRADER_HTTP_PORT = 8001
 MODE_ALIASES = {"single": "v1", "v1": "v1", "v2": "v2", "v3": "v3"}
 MAX_STG_NAME_LEN = 64
 RUNNER_ID_INVALID_CHARS = re.compile(r"[^A-Za-z0-9_]+")
+DEFAULT_MYSQL_CONNECT_TIMEOUT = 10
+DEFAULT_MYSQL_READ_TIMEOUT = 10
+DEFAULT_MYSQL_WRITE_TIMEOUT = 10
 
 
 def _default_setting_path() -> Path:
@@ -736,12 +740,97 @@ def _mysql_url(mysql_cfg: Dict[str, Any]) -> str:
     return f"mysql+pymysql://{user}:{password}@{host}:{port}/{db}"
 
 
+def _coerce_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _mysql_connect_args(mysql_cfg: Dict[str, Any]) -> Dict[str, int]:
+    """Return bounded PyMySQL socket timeouts for runner-owned DB work."""
+    return {
+        "connect_timeout": _coerce_positive_int(
+            mysql_cfg.get("connect_timeout"),
+            DEFAULT_MYSQL_CONNECT_TIMEOUT,
+        ),
+        "read_timeout": _coerce_positive_int(
+            mysql_cfg.get("read_timeout"),
+            DEFAULT_MYSQL_READ_TIMEOUT,
+        ),
+        "write_timeout": _coerce_positive_int(
+            mysql_cfg.get("write_timeout"),
+            DEFAULT_MYSQL_WRITE_TIMEOUT,
+        ),
+    }
+
+
+def _run_with_timeout(func: Any, *, timeout: int, label: str) -> Any:
+    """Run a blocking call in a daemon thread and fail if it exceeds timeout."""
+    result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+    def _target() -> None:
+        try:
+            result_queue.put((True, func()))
+        except BaseException as exc:
+            result_queue.put((False, exc))
+
+    thread = threading.Thread(target=_target, name=f"{label}-timeout", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise TimeoutError(f"{label} timed out after {timeout}s")
+
+    ok, value = result_queue.get_nowait()
+    if ok:
+        return value
+    raise value
+
+
+def _mysql_dbapi_connect(mysql_cfg: Dict[str, Any]) -> Any:
+    """Create a PyMySQL connection with a hard 10s startup deadline."""
+    import pymysql
+
+    args = _mysql_connect_args(mysql_cfg)
+
+    def _connect() -> Any:
+        return pymysql.connect(
+            host=str(mysql_cfg.get("host", "127.0.0.1")),
+            port=int(mysql_cfg.get("port", 3306)),
+            user=str(mysql_cfg.get("user", "")),
+            password=str(mysql_cfg.get("password", "")),
+            database=str(mysql_cfg.get("db", "mysql")),
+            charset=str(mysql_cfg.get("charset", "utf8mb4")),
+            connect_timeout=args["connect_timeout"],
+            read_timeout=args["read_timeout"],
+            write_timeout=args["write_timeout"],
+        )
+
+    return _run_with_timeout(
+        _connect,
+        timeout=args["connect_timeout"],
+        label="MySQL connection",
+    )
+
+
+def _mysql_engine(mysql_cfg: Dict[str, Any], *, pool_pre_ping: bool = False):
+    """Create a SQLAlchemy engine with finite PyMySQL socket timeouts."""
+    from sqlalchemy import create_engine
+
+    return create_engine(
+        _mysql_url(mysql_cfg),
+        creator=lambda: _mysql_dbapi_connect(mysql_cfg),
+        pool_pre_ping=pool_pre_ping,
+    )
+
+
 def _delete_shadow_mysql_rows(setting: Dict[str, Any], shadow_stg: str) -> None:
     """Delete v2 shadow signal rows and their consumption checkpoints."""
     try:
-        from sqlalchemy import create_engine, text
+        from sqlalchemy import text
 
-        engine = create_engine(_mysql_url(setting["mysql"]))
+        engine = _mysql_engine(setting["mysql"])
         with engine.begin() as conn:
             app_deleted = conn.execute(
                 text(
@@ -761,6 +850,8 @@ def _delete_shadow_mysql_rows(setting: Dict[str, Any], shadow_stg: str) -> None:
             f"  deleted MySQL shadow v2 rows stg={shadow_stg!r}: "
             f"events={event_deleted} applications={app_deleted}"
         )
+    except TimeoutError:
+        raise
     except Exception as exc:
         print(f"  warn: purge MySQL shadow v2 rows failed: {exc}")
 
@@ -774,9 +865,9 @@ def _delete_strategy_application_rows(
     if not names:
         return
     try:
-        from sqlalchemy import bindparam, create_engine, text
+        from sqlalchemy import bindparam, text
 
-        engine = create_engine(_mysql_url(setting["mysql"]))
+        engine = _mysql_engine(setting["mysql"])
         stmt = (
             text(
                 "DELETE FROM strategy_signal_applications "
@@ -791,6 +882,8 @@ def _delete_strategy_application_rows(
             f"  deleted MySQL v2 application checkpoints "
             f"strategies={names}: {deleted}"
         )
+    except TimeoutError:
+        raise
     except Exception as exc:
         print(f"  warn: purge MySQL v2 application checkpoints failed: {exc}")
 
@@ -829,11 +922,10 @@ class MySqlSignalMirror:
 
     def start(self) -> None:
         """Start the background mirror thread."""
-        from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
         from vnpy_signal_strategy_plus.signal_journal import SignalJournalBase
 
-        self._engine = create_engine(_mysql_url(self.mysql_cfg), pool_pre_ping=True)
+        self._engine = _mysql_engine(self.mysql_cfg, pool_pre_ping=True)
         SignalJournalBase.metadata.create_all(self._engine)
         self._Session = sessionmaker(bind=self._engine)
         self._bootstrap_last_id()

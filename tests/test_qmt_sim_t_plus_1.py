@@ -16,7 +16,7 @@ from vnpy.trader.object import (
 )
 
 from vnpy_qmt_sim.bar_source.base import BarQuote
-from vnpy_qmt_sim.td import SimulationCounter
+from vnpy_qmt_sim.td import QmtSimTd, SimulationCounter
 
 
 class _DummyMd:
@@ -131,6 +131,45 @@ def test_buy_today_cannot_sell_same_day() -> None:
     sell_order = counter.orders[sell_id]
     assert sell_order.status == Status.REJECTED
     assert "T+1" in sell_order.status_msg or "可用持仓不足" in sell_order.status_msg
+
+
+def test_t0_whitelist_allows_same_day_sell_for_configured_symbol() -> None:
+    """Only explicitly configured symbols may sell same-day buys."""
+    vt = "518880.SSE"
+    md = _DummyMd(tick=_tick(vt, 11.0))
+    counter = SimulationCounter(_DummyGateway(md))  # type: ignore[arg-type]
+    counter.set_t0_symbol_whitelist({"gold": ["518880.XSHG"], "_doc": "ignored"})
+
+    _buy_then_fill(counter, vt, volume=200, price=11.0)
+    sell_id = _sell(counter, vt, volume=200, price=11.0)
+
+    assert counter.orders[sell_id].status == Status.ALLTRADED
+    assert counter.positions[f"{vt}.{Direction.LONG.value}"].volume == 0
+
+
+def test_non_whitelisted_etf_still_uses_t_plus_1() -> None:
+    """ETF prefixes alone must not imply T+0."""
+    vt = "588080.SSE"
+    md = _DummyMd(tick=_tick(vt, 11.0))
+    counter = SimulationCounter(_DummyGateway(md))  # type: ignore[arg-type]
+    counter.set_t0_symbol_whitelist(["518880.SSE"])
+
+    _buy_then_fill(counter, vt, volume=200, price=11.0)
+    sell_id = _sell(counter, vt, volume=200, price=11.0)
+
+    assert counter.orders[sell_id].status == Status.REJECTED
+    assert "T+1" in counter.orders[sell_id].status_msg
+
+
+def test_qmt_sim_td_connect_loads_t0_whitelist_setting() -> None:
+    """QmtSimTd owns loading the temporary T+0 whitelist from connect settings."""
+    gateway = _DummyGateway(_DummyMd())
+    td = QmtSimTd(gateway)  # type: ignore[arg-type]
+
+    td.connect({"账户": "test", "T0标的白名单": {"gold": ["518880.XSHG"]}})
+
+    assert td.counter.is_t0_symbol("518880.SSE")
+    assert not td.counter.is_t0_symbol("588080.SSE")
 
 
 def test_settle_end_of_day_makes_position_sellable() -> None:

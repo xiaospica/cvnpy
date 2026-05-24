@@ -85,6 +85,27 @@ def list_all_strategies(access: bool = Depends(get_access)) -> List[Dict[str, An
     return unwrap_result(get_fast_rpc_client().list_strategies(""))
 
 
+@router.get("/equity-journal")
+def get_strategy_equity_journal(
+    engine: str = Query(...),
+    strategy_name: str = Query(...),
+    since: Optional[str] = Query(None),
+    source_label: Optional[str] = Query(None),
+    limit: int = Query(10000, ge=1, le=100000),
+    access: bool = Depends(get_access),
+) -> List[Dict[str, Any]]:
+    """Read the generic strategy equity journal for mlearnweb sync."""
+    return unwrap_result(
+        get_fast_rpc_client().get_strategy_equity_journal(
+            engine,
+            strategy_name,
+            since,
+            source_label,
+            limit,
+        )
+    )
+
+
 @router.get("/engines/{engine}", response_model=List[StrategyInfoModel])
 def list_engine_strategies(
     engine: str, access: bool = Depends(get_access)
@@ -99,32 +120,6 @@ def get_strategy(
     engine: str, name: str, access: bool = Depends(get_access)
 ) -> Dict[str, Any]:
     return unwrap_result(get_fast_rpc_client().get_strategy(engine, name))
-
-
-@router.get("/equity-journal")
-def list_strategy_equity_journal(
-    engine: str,
-    strategy_name: str,
-    since: Optional[str] = Query(
-        None,
-        description="ISO datetime; 仅返回 ts > since 的 journal 行",
-    ),
-    source_label: Optional[str] = Query(
-        None,
-        description="可选来源过滤: replay_settle / sim_live_settle / broker_live_close",
-    ),
-    limit: int = Query(10000, ge=1, le=100000),
-    access: bool = Depends(get_access),
-) -> List[Dict[str, Any]]:
-    """读取通用策略权益 journal.
-
-    该接口属于 strategy 域而不是 ML 域, 因为日终权益 journal 对所有策略引擎生效。
-    """
-    return unwrap_result(
-        get_fast_rpc_client().get_strategy_equity_journal(
-            engine, strategy_name, since, source_label, limit,
-        )
-    )
 
 
 # ---------------------------------------------------------------------------

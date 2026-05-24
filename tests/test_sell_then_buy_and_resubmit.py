@@ -17,12 +17,16 @@ class _DummySignalEngine:
 
 
 class _DummyMainEngine:
-    def __init__(self, accounts=None):
+    def __init__(self, accounts=None, gateway=None):
         self._accounts = accounts or []
+        self._gateway = gateway
         self.gateways = {}
 
     def get_all_accounts(self):
         return self._accounts
+
+    def get_gateway(self, gateway_name: str):
+        return self._gateway
 
 
 class _DummyResubmit(AutoResubmitMixinPlus):
@@ -92,6 +96,71 @@ def test_get_account_asset_uses_equity_balance() -> None:
     accounts = [AccountData(accountid="ACC", balance=12345.0, frozen=0.0, gateway_name="G1")]
     st = mysql_mod.MySQLSignalStrategyPlus(_DummySignalEngine(_DummyMainEngine(accounts)))
     assert st.get_account_asset("G1") == 12345.0
+
+
+def test_signal_pct_tiny_overflow_is_clamped() -> None:
+    st = mysql_mod.MySQLSignalStrategyPlus(_DummySignalEngine(_DummyMainEngine()))
+
+    assert st.normalize_signal_pct(1.0002) == 1.0
+    assert st.normalize_signal_pct(1.001) == 1.0
+    assert st.normalize_signal_pct(1.0011) is None
+
+
+def test_near_full_buy_volume_is_capped_by_available_cash() -> None:
+    account = AccountData(
+        accountid="ACC",
+        balance=1_001_261.96,
+        frozen=0.0,
+        gateway_name="G1",
+    )
+    st = mysql_mod.MySQLSignalStrategyPlus(_DummySignalEngine(_DummyMainEngine([account])))
+
+    capped = st.cap_full_buy_volume_by_cash(
+        gateway_name="G1",
+        price=1.508,
+        requested_volume=663_900,
+        pct=1.0,
+    )
+
+    assert capped == 663_800
+    assert st.estimate_buy_frozen_cash("G1", 1.508, capped) <= account.available
+    assert st.estimate_buy_frozen_cash("G1", 1.508, 663_900) > account.available
+
+
+def test_non_full_buy_volume_is_not_cash_capped() -> None:
+    account = AccountData(accountid="ACC", balance=1_000.0, frozen=0.0, gateway_name="G1")
+    st = mysql_mod.MySQLSignalStrategyPlus(_DummySignalEngine(_DummyMainEngine([account])))
+
+    assert st.cap_full_buy_volume_by_cash(
+        gateway_name="G1",
+        price=10.0,
+        requested_volume=10_000,
+        pct=0.5,
+    ) == 10_000
+
+
+def test_tiny_sell_pct_rounds_to_one_board_lot_when_available() -> None:
+    st = mysql_mod.MySQLSignalStrategyPlus(_DummySignalEngine(_DummyMainEngine()))
+
+    assert st.adjust_sell_volume_by_available_position(
+        vt_symbol="588080.SSE",
+        raw_volume=65.4,
+        rounded_volume=0,
+        available=500,
+        empty_signal=False,
+    ) == 100
+
+
+def test_tiny_sell_pct_stays_zero_without_one_board_lot_available() -> None:
+    st = mysql_mod.MySQLSignalStrategyPlus(_DummySignalEngine(_DummyMainEngine()))
+
+    assert st.adjust_sell_volume_by_available_position(
+        vt_symbol="588080.SSE",
+        raw_volume=65.4,
+        rounded_volume=0,
+        available=50,
+        empty_signal=False,
+    ) == 0
 
 
 def test_replay_get_account_asset_reads_sim_counter_not_stale_oms() -> None:

@@ -40,6 +40,9 @@ class QmtSimGateway(BaseGateway):
         "成交延迟毫秒": 0,
         "报单上报延迟毫秒": 0,
         "卖出持仓不足拒单": "是",
+        # Temporary product whitelist for T+0 sellability.  Do not infer T+0
+        # from ETF prefixes: domestic equity ETFs are usually still T+1.
+        "T0标的白名单": [],
         "行情源": "merged_parquet",
         "merged_parquet_merged_root": str(merged_stock_fund_snapshots_dir()),
         "merged_parquet_fallback_roots": str(merged_snapshots_dir()),
