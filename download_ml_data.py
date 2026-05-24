@@ -35,6 +35,7 @@ DEFAULT_BUNDLE_DIR = (
     r"f6017411b44c4c7790b63c5766b93964"
 )
 DEFAULT_INFERENCE_PYTHON = r"E:/ssd_backup/Pycharm_project/python-3.11.0-amd64/python.exe"
+DOTENV_ENCODINGS = ("utf-8-sig", "utf-8", "gbk", "mbcs")
 
 
 def _log(message: str) -> None:
@@ -46,11 +47,11 @@ def _load_dotenv_file(path: Path) -> None:
     if not path.exists():
         return
 
-    for encoding in ("utf-8-sig", "utf-8", "gbk"):
+    for encoding in DOTENV_ENCODINGS:
         try:
             text = path.read_text(encoding=encoding)
             break
-        except UnicodeDecodeError:
+        except (LookupError, UnicodeDecodeError):
             continue
     else:
         text = path.read_text()
@@ -67,6 +68,25 @@ def _load_dotenv_file(path: Path) -> None:
         os.environ[key] = value
 
 
+def _load_dotenv_compat(path: Path, *, override: bool = False) -> None:
+    """Load dotenv files saved as UTF-8 or Windows ANSI/GBK."""
+    try:
+        from dotenv import load_dotenv
+    except ModuleNotFoundError:
+        _load_dotenv_file(path)
+        return
+
+    last_error: Exception | None = None
+    for encoding in DOTENV_ENCODINGS:
+        try:
+            load_dotenv(path, override=override, encoding=encoding)
+            return
+        except (LookupError, UnicodeDecodeError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+
+
 def _load_runtime_env() -> None:
     """Load DOTENV_FILE, .env.production, then .env before resolving paths."""
     candidates: list[Path] = []
@@ -78,12 +98,7 @@ def _load_runtime_env() -> None:
     for env_path in candidates:
         if not env_path.exists():
             continue
-        try:
-            from dotenv import load_dotenv
-
-            load_dotenv(env_path, override=False)
-        except ModuleNotFoundError:
-            _load_dotenv_file(env_path)
+        _load_dotenv_compat(env_path, override=False)
         _log(f"loaded env: {env_path}")
         return
 
