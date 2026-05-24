@@ -138,6 +138,7 @@ from vnpy_common.data_paths import (  # noqa: E402
     config_dir,
     ensure_vnpy_data_env,
     merged_snapshots_dir,
+    merged_stock_fund_snapshots_dir,
     state_dir,
     strategy_equity_journal_db_path,
     vnpy_data_root,
@@ -474,7 +475,8 @@ def _sim_setting(setting: Dict[str, Any], gateway_name: str) -> Dict[str, Any]:
     connect_setting.setdefault("模拟资金", float(setting.get("initial_capital", 1_000_000.0)))
     connect_setting.setdefault("行情源", "merged_parquet")
     sim_state_dir = _resolve_sim_state_dir(setting)
-    connect_setting.setdefault("merged_parquet_merged_root", str(merged_snapshots_dir()))
+    connect_setting.setdefault("merged_parquet_merged_root", str(merged_stock_fund_snapshots_dir()))
+    connect_setting.setdefault("merged_parquet_fallback_roots", str(merged_snapshots_dir()))
     connect_setting.setdefault("merged_parquet_reference_kind", "today_open")
     connect_setting.setdefault("merged_parquet_fallback_days", 10)
     connect_setting.setdefault("启用持久化", "是")

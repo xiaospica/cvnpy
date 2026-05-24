@@ -138,6 +138,19 @@ def test_v3_cleanup_scope_keeps_source_checkpoint():
     assert names == ["shadow_stg"]
 
 
+def test_sim_setting_prefers_stock_fund_snapshots(monkeypatch, tmp_path):
+    monkeypatch.setenv("VNPY_DATA_ROOT", str(tmp_path))
+
+    setting = runner._sim_setting({"initial_capital": 1_000_000, "sim": {}}, "QMT_SIM_test")
+
+    assert setting["merged_parquet_merged_root"] == str(
+        tmp_path / "snapshots" / "merged_stock_fund"
+    )
+    assert setting["merged_parquet_fallback_roots"] == str(
+        tmp_path / "snapshots" / "merged"
+    )
+
+
 def test_v1_alias_matches_single_mode():
     cfg = runner._build_config(
         "v1",
