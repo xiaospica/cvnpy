@@ -323,3 +323,46 @@ Validation:
 
 Operational note:
 - The currently running webtrader process has already imported the old route table; restart `run_signal_dual_track.py` / webtrader for the new HTTP route to become visible, then mlearnweb's sync loop can materialize `replay_settle` rows.
+
+## 2026-05-24 - QMT_SIM replay calendar decoupled from qlib
+
+Context:
+- User confirmed that non-ML SignalStrategyPlus/QMT_SIM replay can run with `--daily-data-mode fetch-only`, so replay settlement must not depend on `qlib_data_bin/calendars/day.txt` being advanced by a qlib dump.
+
+Plan:
+- Add a shared A-share runtime calendar at `<VNPY_DATA_ROOT>/state/trade_calendars/ashare_day.txt`.
+- Update the runtime calendar after successful `DailyIngestPipeline` fetch snapshots, including fetch-only and skip-dump modes.
+- Make `run_signal_dual_track.py` and SignalStrategyPlus replay prefer the shared calendar, keeping `calendar_provider_uri` only as a legacy fallback.
+- Add focused regression tests and update architecture/agent docs.
+
+Implementation:
+- Added `vnpy_common.trade_calendar` with file-backed stale checks, qlib seeding/fallback, and atomic publish of confirmed trade days.
+- Hooked `DailyIngestPipeline._stage_fetch()` so fetch-only/skip-dump/full all publish the runtime calendar without touching `qlib_data_bin`.
+- Switched `run_signal_dual_track.py` and SignalStrategyPlus replay calendar defaults to the runtime calendar; `calendar_provider_uri` remains accepted for old configs.
+
+Validation:
+- `py_compile` passed for the changed Python modules.
+- `pytest vnpy_common/test/test_trade_calendar.py vnpy_signal_strategy_plus/test/test_signal_dual_track_runner.py vnpy_tushare_pro/ml_data_build/test/test_daily_ingest_pipeline.py -q -p no:cacheprovider` passed: 37 passed, 1 third-party warning.
+- `pytest vnpy_signal_strategy_plus/test/test_signal_journal.py -q -p no:cacheprovider` passed with `VNPY_DATA_ROOT=F:\Quant\vnpy\vnpy_strategy_dev\.pytest_tmp`: 9 passed, known third-party/utcnow warnings.
+
+## 2026-05-24 - Runtime A-share calendar single-date repair
+
+Context:
+- User found that after `download_ml_data.py`, `D:\vnpy_data\state\trade_calendars\ashare_day.txt` contained only `2026-05-22`.
+- Local inspection showed `D:\vnpy_data\qlib_data_bin\calendars\day.txt` did not exist, so the shared calendar publisher had no qlib seed and wrote only the target day.
+
+Fix:
+- Added `publish_ashare_trade_days()` to `vnpy_common.trade_calendar` so callers can atomically publish a batch of confirmed trade days.
+- Updated `DailyIngestPipeline._stage_fetch()` to publish all distinct `snap_df.trade_date` values plus the target `trade_date`; fetch-only no longer depends on an existing qlib provider to produce a useful runtime calendar.
+- Kept qlib calendar as an optional compatibility seed only; no qlib dump is triggered by this path.
+
+Operational repair:
+- Rebuilt `D:\vnpy_data\state\trade_calendars\ashare_day.txt` from `D:\vnpy_data\snapshots\merged_stock_fund\daily_merged_20260522.parquet`.
+- Backup written to `D:\vnpy_data\state\trade_calendars\ashare_day.txt.bak_20260524165237`.
+- Repaired calendar has 162 lines, from `2025-09-15` through `2026-05-22`.
+
+Validation:
+- `py_compile vnpy_common/trade_calendar.py vnpy_tushare_pro/ml_data_build/daily_ingest_pipeline.py` passed.
+- `pytest vnpy_common/test/test_trade_calendar.py vnpy_tushare_pro/ml_data_build/test/test_daily_ingest_pipeline.py -q -p no:cacheprovider` passed: 23 passed.
+- `pytest vnpy_signal_strategy_plus/test/test_signal_dual_track_runner.py -q -p no:cacheprovider` passed: 15 passed.
+- Runtime sanity check with `VNPY_DATA_ROOT=D:\vnpy_data` returned `2026-05-20/21/22=True`, `2026-05-23=False`, and previous trade day of `2026-05-24` as `2026-05-22`.

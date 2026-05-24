@@ -65,6 +65,7 @@ A 股策略通常继承自 `CtaTemplate` 或自定义策略基类。
 - `qlib_data_bin` 禁止倒退发布：目标日 `T` 不得早于当前 `calendars/day.txt` 末尾，也不得早于 `<VNPY_DATA_ROOT>/snapshots/merged/daily_merged_*.parquet` 中的最新日期。若已有 2026-05-15 快照，不允许再把 provider 发布成 2026-05-13。
 - `ML_INGEST_ALLOW_QLIB_ROLLBACK=1` 只能作为人工确认后的应急回滚逃生开关；不要写入 `.env`、`.env.production`、Windows 服务、计划任务或长期启动脚本。使用时必须记录原因、目标日期和恢复动作，用完立即 unset。正常 smoke/headless/e2e 绝不能依赖该变量。
 - 运行 `smoke_full_pipeline.py` 时，如果不希望触碰生产数据源，必须使用隔离的 `VNPY_DATA_ROOT`，或至少显式覆盖 `ML_QLIB_DIR`、`ML_SNAPSHOT_DIR`、`ML_MERGED_PARQUET_PATH` 到临时目录；否则默认会更新生产 root 下的 qlib calendar。
+- 通用 A 股交易日历事实源固定为 `<VNPY_DATA_ROOT>/state/trade_calendars/ashare_day.txt`，由 `vnpy_common.trade_calendar` 读写。`fetch-only` / `skip-dump` / `full` 只要成功执行到 fetch 快照阶段，都必须更新该通用日历；QMT_SIM、SignalStrategyPlus replay 和非 ML 策略默认读取它，不能再把 `qlib_data_bin/calendars/day.txt` 当作非 ML 运行时日历事实源。`calendar_provider_uri` 仅作为兼容旧配置的 fallback。
 - 通用策略权益事实源固定为 `<VNPY_DATA_ROOT>/state/strategy_equity_journal.db`，读写入口是 `vnpy_common.persistence.strategy_equity_journal`。
 - 日终权益 journal 对所有策略引擎生效，不属于 ML 专属能力。回放、模拟实时、真实柜台收盘分别使用 `replay_settle`、`sim_live_settle`、`broker_live_close`，并且必须带 `(engine, strategy_name)`。
 - 真实柜台 `broker_live_close` 写入时间统一由 env `VNPY_BROKER_LIVE_EOD_JOURNAL_TIME` 管理，默认 `16:00`；不要在策略或 service 中散落硬编码收盘后触发时间。

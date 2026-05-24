@@ -41,17 +41,23 @@ from typing import Optional
 from vnpy.trader.constant import Direction, Exchange
 from vnpy.trader.object import PositionData
 
-from vnpy_common.data_paths import data_path, ensure_vnpy_data_env
+from vnpy_common.data_paths import ensure_vnpy_data_env
+from vnpy_common.trade_calendar import (
+    StaleCalendarError,
+    ashare_calendar_path,
+    make_calendar,
+    normalize_calendar_path,
+)
 from vnpy_signal_strategy_plus.base import APP_NAME
 from vnpy_signal_strategy_plus.mysql_signal_strategy import MySQLSignalStrategyPlus
 from vnpy_signal_strategy_plus.replay_adapter import SignalJournalReplayAdapter
 from vnpy_signal_strategy_plus.utils import convert_code_to_vnpy_type
-from vnpy_ml_strategy.utils.trade_calendar import StaleCalendarError, make_calendar
 
 # 4/14 快照初始化逻辑用：从 instrument(`名元股份(003003.XSHE)`) 提取代码
 _INSTRUMENT_RE = re.compile(r"\((\d{6}\.[A-Z]+)\)")
 _JQ_TO_VNPY = {"XSHG": "SSE", "XSHE": "SZSE"}
-DEFAULT_CALENDAR_PROVIDER_URI = str(data_path("qlib_data_bin"))
+DEFAULT_CALENDAR_PATH = str(ashare_calendar_path())
+DEFAULT_CALENDAR_PROVIDER_URI = DEFAULT_CALENDAR_PATH
 
 # 测试配置文件路径：strategies/csv_replay_test_strategy.py
 #   .parent       = strategies/
@@ -125,10 +131,14 @@ class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
             replay_cfg.get("rebase_remark_to_today", False)
         )
         self._calendar_provider_uri: str = str(
-            _expand_path_setting(
-                replay_cfg.get("calendar_provider_uri")
-                or setting.get("calendar_provider_uri")
-                or DEFAULT_CALENDAR_PROVIDER_URI
+            normalize_calendar_path(
+                _expand_path_setting(
+                    replay_cfg.get("calendar_path")
+                    or setting.get("calendar_path")
+                    or replay_cfg.get("calendar_provider_uri")
+                    or setting.get("calendar_provider_uri")
+                    or DEFAULT_CALENDAR_PATH
+                )
             )
         )
         self._trade_calendar = None
@@ -353,9 +363,9 @@ class CsvReplayTestStrategy(MySQLSignalStrategyPlus):
         return gw
 
     def _get_trade_calendar(self):
-        """Return the replay trading calendar, preferring local qlib calendar file."""
+        """Return the replay trading calendar, preferring the shared runtime file."""
         if not hasattr(self, "_calendar_provider_uri"):
-            self._calendar_provider_uri = DEFAULT_CALENDAR_PROVIDER_URI
+            self._calendar_provider_uri = DEFAULT_CALENDAR_PATH
         if not hasattr(self, "_trade_calendar"):
             self._trade_calendar = None
         if self._trade_calendar is None:

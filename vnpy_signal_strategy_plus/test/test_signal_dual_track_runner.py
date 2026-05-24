@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 import run_signal_dual_track as runner
 
@@ -169,6 +169,35 @@ def test_sim_setting_prefers_stock_fund_snapshots(monkeypatch, tmp_path):
     assert setting["merged_parquet_fallback_roots"] == str(
         tmp_path / "snapshots" / "merged"
     )
+
+
+def test_latest_completed_trade_day_prefers_shared_calendar(monkeypatch, tmp_path):
+    monkeypatch.setenv("VNPY_DATA_ROOT", str(tmp_path))
+    qlib_calendar = tmp_path / "qlib_data_bin" / "calendars" / "day.txt"
+    qlib_calendar.parent.mkdir(parents=True)
+    qlib_calendar.write_text("2026-05-22\n", encoding="utf-8")
+    shared_calendar = tmp_path / "state" / "trade_calendars" / "ashare_day.txt"
+    shared_calendar.parent.mkdir(parents=True)
+    shared_calendar.write_text("2026-05-22\n2026-05-25\n", encoding="utf-8")
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls):
+            return cls(2026, 5, 25, 16, 0)
+
+    monkeypatch.setattr(runner, "datetime", FrozenDateTime)
+
+    assert runner._latest_completed_trade_day({}) == date(2026, 5, 25)
+
+
+def test_calendar_provider_uri_is_legacy_provider_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("VNPY_DATA_ROOT", str(tmp_path))
+
+    resolved = runner._resolve_calendar_path(
+        {"replay": {"calendar_provider_uri": str(tmp_path / "qlib_data_bin")}}
+    )
+
+    assert resolved == str(tmp_path / "qlib_data_bin" / "calendars" / "day.txt")
 
 
 def test_v1_alias_matches_single_mode():

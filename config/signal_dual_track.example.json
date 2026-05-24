@@ -4,6 +4,7 @@
     "strategy_class": "RedisLiveSimTestStrategy",
     "strategy_name": "harvester_micro_cap_1",
     "initial_capital": 1000000.0,
+    "calendar_path": "%VNPY_DATA_ROOT%/state/trade_calendars/ashare_day.txt",
 
     "redis": {
         "_doc": "Redis is used by the JoinQuant-to-MySQL bridge. The runner itself reads MySQL v2 trade_signal_events.",
@@ -24,7 +25,8 @@
         "_doc": "sim_replay replays historical MySQL v2 signal remarks through QMT_SIM/FakeQMT. live only polls current/live signals and is used by the v3 real-source leg.",
         "mode": "sim_replay",
         "consume_historical_remarks": true,
-        "idle_settle_seconds": 30
+        "idle_settle_seconds": 30,
+        "calendar_path": "%VNPY_DATA_ROOT%/state/trade_calendars/ashare_day.txt"
     },
 
     "mysql": {

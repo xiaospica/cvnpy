@@ -291,27 +291,34 @@ def _parse_day(value: object) -> date | None:
     return datetime.fromisoformat(text).date()
 
 
-def _resolve_calendar_provider_uri(setting: Dict[str, Any]) -> str:
-    """Resolve qlib calendar provider path for replay day decisions."""
-    from vnpy_signal_strategy_plus.strategies.csv_replay_test_strategy import (
-        DEFAULT_CALENDAR_PROVIDER_URI,
-    )
+def _resolve_calendar_path(setting: Dict[str, Any]) -> str | None:
+    """Resolve the shared calendar path for replay day decisions."""
+    from vnpy_common.trade_calendar import normalize_calendar_path
 
     replay_cfg = setting.get("replay", {}) or {}
-    return _expand_config_path(
-        replay_cfg.get("calendar_provider_uri")
+    raw = (
+        replay_cfg.get("calendar_path")
+        or setting.get("calendar_path")
+        or replay_cfg.get("calendar_provider_uri")
         or setting.get("calendar_provider_uri")
-        or DEFAULT_CALENDAR_PROVIDER_URI
     )
+    if raw in (None, ""):
+        return None
+    return str(normalize_calendar_path(_expand_config_path(raw)))
+
+
+def _resolve_calendar_provider_uri(setting: Dict[str, Any]) -> str | None:
+    """Backward-compatible alias for older tests and callers."""
+    return _resolve_calendar_path(setting)
 
 
 def _latest_completed_trade_day(setting: Dict[str, Any]) -> date | None:
-    """Return latest completed trade day using the local qlib calendar."""
-    from vnpy_ml_strategy.utils.trade_calendar import StaleCalendarError, make_calendar
+    """Return latest completed trade day using the shared A-share calendar."""
+    from vnpy_common.trade_calendar import StaleCalendarError, make_calendar
 
     now = datetime.now()
     today = now.date()
-    calendar = make_calendar(_resolve_calendar_provider_uri(setting))
+    calendar = make_calendar(_resolve_calendar_path(setting))
 
     if now.time() >= datetime_time(hour=15):
         try:

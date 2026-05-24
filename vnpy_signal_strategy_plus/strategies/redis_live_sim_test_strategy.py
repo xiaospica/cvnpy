@@ -13,8 +13,10 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
+from vnpy_common.trade_calendar import normalize_calendar_path
 from vnpy_signal_strategy_plus.strategies.csv_replay_test_strategy import (
     CsvReplayTestStrategy,
+    DEFAULT_CALENDAR_PATH,
     DEFAULT_CALENDAR_PROVIDER_URI,
     _expand_path_setting,
     _resolve_setting_path,
@@ -139,10 +141,15 @@ class RedisLiveSimTestStrategy(CsvReplayTestStrategy):
         )
         self._idle_settle_seconds = float(replay_cfg.get("idle_settle_seconds", 30))
         self._calendar_provider_uri = str(
-            _expand_path_setting(
-                replay_cfg.get("calendar_provider_uri")
-                or setting.get("calendar_provider_uri")
-                or DEFAULT_CALENDAR_PROVIDER_URI
+            normalize_calendar_path(
+                _expand_path_setting(
+                    replay_cfg.get("calendar_path")
+                    or setting.get("calendar_path")
+                    or replay_cfg.get("calendar_provider_uri")
+                    or setting.get("calendar_provider_uri")
+                    or DEFAULT_CALENDAR_PATH
+                    or DEFAULT_CALENDAR_PROVIDER_URI
+                )
             )
         )
         self._trade_calendar = None

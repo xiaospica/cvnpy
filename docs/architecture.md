@@ -86,7 +86,35 @@ flowchart LR
 
 这条规则解决的典型问题是：凌晨 `smoke_full_pipeline.py` 已把 provider 发布到 2026-05-15，但后续某次 headless/smoke 以 2026-05-13 为目标日再次运行 `ingest_today(20260513)`。旧实现只做全量重建和原子替换，没有比较“当前 provider/最新 snapshot 是否比目标日更新”，因此会把 5.15 provider 覆盖成 5.13。现在该行为默认会被 rollback guard 阻断。
 
-### 1.0.2 通用策略权益 Journal
+### 1.0.2 通用 A 股交易日历
+
+非 ML 策略、SignalStrategyPlus replay 和 QMT_SIM 日终结算只需要判断“某天是否为 A 股交易日”，不应该依赖 qlib provider 的发布进度。通用交易日历事实源固定为 `<VNPY_DATA_ROOT>/state/trade_calendars/ashare_day.txt`，由 `vnpy_common.trade_calendar` 读写。
+
+```mermaid
+flowchart LR
+    FETCH["DailyIngestPipeline<br/>Stage 1 FETCH"] --> SNAP["snapshots/merged +<br/>merged_stock_fund"]
+    FETCH --> CAL["state/trade_calendars/<br/>ashare_day.txt"]
+    SNAP --> SIM["QMT_SIM<br/>merged_parquet 行情源"]
+    CAL --> REPLAY["SignalStrategyPlus replay<br/>settle_through / is_trade_day"]
+    CAL --> JOURNAL["QMT_SIM replay settle<br/>strategy_equity_journal"]
+    DUMP["Stage 4 DUMP"] --> QLIB["qlib_data_bin/<br/>calendars/day.txt"]
+```
+
+读图要点：`ashare_day.txt` 跟随 fetch 快照推进；`qlib_data_bin/calendars/day.txt` 只跟随 full dump 推进。两者都可以来自同一天的 Tushare 事实，但发布边界不同，不能混作同一个运行时契约。
+
+| 入口 | 更新通用日历 | 更新 qlib calendar | 说明 |
+|---|---:|---:|---|
+| `fetch-only` | 是 | 否 | 只更新 merged/QMT_SIM 快照和通用交易日历 |
+| `skip-dump` | 是 | 否 | 更新 fetch/filter/by_stock，但不发布 qlib provider |
+| `full` | 是 | 是 | fetch 后更新通用日历，dump 成功后发布 qlib provider |
+
+关键不变量：
+
+- `run_signal_dual_track.py` 默认使用通用交易日历计算 `settle_through`；旧配置 `calendar_provider_uri` 仅作为兼容 fallback，会被规范化为 `calendars/day.txt` 文件。
+- `RedisLiveSimTestStrategy` / `CsvReplayTestStrategy` 默认读取通用交易日历；如果该文件不存在，才兼容回退到旧 qlib calendar，再无文件时才使用 weekday fallback。
+- 禁止为了非 ML 策略手工推进 `qlib_data_bin/calendars/day.txt`。这会让 qlib calendar 超前于 features/instruments，破坏 ML provider 的原子发布语义。
+
+### 1.0.3 通用策略权益 Journal
 
 `strategy_equity_journal.db` 是 vnpy 侧可重建监控曲线的事实源。它不是 ML 专属表，而是所有策略引擎共享的日终权益 journal。
 
