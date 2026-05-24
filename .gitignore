@@ -99,3 +99,4 @@ vnpy_signal_strategy_plus/test/redis_live_sim_setting.local.json
 vnpy_signal_strategy_plus/scripts/redis_bridge_setting.local.json
 artifacts
 .codex_smoke_logs
+analysis_outputs

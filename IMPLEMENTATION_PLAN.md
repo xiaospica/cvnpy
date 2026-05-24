@@ -140,3 +140,29 @@
 - `MySQLSignalStrategyPlus` 只消费 v2 signal journal，并按账户/网关/引擎/策略写 checkpoint。
 - QMT_SIM 重启后恢复订单/成交计数、上次结算日、当日买入跟踪，并能从历史 reference 恢复最大序号。
 - 核心单测通过：signal journal、QMT_SIM persistence。
+
+## TODO：共享信号源后续收口（2026-05-24）
+
+### 背景/问题
+
+- 本地和云端 runner 复用同一个 `trade_signal_events.stg=harvester_micro_cap_1` 时，需要各自独立记录消费进度，否则会出现互相抢 checkpoint、重复写入唯一键或一端消费后一端无法独立回放的问题。
+- 当前短期方案可用 `runner_id` 隔离运行实例，但仍需把这个隔离语义沉淀到 `strategy_signal_applications` 表结构中，避免长期把 runner 语义混入 `account_id`。
+- 真实 QMT 多机器同时消费同一信号源并发单属于后续规模化风险点，目前暂不实现，只记录为待办。
+
+### TODO 1：将 runner/consumer 维度纳入 signal checkpoint 表
+
+- 修改 `strategy_signal_applications` 表结构，新增 `runner_id` 或 `consumer_id` 字段，表示消费该信号的部署实例/runner。
+- 唯一约束从 `(account_id, gateway_name, engine, strategy_name, signal_event_id)` 调整为包含 runner/consumer 维度的组合键。
+- `MySQLSignalStrategyPlus`、`SignalJournalReplayAdapter`、cleanup 脚本和相关测试统一使用该字段过滤和写入 checkpoint。
+- 本工程当前不要求兼容旧表结构；实施时可以直接迁移/重建 `strategy_signal_applications`，但必须写清上线前数据处理步骤。
+
+### TODO 2：未来补充实盘 source 单写保护
+
+- 当多台机器可能同时对同一个真实 QMT 账户启用 `--allow-live-orders` 时，再增加单写保护。
+- 建议锁粒度为 `(source_stg, qmt_account)`，拿不到锁的 runner 只能观察或运行 shadow，不消费 source 信号、不向真实柜台发单。
+- 该项当前不进入实现范围，原因是现阶段实盘 runner 规模尚未达到多活发单需求。
+
+### 对 ML 策略的影响评估
+
+- ML 日更、预测、`qlib_data_bin`、`strategy_equity_journal.db` 与 mlearnweb 的权益同步不直接依赖 `strategy_signal_applications`，因此表结构改造对 ML 策略主链路无直接影响。
+- 需要关注的是文档、诊断脚本、测试或展示页里是否有直接统计 `strategy_signal_applications` 的 SQL；实施 TODO 1 时应同步更新这些查询。
