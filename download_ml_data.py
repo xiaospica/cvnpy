@@ -5,14 +5,15 @@ This is the data-only extraction of
 
 1. Load runtime env and Tushare token.
 2. Initialize ``TushareProEngine`` with the ``tushare_pro`` datafeed.
-3. Initialize ``MLEngine`` only far enough to read the bundle filter config.
-4. Inject filter specs into ``DailyIngestPipeline``.
-5. Run ``ingest_today(T)`` for one day or a rolling set of trading days, or
-   run the same stages without qlib dump via ``--skip-dump``.
+3. For ``skip-dump``/``full``, initialize ``MLEngine`` only far enough to read
+   the bundle filter config.
+4. Run the requested ingest mode for one day or a rolling set of trading days:
+   ``fetch-only``, ``skip-dump`` or ``full``.
 
 The script does not start webtrader/mlearnweb and does not run inference.
-Default full ingest still rewrites ``<VNPY_DATA_ROOT>/qlib_data_bin``. Use
-``--skip-dump`` for non-qlib strategies that only need parquet snapshots.
+Default ``--ingest-mode full`` still rewrites ``<VNPY_DATA_ROOT>/qlib_data_bin``.
+Use ``--ingest-mode fetch-only`` for non-qlib strategies that only need merged
+snapshots for QMT_SIM.
 """
 from __future__ import annotations
 
@@ -198,7 +199,7 @@ def _run_ingest_with_heartbeat(
     day: date,
     *,
     force: bool,
-    skip_dump: bool,
+    ingest_mode: str,
     heartbeat_s: float,
 ) -> dict[str, Any]:
     """Run one ingest in a worker thread and report progress by heartbeat."""
@@ -207,7 +208,9 @@ def _run_ingest_with_heartbeat(
 
     def _worker() -> None:
         try:
-            if skip_dump:
+            if ingest_mode == "fetch-only":
+                state["result"] = _run_ingest_fetch_only(pipeline, day_str, force=force)
+            elif ingest_mode == "skip-dump":
                 state["result"] = _run_ingest_without_dump(pipeline, day_str, force=force)
             else:
                 state["result"] = pipeline.ingest_today(day_str, force=force)
@@ -233,7 +236,48 @@ def _run_ingest_with_heartbeat(
         raise state["error"]
     result = state["result"]
     if not isinstance(result, dict):
-        raise RuntimeError(f"ingest_today({day_str}) returned non-dict result: {result!r}")
+        raise RuntimeError(f"ingest[{ingest_mode}]({day_str}) returned non-dict result: {result!r}")
+    return result
+
+
+def _run_ingest_fetch_only(pipeline: Any, trade_date: str, *, force: bool) -> dict[str, Any]:
+    """Run fetch only: merged snapshots plus QMT_SIM stock+fund snapshots."""
+    lock = getattr(pipeline, "_lock", None)
+    if lock is None:
+        return _run_ingest_fetch_only_locked(pipeline, trade_date, force=force)
+    with lock:
+        return _run_ingest_fetch_only_locked(pipeline, trade_date, force=force)
+
+
+def _run_ingest_fetch_only_locked(pipeline: Any, trade_date: str, *, force: bool) -> dict[str, Any]:
+    """Implementation for ``_run_ingest_fetch_only`` after lock acquisition."""
+    start = time.time()
+    if not pipeline._is_trade_date(trade_date):
+        return {
+            "trade_date": trade_date,
+            "skipped": True,
+            "duration_s": 0.0,
+            "stages_done": [],
+            "ingest_mode": "fetch-only",
+        }
+
+    pipeline._cleanup_old_snapshots()
+    merged_df = pipeline._stage_fetch(trade_date, force=force)
+    result = {
+        "trade_date": trade_date,
+        "merged_rows": int(len(merged_df)),
+        "filtered_today_rows": None,
+        "qlib_calendar_last_date": None,
+        "duration_s": time.time() - start,
+        "stages_done": ["fetch"],
+        "skipped": False,
+        "ingest_mode": "fetch-only",
+        "dump_skipped": True,
+    }
+
+    append_audit_log = getattr(pipeline, "_append_audit_log", None)
+    if callable(append_audit_log):
+        append_audit_log({**result, "status": "ok_fetch_only"})
     return result
 
 
@@ -275,6 +319,7 @@ def _run_ingest_without_dump_locked(pipeline: Any, trade_date: str, *, force: bo
         "duration_s": time.time() - start,
         "stages_done": stages_done,
         "skipped": False,
+        "ingest_mode": "skip-dump",
         "dump_skipped": True,
     }
 
@@ -292,7 +337,6 @@ def _init_engines(args: argparse.Namespace) -> tuple[Any, Any, Any]:
     from vnpy.event import EventEngine
     from vnpy.trader.engine import MainEngine
     from vnpy.trader.setting import SETTINGS
-    from vnpy_ml_strategy import APP_NAME as ML_APP, MLStrategyApp
     from vnpy_tushare_pro import TushareProApp
     from vnpy_tushare_pro.engine import APP_NAME as TUSHARE_APP
 
@@ -303,7 +347,10 @@ def _init_engines(args: argparse.Namespace) -> tuple[Any, Any, Any]:
     event_engine = EventEngine()
     main_engine = MainEngine(event_engine)
     main_engine.add_app(TushareProApp)
-    main_engine.add_app(MLStrategyApp)
+    if args.ingest_mode != "fetch-only":
+        from vnpy_ml_strategy import APP_NAME as ML_APP, MLStrategyApp
+
+        main_engine.add_app(MLStrategyApp)
 
     tushare_engine = main_engine.get_engine(TUSHARE_APP)
     tushare_engine.init_engine()
@@ -321,6 +368,10 @@ def _init_engines(args: argparse.Namespace) -> tuple[Any, Any, Any]:
         "TushareProEngine ready: "
         f"datafeed={type(ts_datafeed).__module__}.{type(ts_datafeed).__name__}"
     )
+
+    if args.ingest_mode == "fetch-only":
+        _log("fetch-only mode: skip ML engine and filter config injection")
+        return main_engine, ts_pipeline, downloader
 
     ml_engine = main_engine.get_engine(ML_APP)
     ml_engine.init_engine()
@@ -393,9 +444,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-s", type=float, default=10.0, help="ingest 心跳日志间隔秒数")
     parser.add_argument("--force", action="store_true", help="覆盖已存在的当日 merged/filter 快照")
     parser.add_argument(
-        "--skip-dump",
-        action="store_true",
-        help="只跑 fetch/filter/by_stock，跳过 qlib DumpDataAll",
+        "--ingest-mode",
+        choices=["fetch-only", "skip-dump", "full"],
+        default=os.getenv("ML_DOWNLOAD_INGEST_MODE", "full").strip().lower().replace("_", "-"),
+        help=(
+            "fetch-only=只跑 fetch 并生成 merged/QMT_SIM 快照；"
+            "skip-dump=跑 fetch/filter/by_stock 但跳过 qlib dump；"
+            "full=完整 ingest_today"
+        ),
     )
     parser.add_argument("--dry-run", action="store_true", help="只验证环境、filter 注入和日期解析，不执行下载")
     parser.add_argument(
@@ -430,7 +486,10 @@ def main() -> int:
             _log(f"target_date={live_date} (from --date)")
         else:
             _log(f"target_date={live_date} (auto resolved, ready_hour={args.ready_hour})")
-        _log(f"ingest_days={[d.isoformat() for d in days]} force={args.force} skip_dump={args.skip_dump}")
+        _log(
+            f"ingest_days={[d.isoformat() for d in days]} "
+            f"force={args.force} ingest_mode={args.ingest_mode}"
+        )
         if args.dry_run:
             _log("dry-run enabled; skip ingest_today")
             return 0
@@ -443,7 +502,7 @@ def main() -> int:
                 pipeline,
                 day,
                 force=args.force,
-                skip_dump=args.skip_dump,
+                ingest_mode=args.ingest_mode,
                 heartbeat_s=args.heartbeat_s,
             )
             elapsed = time.monotonic() - started

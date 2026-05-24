@@ -156,6 +156,7 @@ RUNNER_ID_INVALID_CHARS = re.compile(r"[^A-Za-z0-9_]+")
 DEFAULT_MYSQL_CONNECT_TIMEOUT = 10
 DEFAULT_MYSQL_READ_TIMEOUT = 10
 DEFAULT_MYSQL_WRITE_TIMEOUT = 10
+DAILY_DATA_INGEST_MODES = {"fetch-only", "skip-dump", "full"}
 
 
 def _default_setting_path() -> Path:
@@ -192,6 +193,84 @@ def _load_json(path: Path) -> Dict[str, Any]:
             f"{exc.msg} at line {exc.lineno}, column {exc.colno}.{hint}\n"
             f"{context}"
         ) from exc
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Coerce config-style booleans without treating arbitrary strings as true."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return default
+
+
+def _load_tushare_token() -> str:
+    """Resolve the Tushare token for optional daily data ingest."""
+    token = (
+        os.getenv("VNPY_DATAFEED_PASSWORD")
+        or os.getenv("TUSHARE_TOKEN")
+        or os.getenv("TUSHARE_PRO_TOKEN")
+    )
+    if token:
+        return token.strip()
+
+    api_json = _HERE / "api.json"
+    if not api_json.exists():
+        raise FileNotFoundError(
+            "daily data ingest enabled, but no Tushare token was found in "
+            "VNPY_DATAFEED_PASSWORD/TUSHARE_TOKEN/TUSHARE_PRO_TOKEN or api.json"
+        )
+    data = json.loads(api_json.read_text(encoding="utf-8"))
+    token = data.get("token") or data.get("password") or data.get("tushare_token")
+    if not token:
+        raise RuntimeError(f"api.json does not contain a Tushare token: keys={list(data.keys())}")
+    return str(token).strip()
+
+
+def _resolve_daily_data_ingest_config(
+    args: argparse.Namespace,
+    setting: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Resolve optional Tushare scheduled download config for this runner."""
+    raw_cfg = setting.get("daily_data_ingest", {}) or {}
+    enabled = bool(args.enable_daily_data_ingest or _coerce_bool(raw_cfg.get("enable"), False))
+    mode = str(args.daily_data_mode or raw_cfg.get("mode") or "fetch-only").strip().lower().replace("_", "-")
+    if mode not in DAILY_DATA_INGEST_MODES:
+        raise ValueError(
+            f"daily_data_ingest.mode must be one of {sorted(DAILY_DATA_INGEST_MODES)}, got {mode!r}"
+        )
+    time_str = str(args.daily_data_time or raw_cfg.get("time") or "20:00").strip() or "20:00"
+    return {
+        "enable": enabled,
+        "mode": mode,
+        "env_mode": mode.replace("-", "_"),
+        "time": time_str,
+    }
+
+
+def _configure_daily_data_ingest(config: Dict[str, Any]) -> None:
+    """Prepare vn.py SETTINGS/env before TushareProApp constructs its datafeed."""
+    if not config.get("enable"):
+        return
+
+    from vnpy.trader.setting import SETTINGS
+
+    token = _load_tushare_token()
+    os.environ["TUSHARE_TOKEN"] = token
+    os.environ.setdefault("VNPY_DATAFEED_USERNAME", "tushare")
+    os.environ["VNPY_DATAFEED_PASSWORD"] = token
+    os.environ["ML_DAILY_INGEST_ENABLED"] = "1"
+    os.environ["ML_DAILY_INGEST_MODE"] = str(config["env_mode"])
+    os.environ["ML_DAILY_INGEST_TIME"] = str(config["time"])
+
+    SETTINGS["datafeed.name"] = "tushare_pro"
+    SETTINGS["datafeed.username"] = os.environ["VNPY_DATAFEED_USERNAME"]
+    SETTINGS["datafeed.password"] = token
 
 
 def _parse_day(value: object) -> date | None:
@@ -1134,6 +1213,7 @@ def _start_vnpy(
     *,
     start_webtrader: bool = True,
     final_settle_day: date | None = None,
+    daily_data_ingest: Optional[Dict[str, Any]] = None,
 ) -> tuple[Any, Optional[subprocess.Popen[str]], List[str]]:
     """Start MainEngine, gateways, SignalStrategyPlus and strategy instances."""
     from vnpy.event import EventEngine
@@ -1148,6 +1228,21 @@ def _start_vnpy(
         cls = _load_gateway_class(gw["kind"])
         print(f"[boot] add_gateway kind={gw['kind']} name={gw['name']} class={cls.__name__}")
         main_engine.add_gateway(cls, gateway_name=gw["name"])
+
+    if daily_data_ingest and daily_data_ingest.get("enable"):
+        _configure_daily_data_ingest(daily_data_ingest)
+        from vnpy_tushare_pro import TushareProApp
+        from vnpy_tushare_pro.engine import APP_NAME as TUSHARE_APP_NAME
+
+        main_engine.add_app(TushareProApp)
+        tushare_engine = main_engine.get_engine(TUSHARE_APP_NAME)
+        if tushare_engine is None:
+            raise RuntimeError("TusharePro engine not found after enabling daily data ingest")
+        tushare_engine.init_engine()
+        print(
+            "[boot] daily data ingest enabled "
+            f"mode={daily_data_ingest['mode']} time={daily_data_ingest['time']}"
+        )
 
     main_engine.add_app(SignalStrategyPlusApp)
     if start_webtrader:
@@ -1309,6 +1404,25 @@ def main() -> None:
         help="do not start WebTrader RPC/HTTP service",
     )
     parser.add_argument(
+        "--enable-daily-data-ingest",
+        action="store_true",
+        help="enable the Tushare scheduled daily download task in this runner",
+    )
+    parser.add_argument(
+        "--daily-data-time",
+        default="",
+        help="daily data ingest wall-clock time, default 20:00",
+    )
+    parser.add_argument(
+        "--daily-data-mode",
+        choices=["fetch-only", "skip-dump", "full"],
+        default="",
+        help=(
+            "fetch-only updates merged/QMT_SIM snapshots only; skip-dump also runs "
+            "filter/by_stock; full keeps the qlib dump"
+        ),
+    )
+    parser.add_argument(
         "--no-mirror-existing-unprocessed",
         action="store_true",
         help="do not mirror existing source v2 events; only mirror newly inserted events",
@@ -1353,6 +1467,7 @@ def main() -> None:
             f"{config_dir() / DEFAULT_SETTING_FILENAME}."
         )
     setting = _load_json(setting_path)
+    daily_data_ingest = _resolve_daily_data_ingest_config(args, setting)
     final_settle_day = _parse_day(args.settle_through)
     if args.settle_through:
         print(f"[config] replay.settle_through={final_settle_day} (cli)")
@@ -1406,6 +1521,11 @@ def main() -> None:
     print(f"GATEWAYS:   {gateway_names}")
     print(f"STRATEGIES: {strategy_names}")
     print(f"strategy_equity_journal.db: {journal_db}")
+    if daily_data_ingest["enable"]:
+        print(
+            "daily_data_ingest: "
+            f"enabled mode={daily_data_ingest['mode']} time={daily_data_ingest['time']}"
+        )
     if cfg["mirror"]:
         print(f"MySQL mirror: {source_stg!r} -> {shadow_stg!r}")
     cleanup_scope = "none" if args.no_cleanup else args.cleanup_scope
@@ -1469,6 +1589,7 @@ def main() -> None:
             strategies,
             start_webtrader=not args.no_webtrader,
             final_settle_day=final_settle_day,
+            daily_data_ingest=daily_data_ingest,
         )
         if not started:
             raise RuntimeError("没有策略成功启动")

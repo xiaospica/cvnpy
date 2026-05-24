@@ -3,6 +3,7 @@ from collections.abc import Callable
 from copy import deepcopy
 import re
 from pathlib import Path
+import time
 
 import pandas as pd
 from pandas import DataFrame
@@ -76,6 +77,9 @@ INTERVAL_ADJUSTMENT_MAP: dict[Interval, timedelta] = {
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 DATA_DIR = Path.cwd() / 'stock_data'
+TRUE_ENV_VALUES = {"1", "true", "yes", "y", "on"}
+DAILY_INGEST_MODES = {"full", "skip_dump", "fetch_only"}
+
 
 def to_ts_symbol(symbol: str, exchange: Exchange) -> str | None:
     """将交易所代码转换为tushare代码"""
@@ -155,11 +159,16 @@ class TushareDatafeedPro(BaseDatafeed):
 
         self.scheduler = DailyTimeTaskScheduler()
         if self.daily_ingest_pipeline is not None:
+            daily_ingest_time = os.getenv("ML_DAILY_INGEST_TIME", "20:00").strip() or "20:00"
             # 新: 20:00 拉数 + 过滤 + qlib bin 增量 dump
             self.scheduler.register_daily_job(
                 name="daily_ml_ingest",
-                time_str="20:00",
+                time_str=daily_ingest_time,
                 job_func=self._daily_ml_ingest,
+            )
+            logger.info(
+                "[daily_ingest] scheduler enabled "
+                f"time={daily_ingest_time} mode={self._daily_ingest_mode()}"
             )
         else:
             # 旧: 19:00 只 update_all_stock_history (向后兼容)
@@ -253,16 +262,126 @@ class TushareDatafeedPro(BaseDatafeed):
             logger.warning(f"[daily_ingest] 构造 DailyIngestPipeline 失败: {exc}")
             return None
 
+    def _daily_ingest_mode(self) -> str:
+        """Resolve the scheduled ingest mode from environment variables."""
+        mode = os.getenv("ML_DAILY_INGEST_MODE", "full").strip().lower().replace("-", "_")
+        if mode == "no_dump":
+            mode = "skip_dump"
+        skip_dump = os.getenv("ML_DAILY_INGEST_SKIP_DUMP", "").strip().lower()
+        if mode == "full" and skip_dump in TRUE_ENV_VALUES:
+            mode = "skip_dump"
+        if mode not in DAILY_INGEST_MODES:
+            logger.warning(f"[daily_ingest] unknown ML_DAILY_INGEST_MODE={mode!r}, fallback to full")
+            return "full"
+        return mode
+
+    def _run_daily_ingest_fetch_only(self, trade_date: str, *, force: bool = False) -> dict[str, object]:
+        """Run DailyIngestPipeline stage 1 only for non-qlib consumers."""
+        pipeline = self.daily_ingest_pipeline
+        if pipeline is None:
+            return {"trade_date": trade_date, "skipped": True, "stages_done": []}
+        with pipeline._lock:
+            start = time.time()
+            if not pipeline._is_trade_date(trade_date):
+                return {
+                    "trade_date": trade_date,
+                    "skipped": True,
+                    "duration_s": 0.0,
+                    "stages_done": [],
+                    "ingest_mode": "fetch_only",
+                }
+
+            pipeline._cleanup_old_snapshots()
+            merged_df = pipeline._stage_fetch(trade_date, force=force)
+            result: dict[str, object] = {
+                "trade_date": trade_date,
+                "merged_rows": int(len(merged_df)),
+                "filtered_today_rows": None,
+                "qlib_calendar_last_date": None,
+                "duration_s": time.time() - start,
+                "stages_done": ["fetch"],
+                "skipped": False,
+                "ingest_mode": "fetch_only",
+                "dump_skipped": True,
+            }
+            append_audit_log = getattr(pipeline, "_append_audit_log", None)
+            if callable(append_audit_log):
+                append_audit_log({**result, "status": "ok_fetch_only"})
+            return result
+
+    def _run_daily_ingest_skip_dump(self, trade_date: str, *, force: bool = False) -> dict[str, object]:
+        """Run fetch/filter/by_stock but leave qlib_data_bin untouched."""
+        pipeline = self.daily_ingest_pipeline
+        if pipeline is None:
+            return {"trade_date": trade_date, "skipped": True, "stages_done": []}
+        with pipeline._lock:
+            start = time.time()
+            stages_done: list[str] = []
+            if not pipeline._is_trade_date(trade_date):
+                return {
+                    "trade_date": trade_date,
+                    "skipped": True,
+                    "duration_s": 0.0,
+                    "stages_done": [],
+                    "ingest_mode": "skip_dump",
+                }
+
+            pipeline._cleanup_old_snapshots()
+            merged_df = pipeline._stage_fetch(trade_date, force=force)
+            stages_done.append("fetch")
+            filtered_today_rows = pipeline._stage_filter(merged_df, trade_date, force=force)
+            stages_done.append("filter")
+            pipeline._stage_by_stock(merged_df, trade_date)
+            stages_done.append("by_stock")
+
+            result = {
+                "trade_date": trade_date,
+                "merged_rows": int(len(merged_df)),
+                "filtered_today_rows": filtered_today_rows,
+                "qlib_calendar_last_date": None,
+                "duration_s": time.time() - start,
+                "stages_done": stages_done,
+                "skipped": False,
+                "ingest_mode": "skip_dump",
+                "dump_skipped": True,
+            }
+            emit_event = getattr(pipeline, "_emit_event", None)
+            append_audit_log = getattr(pipeline, "_append_audit_log", None)
+            if callable(emit_event):
+                emit_event("EVENT_DAILY_INGEST_OK", result)
+            if callable(append_audit_log):
+                append_audit_log({**result, "status": "ok_skip_dump"})
+            return result
+
     def _daily_ml_ingest(self) -> None:
         """Phase 4 — 每日 20:00 ML 数据管道 cron 入口."""
         if self.daily_ingest_pipeline is None:
             logger.warning("[daily_ingest] pipeline 未配置, cron no-op")
             return
         run_date = datetime.now(CHINA_TZ).strftime("%Y%m%d")
+        mode = self._daily_ingest_mode()
         try:
-            result = self.daily_ingest_pipeline.ingest_today(run_date)
+            if mode == "fetch_only":
+                result = self._run_daily_ingest_fetch_only(run_date)
+            elif mode == "skip_dump":
+                result = self._run_daily_ingest_skip_dump(run_date)
+            else:
+                result = self.daily_ingest_pipeline.ingest_today(run_date)
             logger.info(f"[daily_ingest] cron done: {result}")
         except Exception as exc:
+            if mode != "full":
+                payload = {
+                    "trade_date": run_date,
+                    "stage": mode,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "ingest_mode": mode,
+                }
+                emit_event = getattr(self.daily_ingest_pipeline, "_emit_event", None)
+                append_audit_log = getattr(self.daily_ingest_pipeline, "_append_audit_log", None)
+                if callable(emit_event):
+                    emit_event("EVENT_DAILY_INGEST_FAILED", payload)
+                if callable(append_audit_log):
+                    append_audit_log({**payload, "status": "failed"})
             logger.exception(f"[daily_ingest] cron failed: {exc}")
 
     def _post_close_update(self) -> None:
