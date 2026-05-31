@@ -8,18 +8,22 @@ The legacy MySQL signal table is intentionally not written by this process.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
+import os
 import signal as signal_mod
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
 import redis
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import sessionmaker
 
 from vnpy_signal_strategy_plus.signal_journal import (
@@ -54,6 +58,10 @@ class MySQLCfg:
     user: str
     password: str
     db: str
+    connect_timeout: int = 10
+    read_timeout: int = 30
+    write_timeout: int = 30
+    lock_wait_timeout: int = 10
 
 
 @dataclass
@@ -69,30 +77,87 @@ class BridgeConfig:
     subscriptions: list[Subscription]
     log_dir: str = "logs/redis_bridge"
     log_level: str = "INFO"
+    message_timeout_s: float = 30.0
 
     @classmethod
     def from_file(cls, path: Path) -> "BridgeConfig":
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         log = data.get("log", {}) or {}
+        mysql_data = dict(data["mysql"])
+        mysql_data["connect_timeout"] = _positive_int(
+            mysql_data.get("connect_timeout"), 10
+        )
+        mysql_data["read_timeout"] = _positive_int(mysql_data.get("read_timeout"), 30)
+        mysql_data["write_timeout"] = _positive_int(
+            mysql_data.get("write_timeout"), 30
+        )
+        mysql_data["lock_wait_timeout"] = _positive_int(
+            mysql_data.get("lock_wait_timeout"), 10
+        )
         return cls(
             redis=RedisCfg(**data["redis"]),
-            mysql=MySQLCfg(**data["mysql"]),
+            mysql=MySQLCfg(**mysql_data),
             subscriptions=[Subscription(**s) for s in data["subscriptions"]],
             log_dir=log.get("dir", "logs/redis_bridge"),
             log_level=log.get("level", "INFO"),
+            message_timeout_s=_positive_float(data.get("message_timeout_s"), 30.0),
         )
+
+
+def _positive_int(value: object, default: int) -> int:
+    """Return a positive integer config value, falling back on invalid input."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _positive_float(value: object, default: float) -> float:
+    """Return a positive float config value, falling back on invalid input."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 class MySQLWriter:
     """Short-transaction writer for the v2 signal journal."""
 
     def __init__(self, cfg: MySQLCfg):
-        url = (
-            f"mysql+pymysql://{cfg.user}:{cfg.password}"
-            f"@{cfg.host}:{cfg.port}/{cfg.db}"
+        url = URL.create(
+            "mysql+pymysql",
+            username=cfg.user,
+            password=cfg.password,
+            host=cfg.host,
+            port=int(cfg.port),
+            database=cfg.db,
         )
-        self.engine = create_engine(url, pool_pre_ping=True, pool_recycle=3600)
+        self.engine = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            connect_args={
+                "connect_timeout": int(cfg.connect_timeout),
+                "read_timeout": int(cfg.read_timeout),
+                "write_timeout": int(cfg.write_timeout),
+            },
+        )
+        lock_wait_timeout = int(cfg.lock_wait_timeout)
+
+        @event.listens_for(self.engine, "connect")
+        def _set_session_timeouts(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute(
+                    f"SET SESSION innodb_lock_wait_timeout={lock_wait_timeout}"
+                )
+                cursor.execute(f"SET SESSION lock_wait_timeout={lock_wait_timeout}")
+            finally:
+                cursor.close()
+
         self.Session = sessionmaker(bind=self.engine)
         SignalJournalBase.metadata.create_all(self.engine)
 
@@ -151,6 +216,8 @@ class StreamConsumer(threading.Thread):
         on_message: Callable[[Subscription, dict, str], bool],
         logger: logging.Logger,
         stop_event: threading.Event,
+        message_timeout_s: float,
+        fatal_exit: Callable[[int], None],
     ):
         super().__init__(name=f"consumer-{sub.stream_key}", daemon=True)
         self.sub = sub
@@ -159,6 +226,12 @@ class StreamConsumer(threading.Thread):
         self.on_message = on_message
         self.logger = logger
         self.stop_event = stop_event
+        self.message_timeout_s = message_timeout_s
+        self.fatal_exit = fatal_exit
+        self._handler_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"handler-{sub.stream_key}",
+        )
 
     def _ensure_group(self) -> None:
         """Idempotently create the consumer group."""
@@ -255,13 +328,7 @@ class StreamConsumer(threading.Thread):
                     self.logger.info(
                         f"[{self.sub.stream_key}] recv id={msg_id_s} payload={payload}"
                     )
-                    try:
-                        ok = self.on_message(self.sub, payload, msg_id_s)
-                    except Exception as exc:
-                        self.logger.exception(
-                            f"[{self.sub.stream_key}] handler error id={msg_id_s} {exc}"
-                        )
-                        ok = False
+                    ok = self._call_on_message(payload, msg_id_s)
 
                     if ok:
                         try:
@@ -279,7 +346,43 @@ class StreamConsumer(threading.Thread):
                             f"[{self.sub.stream_key}] not ack id={msg_id_s}; leave in PEL"
                         )
 
+        self._handler_executor.shutdown(wait=False, cancel_futures=True)
         self.logger.info(f"[{self.sub.stream_key}] consumer stopped")
+
+    def _call_on_message(self, payload: dict, redis_id: str) -> bool:
+        """Run one message handler with a fail-fast timeout guard."""
+        started = time.perf_counter()
+        future = self._handler_executor.submit(
+            self.on_message,
+            self.sub,
+            payload,
+            redis_id,
+        )
+        try:
+            ok = future.result(timeout=self.message_timeout_s)
+        except concurrent.futures.TimeoutError:
+            elapsed = time.perf_counter() - started
+            self.logger.critical(
+                f"[{self.sub.stream_key}] handler timeout id={redis_id} "
+                f"elapsed={elapsed:.3f}s limit={self.message_timeout_s:.3f}s; "
+                "fatal exit for supervisor restart"
+            )
+            self.fatal_exit(2)
+            return False
+        except Exception as exc:
+            elapsed = time.perf_counter() - started
+            self.logger.exception(
+                f"[{self.sub.stream_key}] handler error id={redis_id} "
+                f"elapsed={elapsed:.3f}s {exc}"
+            )
+            return False
+
+        elapsed = time.perf_counter() - started
+        self.logger.info(
+            f"[{self.sub.stream_key}] handled id={redis_id} "
+            f"ok={bool(ok)} elapsed={elapsed:.3f}s"
+        )
+        return bool(ok)
 
 
 class BridgeProcess:
@@ -365,6 +468,8 @@ class BridgeProcess:
                 on_message=self._on_message,
                 logger=self.logger,
                 stop_event=self.stop_event,
+                message_timeout_s=self.cfg.message_timeout_s,
+                fatal_exit=self._fatal_exit,
             )
             t.start()
             self.threads.append(t)
@@ -382,7 +487,8 @@ class BridgeProcess:
         self.logger.info("[bridge] shutdown complete")
 
     def _install_signal_handlers(self) -> None:
-        def _handler(_signum, _frame):
+        def _handler(signum, _frame):
+            self.logger.info(f"[bridge] received signal {signum}")
             self.stop()
 
         for sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
@@ -398,6 +504,11 @@ class BridgeProcess:
         if not self.stop_event.is_set():
             self.logger.info("[bridge] stopping...")
             self.stop_event.set()
+
+    def _fatal_exit(self, code: int) -> None:
+        self.stop_event.set()
+        logging.shutdown()
+        os._exit(code)
 
 
 def main() -> None:

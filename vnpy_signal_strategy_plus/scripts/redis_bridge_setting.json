@@ -15,7 +15,11 @@
         "port": 3306,
         "user": "root",
         "password": "REPLACE_ME",
-        "db": "mysql"
+        "db": "mysql",
+        "connect_timeout": 10,
+        "read_timeout": 30,
+        "write_timeout": 30,
+        "lock_wait_timeout": 10
     },
     "subscriptions": [
         {
@@ -26,5 +30,6 @@
     "log": {
         "dir": "logs/redis_bridge",
         "level": "INFO"
-    }
+    },
+    "message_timeout_s": 30
 }
